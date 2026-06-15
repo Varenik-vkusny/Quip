@@ -840,3 +840,40 @@ RU-first программатик-страницы); (2) **переезд апе
 - Завести Google Search Console + **Яндекс.Вебмастер** + **Яндекс.Метрика (Вебвизор)**, проставить
   токены верификации в env, отправить sitemap, «переезд сайта» в Вебмастере.
 - Следующие фазы: i18n-рефактор лендинга на `/ru` (hreflang-пары), волны P1/P2 use-case, `/blog/*`.
+
+---
+
+## 2026-06-15 (сессия 2, продолжение) — переезд на `quip.ink` ЗАВЕРШЁН + Метрика + legal
+
+Доделали то, что в первой записи было «открытым/ручным». Всё проверено по боевым URL и через Vercel MCP.
+
+**Переезд домена (DONE, live):** апекс `quip.ink` переброшен со старого проекта `quip`
+(Shorts-Automatizator) на `quip-app` → теперь `quip.ink` отдаёт приложение. `app.quip.ink` и
+`www.quip.ink` → **308 → `quip.ink`**. `NEXT_PUBLIC_SITE_URL=https://quip.ink`. Проверено:
+`quip.ink/` = приложение, `quip.ink/sitemap.xml` = 8 use-case, canonical = quip.ink.
+Остаточная чистка (не критично): в старом проекте `quip` ещё висят записи `quip.ink`/`www`.
+
+**Верификация поисковиков (DONE):** Яндекс — DNS-TXT `yandex-verification: 4232fdc5dc030e61`
+(+ файл `public/yandex_4232fdc5dc030e61.html` + мета-тег через `siteConfig.yandexVerification`).
+Google — DNS-TXT `google-site-verification=…` (в Cloudflare). Env-хуки:
+`NEXT_PUBLIC_YANDEX_VERIFICATION` / `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION`.
+
+**Яндекс.Метрика (DONE, live):** счётчик `109870225` + Вебвизор. Код —
+`components/analytics/YandexMetrika.tsx` (через `next/script` afterInteractive, не блокирует LCP;
++ noscript-пиксель), смонтирован в `layout.tsx` рядом с Vercel Analytics. ID env-override
+`NEXT_PUBLIC_YANDEX_METRIKA_ID` (дефолт 109870225). Vercel Analytics для Яндекса не годится —
+поэтому Метрика обязательна (поведенческие факторы).
+
+**Legal-страницы (DONE):** `/privacy` и `/terms` переписаны с заглушек на реальные документы под
+живой продукт с оплатой (`components/marketing/LegalDoc.tsx` + данные на страницах): субпроцессоры
+(Supabase/R2/Modal/Deepgram/Gemini/Polar/Vercel/Метрика), cookies/Вебвизор, владение контентом,
+кредит-модель и оплата (Polar, без хардкода цен — ссылка на /pricing), отмена/возвраты по письму,
+as-is/ограничение ответственности. Обе `robots: noindex`. ⚠️ Не замена юристу (особенно Governing law).
+
+**PR-процесс:** прямой push в `main` блокируется гардрейлом (прод-автодеплой) — всё шло через ветки
++ PR, фаундер мёрджил. PR #1 (SEO+верификация), #2 (Метрика), #3 (legal).
+
+**⚠️ Следующее (по `docs/SEO_STRATEGY.md`):** дождаться индексации 1-й волны use-case в Вебмастере
+(~1–3 нед.), затем 2-я волна `/use-case` (`ai-video-clipper`, `opusclip-alternative`,
+`tiktok-from-long-video`, `vk-clips-from-video`, `vertical-video-maker`…) + контент-хаб `/blog/*`.
+Волнами — не разом (риск «малополезных»/doorway в Яндексе).
