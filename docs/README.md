@@ -15,6 +15,10 @@
 - **Frontend:** Vercel project **`quip-app`** — **auto-deploys on every push to `main`**.
   (The old note "apps/web isn't deployed / the `quip` Vercel project is the landing repo" is
   **OUTDATED**. `quip` = old landing; `quip-app` = the real app.)
+- **Public domain = `quip.ink`** (migrated 2026-06-15 from the old landing onto `quip-app`).
+  `app.quip.ink` and `www.quip.ink` → **301/308 → `quip.ink`**. `NEXT_PUBLIC_SITE_URL=https://quip.ink`
+  (canonical also defaults to it in `lib/site.ts`). The old `quip` landing project still has stray
+  `quip.ink`/`www` domain records to clean up (harmless — live apex serves the app).
 - **Worker:** Modal app **`quip-worker`** — `https://akybaevtimur7--quip-worker-web.modal.run`
   (functions `web` / `run_job` / `upload_job` / `render_job`; `/healthz` → 200). Redeploy =
   `modal deploy deploy/modal/worker.py` (on Windows set `PYTHONIOENCODING=utf-8` first).
@@ -34,6 +38,13 @@
   fall back to source. (Editor video used to load the full 50–160 MB source → slow.)
 - **Vercel Analytics** is wired (`<Analytics/>`), invisible. ⚠️ Must be **enabled once** in the Vercel
   project dashboard (Analytics tab) for data to flow.
+- **SEO is live** (2026-06-15). Programmatic Russian intent pages `/use-case/*` (8 pages, data in
+  `apps/web/lib/useCases.ts`, route `app/(marketing)/use-case/[slug]`), `sitemap.ts` includes them,
+  FAQPage/BreadcrumbList JSON-LD, hreflang infra. **Yandex.Metrica** (counter `109870225`, Webvisor —
+  `components/analytics/YandexMetrika.tsx`) + verification for **Yandex.Webmaster** & **Google Search
+  Console** (DNS-TXT + meta + file). Full strategy/runbook → **`docs/SEO_STRATEGY.md`**. The Russian
+  market is **Yandex ≈73% / Google ≈27%** — Yandex is the primary target. (Legal pages `/privacy`,
+  `/terms` rewritten to real docs; both `noindex`.)
 - **Pipeline needs audio:** a video with no audio track fails early with a clear message (Quip cuts on speech).
 
 ### Shipped (this is "all of it" up to 2026-06-15)
@@ -129,7 +140,8 @@ Secrets: worker reads Modal secrets `quip-worker` (Deepgram/Gemini/Supabase/R2) 
 **🟢 Living / authoritative** (trust these):
 `docs/README.md` (this) · `CLAUDE.md` (rules) · `DESIGN.md` · `docs/BACKEND_AUDIT.md` ·
 `docs/BENCHMARKS.md` · `docs/REFRAME_FPS_GRID_INVARIANT.md` · `docs/EVAL.md` · `apps/web/AGENTS.md` ·
-`apps/web/PERF.md` · `docs/ADMIN_PANEL_RESEARCH.md` · `docs/NIGHT_AUDIT_REPORT_2026-06-15.md`.
+`apps/web/PERF.md` · `docs/ADMIN_PANEL_RESEARCH.md` · `docs/NIGHT_AUDIT_REPORT_2026-06-15.md` ·
+`docs/SEO_STRATEGY.md` (SEO + domain migration; semantic core + 6-layer plan + Yandex/GSC checklist).
 
 **🟡 Useful but partly stale** (read with the banner caveat at their top):
 `docs/HANDOFF.md` (run mechanics ✓, deploy/billing ✗) · `apps/web/DEPLOY.md` (env table ✓, "create
