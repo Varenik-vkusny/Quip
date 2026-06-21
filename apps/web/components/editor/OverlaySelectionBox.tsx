@@ -2,6 +2,10 @@
 
 import { useRef } from "react";
 import type { OverlayRect } from "@/lib/overlayBox";
+import { safeBoxPx, type SafeInsets } from "@/lib/safeAreas";
+import { computeSnap, SNAP_THRESHOLD_PX } from "@/lib/snapEngine";
+import { buildTargets } from "@/lib/snapTargets";
+import type { SnapGuidesHandle } from "./SnapGuides";
 
 // ── OverlaySelectionBox — CapCut-style on-video selection box for hook / captions ──
 // Grab the box ANYWHERE to move it FREELY (X + Y, into a corner). Grab a CORNER handle to
@@ -45,6 +49,14 @@ export interface OverlaySelectionBoxProps {
   onWidthCommit: (widthFrac: number) => void;
   /** Optional: a plain tap (no drag) on the body — e.g. open inline text edit. */
   onTap?: () => void;
+  /** The OTHER element's render-box-fraction rect, for element-to-element snapping (or null). */
+  otherRect?: OverlayRect | null;
+  /** Active platform safe-area insets (fractions 0..1), or null when no platform picked. */
+  safeInsets?: SafeInsets | null;
+  /** Whether snapping is active. Hold Alt during a drag to suspend it. Default true. */
+  snapEnabled?: boolean;
+  /** Imperative handle to the alignment-guide overlay (drawn during snap). */
+  guidesRef?: React.RefObject<SnapGuidesHandle | null>;
 }
 
 // Pixels of drag distance that map to one ASS font-size unit when resizing.
@@ -76,6 +88,10 @@ export function OverlaySelectionBox({
   onResizeCommit,
   onWidthCommit,
   onTap,
+  otherRect,
+  safeInsets,
+  snapEnabled = true,
+  guidesRef,
 }: OverlaySelectionBoxProps) {
   const boxRef = useRef<HTMLDivElement>(null);
   // MOVE: pointer start + the box's base offset (px in render box) so it tracks the cursor 1:1.
@@ -92,6 +108,10 @@ export function OverlaySelectionBox({
   const widthRef = useRef<{ startX: number; centerX: number; baseHalf: number; side: 1 | -1 } | null>(
     null,
   );
+  // True while the LATEST move latched the box CENTER onto the canvas horizontal-center line.
+  // Used at commit to write an EXACT pos_x = 0.5 instead of the per-frame bbox center (the bbox
+  // is asymmetric while a word is highlighted → its center ≠ the text anchor → off-center text).
+  const snapXCenterRef = useRef(false);
 
   // ── MOVE (body) → free X/Y ──
   const onBodyDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -106,6 +126,7 @@ export function OverlaySelectionBox({
       baseTop: nr.top - box.top,
       moved: false,
     };
+    snapXCenterRef.current = false;
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onBodyMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -120,15 +141,50 @@ export function OverlaySelectionBox({
     const nr = node.getBoundingClientRect();
     const left = Math.min(box.width - nr.width, Math.max(0, m.baseLeft + (e.clientX - m.startX)));
     const top = Math.min(box.height - nr.height, Math.max(0, m.baseTop + (e.clientY - m.startY)));
+    // SNAP (pure math, imperative draw) — fully off the React-state path so the drag stays
+    // zero-re-render. Hold Alt to suspend. Compute candidate lines (canvas center/edges, the
+    // platform safe area, the OTHER element), snap the raw box to the nearest within threshold,
+    // clamp back inside the render box, and draw the magenta guides via the ref handle.
+    let snapLeft = left,
+      snapTop = top;
+    if (snapEnabled && !e.altKey) {
+      const W = box.width,
+        H = box.height;
+      const other = otherRect
+        ? {
+            left: (otherRect.leftPct / 100) * W,
+            top: (otherRect.topPct / 100) * H,
+            width: (otherRect.widthPct / 100) * W,
+            height: (otherRect.heightPct / 100) * H,
+          }
+        : null;
+      const safe = safeInsets ? safeBoxPx(safeInsets, W, H) : null;
+      const targets = buildTargets(W, H, other, safe);
+      const res = computeSnap({ left, top, width: nr.width, height: nr.height }, targets, SNAP_THRESHOLD_PX);
+      snapLeft = Math.min(box.width - nr.width, Math.max(0, res.left));
+      snapTop = Math.min(box.height - nr.height, Math.max(0, res.top));
+      guidesRef?.current?.show(res.guides, W, H);
+      // Latch a canvas-center hit ONLY when the box CENTER (not an edge) landed on a "center"
+      // guide — then commit will write an exact pos_x = 0.5.
+      const snappedCenterX = snapLeft + nr.width / 2;
+      snapXCenterRef.current = res.guides.some(
+        (g) => g.axis === "x" && g.kind === "center" && Math.abs(snappedCenterX - g.pos) < 1,
+      );
+    } else {
+      guidesRef?.current?.hide();
+      snapXCenterRef.current = false;
+    }
     // imperative: move the box itself (no React state → no re-render on move). Always position
     // by top/left during the drag (clear the % anchor) so X and Y are free.
-    node.style.left = `${(left / box.width) * 100}%`;
-    node.style.top = `${(top / box.height) * 100}%`;
+    node.style.left = `${(snapLeft / box.width) * 100}%`;
+    node.style.top = `${(snapTop / box.height) * 100}%`;
     node.style.bottom = "auto";
   };
   const onBodyUp = () => {
     const m = moveRef.current;
     moveRef.current = null;
+    // Clear any alignment guides on release (covers the snapped-drag, tap, and missing-box paths).
+    guidesRef?.current?.hide();
     const node = boxRef.current;
     if (!m || !node) return;
     if (!m.moved) {
@@ -138,7 +194,8 @@ export function OverlaySelectionBox({
     const box = renderBoxRect(node);
     if (!box) return;
     const nr = node.getBoundingClientRect();
-    const centerX = (nr.left - box.left + nr.width / 2) / box.width;
+    // Exact center on a latched center-snap (kills the bbox-asymmetry drift); else the live box center.
+    const centerX = snapXCenterRef.current ? 0.5 : (nr.left - box.left + nr.width / 2) / box.width;
     // anchored edge fraction FROM THE TOP: caption commits its BOTTOM edge (\an2), hook its TOP.
     const edgeY = anchor === "top" ? (nr.top - box.top) / box.height : (nr.bottom - box.top) / box.height;
     onMoveCommit(clamp01(centerX), clamp01(edgeY));
