@@ -547,8 +547,21 @@ def list_user_jobs(
 
 
 @app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> dict[str, Any]:
-    """Статус задачи (wire-Job) из SQLite. 404, если задачи нет."""
+def get_job(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Статус задачи (wire-Job). 404 если нет; при включённом auth джоб с владельцем читает
+    только он (403). Легаси-джобы без user_id (None) не привязаны → читаемы (dual-mode)."""
+    row = db.get_job_row(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    owner = row.get("user_id")
+    if auth.supabase_auth_enabled() and owner is not None:
+        user_id = _resolve_user(authorization, x_user_id)  # 401 при отсутствии/невалиде токена
+        if owner != user_id:
+            raise HTTPException(status_code=403, detail="not your job")
     job = db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")

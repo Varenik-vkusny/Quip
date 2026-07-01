@@ -393,3 +393,66 @@ def test_get_jobs_no_user_returns_empty(monkeypatch, tmp_path) -> None:
         r = client.get("/jobs")  # no X-User-Id, auth off (dev) → user_id None
     assert r.status_code == 200
     assert r.json() == {"jobs": []}
+
+
+def test_get_job_dev_mode_no_auth_needed(monkeypatch, tmp_path) -> None:
+    # Auth off (dev/dual-mode) → GET /jobs/{id} works with no headers at all (no regression
+    # for the status poller, which historically sent none).
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    db.insert_job("job_dev", "upload", "x.mp4", user_id="user-A")
+    from app.main import app
+
+    with TestClient(app) as client:
+        r = client.get("/jobs/job_dev")
+    assert r.status_code == 200
+    assert r.json()["id"] == "job_dev"
+
+
+def test_get_job_auth_on_owner_allowed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    db.insert_job("job_owned", "upload", "x.mp4", user_id="user-A")
+    from app import auth
+    from app.main import app
+
+    monkeypatch.setattr(auth, "supabase_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "resolve_user_id", lambda *a, **k: "user-A")
+
+    with TestClient(app) as client:
+        r = client.get("/jobs/job_owned", headers={"Authorization": "Bearer dummy"})
+    assert r.status_code == 200
+    assert r.json()["id"] == "job_owned"
+
+
+def test_get_job_auth_on_not_owner_forbidden(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    db.insert_job("job_other", "upload", "x.mp4", user_id="user-B")
+    from app import auth
+    from app.main import app
+
+    monkeypatch.setattr(auth, "supabase_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "resolve_user_id", lambda *a, **k: "user-A")
+
+    with TestClient(app) as client:
+        r = client.get("/jobs/job_other", headers={"Authorization": "Bearer dummy"})
+    assert r.status_code == 403
+
+
+def test_get_job_auth_on_legacy_null_owner_readable(monkeypatch, tmp_path) -> None:
+    # Legacy job with no owner (user_id=None) stays readable even with auth on (dual-mode) —
+    # and needs NO token at all: the owner-check short-circuits before _resolve_user runs, so
+    # this also proves we don't force-auth every request once the gate flips on.
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    db.insert_job("job_legacy", "upload", "x.mp4")
+    from app import auth
+    from app.main import app
+
+    monkeypatch.setattr(auth, "supabase_auth_enabled", lambda: True)
+
+    with TestClient(app) as client:
+        r = client.get("/jobs/job_legacy")  # no Authorization header
+    assert r.status_code == 200
+    assert r.json()["id"] == "job_legacy"

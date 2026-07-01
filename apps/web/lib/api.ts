@@ -352,7 +352,10 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, ms = 1500
 }
 
 export async function getJob(id: string): Promise<Job> {
-  const res = await fetchWithTimeout(`${BASE}/jobs/${id}`, { cache: "no-store" });
+  const res = await fetchWithTimeout(`${BASE}/jobs/${id}`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getJob failed: ${res.status}`);
   return res.json();
 }
