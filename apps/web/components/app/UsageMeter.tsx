@@ -4,9 +4,9 @@ import { Loader2, RotateCcw, TriangleAlert } from "lucide-react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useState } from "react";
-import { Button } from "@/components/ui/Button";
+import { Button, buttonVariants } from "@/components/ui/Button";
 import { Eyebrow } from "@/components/ui/Eyebrow";
-import { Numeral } from "@/components/ui/Numeral";
+import { Meter } from "@/components/ui/Meter";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Stat } from "@/components/ui/Stat";
 import { cn } from "@/lib/cn";
@@ -84,45 +84,47 @@ export function UsageMeter({ className }: { className?: string }) {
     plan = v.planName;
     body = (
       <>
-        {/* Hero readout: the one number — how many minutes you can make right now. */}
-        <Stat
-          label={t("minutesLeft")}
-          value={fmtMinutes(v.minutesLeft)}
-          size="lg"
-          tone={v.out ? "bad" : "ink"}
-          meter={Math.max(0, 1 - v.usedPct / 100)}
-          meterTone={v.out ? "bad" : v.near ? "warn" : "neutral"}
+        {/* Hero readout: the one number — how many minutes you can make right now. Meter is
+            rendered manually (not via Stat's built-in `meter` prop) with a tighter mt-1: at
+            this font-size the value's own line-box reserves visible space below the digits,
+            so Stat's default mt-2.5 on top of that reads as a big dead gap. */}
+        <Stat label={t("minutesLeft")} value={fmtMinutes(v.minutesLeft)} size="lg" tone={v.out ? "bad" : "ink"} />
+        <Meter
+          value={Math.max(0, 1 - v.usedPct / 100)}
+          tone={v.out ? "bad" : v.near ? "warn" : "neutral"}
+          className="mt-1 h-0.5"
+          aria-label={t("minutesLeft")}
         />
 
-        {/* Compact mono footer: friendly video estimate, PAYG, reset rule, short-clip hint. */}
-        <dl className="mt-4 space-y-1.5 border-t border-line pt-3.5 text-xs">
-          <div className="flex items-center justify-between">
-            <dt className="text-muted">{t("videosLeft")}</dt>
-            <dd>
-              <Numeral className="text-ink">≈{fmtVideos(v.videosLeft)}</Numeral>
-            </dd>
+        {/* Secondary readouts: two bordered chips, not a bare 2-col grid — wrapping inside a
+            chip's own box reads as intentional, so a long label/value pair never collides
+            with its neighbor the way inline label:value rows did. */}
+        <div className="mt-4 grid grid-cols-2 gap-2.5">
+          <div className="rounded-lg border border-line bg-surface-2 p-3">
+            <Eyebrow tone="faint">{t("videosLeft")}</Eyebrow>
+            {/* "~" not "≈": IBM Plex Mono is loaded with subsets:["latin"] only, which
+                excludes the "≈" math glyph — it silently fell back to a different font. */}
+            <p className="mt-1 font-mono text-sm tabular-nums text-ink">~{fmtVideos(v.videosLeft)}</p>
           </div>
           {v.paygVideos > 0 && (
-            <div className="flex items-center justify-between">
-              <dt className="text-muted">{t("purchased")}</dt>
-              <dd>
-                <Numeral className="text-ink">
-                  +{fmtVideos(v.paygVideos)} · {fmtMinutes(v.paygMinutes)}
-                </Numeral>
-                <span className="ml-1 text-faint">{t("min")}</span>
-              </dd>
+            <div className="rounded-lg border border-line bg-surface-2 p-3">
+              <Eyebrow tone="faint">{t("purchased")}</Eyebrow>
+              <p className="mt-1 font-mono text-sm tabular-nums text-ink">+{fmtVideos(v.paygVideos)}</p>
+              <p className="mt-0.5 font-mono text-[11px] tabular-nums text-faint">
+                {fmtMinutes(v.paygMinutes)} {t("min")}
+              </p>
             </div>
           )}
-        </dl>
-        <p className="mt-2.5 text-eyebrow text-faint">{t("resetNote")}</p>
-        <p className="mt-2 text-eyebrow text-faint">{t("shortHint")}</p>
+        </div>
+        <p className="mt-3.5 text-xs leading-relaxed text-faint">{t("shortHint")}</p>
 
         <Link
           href="/pricing"
           onClick={() => setNavigating(true)}
           aria-busy={navigating || undefined}
           className={cn(
-            "mt-3.5 inline-flex items-center gap-1.5 text-sm text-accent hover:underline",
+            buttonVariants({ variant: "secondary", size: "sm" }),
+            "mt-4 w-full",
             navigating && "pointer-events-none opacity-70",
           )}
         >
@@ -135,7 +137,11 @@ export function UsageMeter({ className }: { className?: string }) {
 
   return (
     <section className={cn("rounded-lg border border-line bg-surface p-5", className)}>
-      <div className="mb-4 flex items-center justify-between">
+      {/* A hairline under the card's own title row: without it, "Usage · Pro" and the hero
+          Stat's own label ("Minutes left") are two same-size/same-weight eyebrow lines
+          stacked with only margin between them, so they read as one run-on line rather
+          than "card chrome" vs. "card content". */}
+      <div className="mb-4 flex items-center justify-between border-b border-line pb-3.5">
         <Eyebrow tone="muted" as="h2">
           {t("heading")}
         </Eyebrow>
