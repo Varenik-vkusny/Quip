@@ -95,6 +95,23 @@ export function addRecentProject(p: RecentProject): void {
   emit();
 }
 
+/** Merge server-fetched jobs (cross-device library hydration) into the local store. Local
+ *  entries win for fields the server doesn't know (label/reviewed/nclips); the server refreshes
+ *  status for jobs it also has and adds jobs created on other devices. De-duped by id,
+ *  newest-first, capped at MAX. No-op during SSR. */
+export function mergeServerProjects(server: RecentProject[]): void {
+  if (typeof window === "undefined") return;
+  const byId = new Map<string, RecentProject>();
+  for (const l of readStorage()) byId.set(l.id, l); // local first (richer: label/reviewed/nclips)
+  for (const s of server) {
+    const l = byId.get(s.id);
+    byId.set(s.id, l ? { ...l, status: s.status ?? l.status } : s);
+  }
+  const merged = [...byId.values()].sort((a, b) => b.at - a.at).slice(0, MAX);
+  window.localStorage.setItem(KEY, JSON.stringify(merged));
+  emit();
+}
+
 export function removeRecentProject(id: string): void {
   if (typeof window === "undefined") return;
   const list = readStorage().filter((x) => x.id !== id);

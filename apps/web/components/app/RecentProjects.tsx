@@ -7,12 +7,14 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
-import { getJob } from "@/lib/api";
+import { getJob, listJobs, type JobListItem } from "@/lib/api";
 import {
   getRecentServerSnapshot,
   getRecentSnapshot,
   isTerminalStatus,
   type JobStatusLite,
+  mergeServerProjects,
+  type RecentProject,
   removeRecentProject,
   subscribeRecent,
   updateRecentProject,
@@ -83,9 +85,32 @@ function StatusCell({
   );
 }
 
+function serverJobToRecent(j: JobListItem): RecentProject {
+  const at =
+    typeof j.created_at === "number" ? j.created_at * 1000 : Date.parse(j.created_at) || Date.now();
+  // source_ref is the filename (uploads) or the URL (youtube) — a usable label either way.
+  return { id: j.id, label: j.source_ref, at, status: j.status as JobStatusLite };
+}
+
 export function RecentProjects() {
   const t = useTranslations("recentProjects");
   const items = useSyncExternalStore(subscribeRecent, getRecentSnapshot, getRecentServerSnapshot);
+
+  // Cross-device hydration: pull the account's jobs from the server once on mount and merge
+  // them into the local library. Offline / no-auth / dev-without-worker → keep the local cache.
+  useEffect(() => {
+    let active = true;
+    listJobs()
+      .then(({ jobs }) => {
+        if (active) mergeServerProjects(jobs.map(serverJobToRecent));
+      })
+      .catch(() => {
+        /* server list unavailable → localStorage cache stands in */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Only re-subscribe the poller when the SET of non-terminal jobs changes (not on every
   // status tick) — so the interval isn't torn down/rebuilt each poll. Sorted for a stable key.
