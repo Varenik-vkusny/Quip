@@ -292,7 +292,7 @@ def list_jobs_for_user(user_id: str) -> list[dict[str, Any]]:
         f"{_base()}/jobs",
         params={
             "user_id": f"eq.{user_id}",
-            "select": "id,status,source_minutes,created_at",
+            "select": "id,status,source_minutes,source_type,source_ref,created_at",
             "order": "created_at.desc",
             "limit": "50",
         },

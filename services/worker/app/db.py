@@ -462,12 +462,12 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 
 
 def list_jobs_for_user(user_id: str) -> list[dict[str, Any]]:
-    """Per-user job list (newest first): id, status, source_minutes, created_at. Dual-mode."""
+    """Per-user job list (newest first) for the dashboard library. Dual-mode."""
     if cs.cloud_enabled():
         return cs.list_jobs_for_user(user_id)
     with _conn() as c:
         rows = c.execute(
-            "SELECT id, status, source_minutes, created_at FROM jobs "
+            "SELECT id, status, source_minutes, source_type, source_ref, created_at FROM jobs "
             "WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 50",
             (user_id,),
         ).fetchall()

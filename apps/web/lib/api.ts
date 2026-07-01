@@ -320,6 +320,24 @@ export async function getUsage(): Promise<UsageInfo> {
   return res.json();
 }
 
+/** One row of the account-scoped job list (GET /jobs) — lightweight, for the dashboard library. */
+export type JobListItem = {
+  id: string;
+  status: string;
+  source_minutes: number;
+  source_type: string;
+  source_ref: string;
+  created_at: string | number; // Postgres ISO string (cloud) or epoch seconds (local SQLite)
+};
+
+/** Account-scoped job list for the cross-device dashboard library. Sends auth; throws on failure
+ *  so the caller falls back to the localStorage cache. */
+export async function listJobs(): Promise<{ jobs: JobListItem[] }> {
+  const res = await fetch(`${BASE}/jobs`, { cache: "no-store", headers: await authHeaders() });
+  if (!res.ok) throw new Error(`listJobs failed: ${res.status}`);
+  return res.json();
+}
+
 /** fetch с таймаутом: висящий ответ (TCP открыт, воркер молчит) иначе НИКОГДА не реджектит →
  *  поллинг useJob тихо стопорится, MAX_FAILS не растёт, юзер на «tracking» навсегда.
  *  Таймаут → AbortError → throw → засчитывается как сбой опроса. */

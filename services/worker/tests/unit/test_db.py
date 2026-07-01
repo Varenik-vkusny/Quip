@@ -442,3 +442,4 @@ def test_list_jobs_for_user_returns_newest_first(monkeypatch, tmp_path) -> None:
 
     ids = [r["id"] for r in rows]
     assert ids == ["job_a2", "job_a1"]  # newest first (id DESC tiebreak), user-B excluded
+    assert rows[0]["source_ref"] == "a2.mp4"  # source_ref returned for the library label
