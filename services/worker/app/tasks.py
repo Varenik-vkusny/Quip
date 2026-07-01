@@ -42,7 +42,7 @@ def _quota_gate(user_id: str | None, holder: dict[str, Any]) -> Callable[[Source
         minutes = meta.duration / 60.0
         profile = db.get_profile(user_id)
         used = db.get_monthly_usage(user_id, billing.current_month())
-        payg_minutes = int(profile["payg_credits"]) * billing.MINUTES_PER_VIDEO
+        payg_minutes = float(profile["payg_minutes"])
         decision = billing.check_quota(
             profile["plan"], float(used["minutes"]), payg_minutes, minutes
         )
@@ -59,9 +59,9 @@ def _meter(user_id: str | None, job_id: str, job: Job, holder: dict[str, Any]) -
 
     Применяет split из ``holder["decision"]`` (авторизованного гейтом): в МЕСЯЧНЫЙ счётчик
     идёт ТОЛЬКО ``from_monthly_min`` (PAYG-минуты НЕ дублируются в месячный лимит — фикс
-    двойного учёта), а PAYG-кредиты списываются по ``payg_credits_for_split``. Без decision
-    (биллинг выключен → гейт не запускался) — старое поведение: полные минуты в месячный счёт,
-    PAYG не трогаем (баланс не консультировался).
+    двойного учёта), а PAYG-минуты списываются РОВНО по ``payg_minutes_for_split`` (делимый
+    баланс, без округления). Без decision (биллинг выключен → гейт не запускался) — старое
+    поведение: полные минуты в месячный счёт, PAYG не трогаем (баланс не консультировался).
     """
     if not user_id:
         return
@@ -77,16 +77,16 @@ def _meter(user_id: str | None, job_id: str, job: Job, holder: dict[str, Any]) -
     decision = holder.get("decision")
     if decision is not None:
         monthly_minutes = float(decision.from_monthly_min)
-        payg_credits = billing.payg_credits_for_split(decision)
+        payg_min = billing.payg_minutes_for_split(decision)
     else:
         monthly_minutes = full_minutes
-        payg_credits = 0
+        payg_min = 0.0
     try:
         recorded = db.record_usage(user_id, job_id, monthly_minutes, billing.current_month())
         # recorded=False → этот job_id УЖЕ учтён (ретрай/повторный прогон одного джоба) →
         # PAYG второй раз НЕ списываем (идемпотентность по job_id: ноль двойного заряда).
-        if recorded and payg_credits > 0:
-            db.deduct_payg(user_id, payg_credits)
+        if recorded and payg_min > 0:
+            db.deduct_payg_minutes(user_id, payg_min)
     except Exception:
         _log.exception("usage record failed: job=%s user=%s", job_id, user_id)
 

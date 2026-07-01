@@ -55,11 +55,15 @@ def _sum_usage(rows: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def _profile_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Ответ PostgREST на profiles → {plan, payg_credits}. Пусто → free / 0. PURE."""
+    """Ответ PostgREST на profiles → {plan, payg_credits, payg_minutes}. Пусто → free / 0. PURE."""
     if not rows:
-        return {"plan": "free", "payg_credits": 0}
+        return {"plan": "free", "payg_credits": 0, "payg_minutes": 0.0}
     r = rows[0]
-    return {"plan": str(r.get("plan") or "free"), "payg_credits": int(r.get("payg_credits") or 0)}
+    return {
+        "plan": str(r.get("plan") or "free"),
+        "payg_credits": int(r.get("payg_credits") or 0),
+        "payg_minutes": float(r.get("payg_minutes") or 0),
+    }
 
 
 # ─────────────────────────── I/O (тонкие обёртки) ───────────────────────────
@@ -68,7 +72,7 @@ def _profile_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def get_profile(user_id: str) -> dict[str, Any]:
     r = httpx.get(
         f"{_base()}/profiles",
-        params={"id": f"eq.{user_id}", "select": "plan,payg_credits"},
+        params={"id": f"eq.{user_id}", "select": "plan,payg_credits,payg_minutes"},
         headers=_headers(),
         timeout=_TIMEOUT,
     )
@@ -164,6 +168,32 @@ def add_payg_credits(user_id: str, credits: int) -> None:
     ins.raise_for_status()
 
 
+def add_payg_minutes(user_id: str, minutes: float) -> None:
+    # Зеркалит add_payg_credits на колонке payg_minutes (делимый минутный баланс, 0016): GET
+    # текущий баланс + PATCH; профиля нет → PATCH 0 строк → INSERT-фолбэк (как SQLite-upsert),
+    # иначе оплата МОЛЧА терялась бы (правило №8). minutes<=0 → no-op.
+    if minutes <= 0:
+        return
+    current = float(get_profile(user_id)["payg_minutes"])
+    r = httpx.patch(
+        f"{_base()}/profiles",
+        params={"id": f"eq.{user_id}"},
+        headers=_headers({"Prefer": "return=representation"}),
+        json={"payg_minutes": current + float(minutes)},
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    if r.json():  # строка существовала и обновилась
+        return
+    ins = httpx.post(
+        f"{_base()}/profiles",
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"id": user_id, "plan": "free", "payg_minutes": float(minutes)},
+        timeout=_TIMEOUT,
+    )
+    ins.raise_for_status()
+
+
 def deduct_payg(user_id: str, credits: int) -> None:
     # BE-H: списать PAYG-кредиты (PAYG-покрытая часть джоба). Зеркалит SQLite-семантику:
     # пол 0 (баланс не уходит в минус), credits<=0 → no-op, нет профиля → no-op (нечего
@@ -180,6 +210,26 @@ def deduct_payg(user_id: str, credits: int) -> None:
         params={"id": f"eq.{user_id}"},
         headers=_headers({"Prefer": "return=representation"}),
         json={"payg_credits": new_balance},
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+
+
+def deduct_payg_minutes(user_id: str, minutes: float) -> None:
+    # Зеркалит deduct_payg на колонке payg_minutes (делимый минутный баланс, 0016): GET текущий →
+    # max(0.0, current-minutes) → PATCH. Пол 0 (баланс не уходит в минус). minutes<=0 или
+    # current<=0 → no-op (нет профиля/баланса — списывать нечего; не INSERT'им, минус бессмыслен).
+    if minutes <= 0:
+        return
+    current = float(get_profile(user_id).get("payg_minutes") or 0)
+    if current <= 0:
+        return  # нет баланса (или профиля) → списывать нечего, PATCH не нужен
+    new_balance = max(0.0, current - float(minutes))
+    r = httpx.patch(
+        f"{_base()}/profiles",
+        params={"id": f"eq.{user_id}"},
+        headers=_headers({"Prefer": "return=representation"}),
+        json={"payg_minutes": new_balance},
         timeout=_TIMEOUT,
     )
     r.raise_for_status()

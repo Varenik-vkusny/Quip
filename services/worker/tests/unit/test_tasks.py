@@ -81,7 +81,8 @@ def test_transcript_cache_model_is_provider_aware():
 
 # ─────────────────────────── BE-H: метеринг расхода (PAYG split) ───────────────────────────
 # Денежный инвариант: гейт считает split (месячный/PAYG), метеринг ОБЯЗАН его применить —
-# списать PAYG-кредиты И записать в месячный счётчик ТОЛЬКО месячную часть (нет двойного учёта).
+# списать PAYG-минуты (делимо, РОВНО) И записать в месячный счётчик ТОЛЬКО месячную часть
+# (нет двойного учёта).
 
 
 def _job_with_minutes(minutes: float, *, clips: int = 1) -> tasks.Job:
@@ -122,7 +123,7 @@ def _capture_meter(monkeypatch):
         return True
 
     monkeypatch.setattr(db, "record_usage", _rec)
-    monkeypatch.setattr(db, "deduct_payg", lambda *a, **k: deducted.append(a))
+    monkeypatch.setattr(db, "deduct_payg_minutes", lambda *a, **k: deducted.append(a))
     return recorded, deducted
 
 
@@ -131,7 +132,7 @@ def test_meter_skips_payg_deduct_when_usage_already_recorded(monkeypatch):
     # списываем второй раз (идемпотентность: ноль двойного заряда).
     deducted: list = []
     monkeypatch.setattr(db, "record_usage", lambda *a, **k: False)
-    monkeypatch.setattr(db, "deduct_payg", lambda *a, **k: deducted.append(a))
+    monkeypatch.setattr(db, "deduct_payg_minutes", lambda *a, **k: deducted.append(a))
     decision = QuotaDecision(True, None, minutes=65.0, from_monthly_min=5.0, from_payg_min=60.0)
     tasks._meter("user_1", "job_dup", _job_with_minutes(65.0), {"decision": decision})
     assert deducted == []  # дубль → без второго списания
@@ -151,7 +152,7 @@ def test_meter_records_only_monthly_part_and_deducts_payg(monkeypatch):
     # record_usage(user_id, job_id, source_minutes=from_monthly_min, month, ...)
     assert args[0] == "user_1" and args[1] == "job_x"
     assert args[2] == 5.0  # ТОЛЬКО месячная часть
-    assert deducted == [("user_1", 1)]  # ceil(60/60) = 1 PAYG-кредит
+    assert deducted == [("user_1", 60.0)]  # ровно 60 PAYG-минут (без округления до кредита)
 
 
 def test_meter_all_monthly_does_not_touch_payg(monkeypatch):
@@ -169,7 +170,7 @@ def test_meter_all_payg_records_zero_monthly(monkeypatch):
     decision = QuotaDecision(True, None, minutes=30.0, from_monthly_min=0.0, from_payg_min=30.0)
     tasks._meter("user_1", "job_z", _job_with_minutes(30.0), {"decision": decision})
     assert recorded[0][0][2] == 0.0  # ноль месячных
-    assert deducted == [("user_1", 1)]  # ceil(30/60)=1
+    assert deducted == [("user_1", 30.0)]  # ровно 30 PAYG-минут
 
 
 def test_meter_no_decision_falls_back_to_full_monthly(monkeypatch):

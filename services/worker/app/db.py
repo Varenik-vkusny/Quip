@@ -88,13 +88,17 @@ def init_db() -> None:
         c.execute(
             """CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY, plan TEXT NOT NULL,
-                payg_credits INTEGER NOT NULL DEFAULT 0, updated_at REAL
+                payg_credits INTEGER NOT NULL DEFAULT 0,
+                payg_minutes REAL NOT NULL DEFAULT 0, updated_at REAL
             )"""
         )
         # Миграция существующих БД (CREATE TABLE IF NOT EXISTS не добавляет колонки):
         # добавить новые поля, если их ещё нет. Идемпотентно.
         _ensure_column(c, "usage_events", "credits", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(c, "profiles", "payg_credits", "INTEGER NOT NULL DEFAULT 0")
+        # PAYG стал делимым минутным балансом (0016_payg_minutes.sql). REAL NOT NULL DEFAULT 0
+        # (как payg_credits) → старые строки получают 0, а не NULL (NULL+x в upsert = NULL).
+        _ensure_column(c, "profiles", "payg_minutes", "REAL NOT NULL DEFAULT 0")
         # Stop-кнопка (зеркало migrations/0006_job_cancel.sql): id Modal-функции + флаг отмены.
         _ensure_column(c, "jobs", "function_call_id", "TEXT")
         _ensure_column(c, "jobs", "cancellable", "INTEGER NOT NULL DEFAULT 1")
@@ -686,7 +690,11 @@ def set_user_plan(user_id: str, plan: str) -> None:
 
 
 def add_payg_credits(user_id: str, credits: int) -> None:
-    """Начислить не сгорающие PAYG-кредиты (вебхук разовой оплаты Polar). Upsert (+=)."""
+    """Начислить не сгорающие PAYG-кредиты (вебхук разовой оплаты Polar). Upsert (+=).
+
+    DORMANT после 0016: заменена на ``add_payg_minutes`` (делимый минутный баланс). Колонку
+    ``payg_credits`` и эту функцию НЕ удаляем — rollback-safety.
+    """
     if supa.supa_enabled():
         supa.add_payg_credits(user_id, credits)
         return
@@ -700,6 +708,23 @@ def add_payg_credits(user_id: str, credits: int) -> None:
         )
 
 
+def add_payg_minutes(user_id: str, minutes: float) -> None:
+    """Начислить не сгорающие PAYG-минуты (вебхук: $3 = 60 делимых минут). Upsert (+=)."""
+    if minutes <= 0:
+        return
+    if supa.supa_enabled():
+        supa.add_payg_minutes(user_id, minutes)
+        return
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO profiles (user_id, plan, payg_minutes, updated_at) VALUES (?,?,?,?)"
+            " ON CONFLICT(user_id) DO UPDATE SET"
+            " payg_minutes=profiles.payg_minutes+excluded.payg_minutes,"
+            " updated_at=excluded.updated_at",
+            (user_id, "free", float(minutes), time.time()),
+        )
+
+
 def deduct_payg(user_id: str, credits: int) -> None:
     """Списать ``credits`` PAYG-кредитов (PAYG-покрытая часть обработанного видео).
 
@@ -707,6 +732,9 @@ def deduct_payg(user_id: str, credits: int) -> None:
     гонки/ошибки округления). ``credits<=0`` → no-op. Нет профиля → нечего списывать
     (UPDATE затрагивает 0 строк — НЕ создаём строку с отрицательным балансом, в отличие
     от add_payg_credits/upsert: «минус-кредиты» бессмысленны).
+
+    DORMANT после 0016: заменена на ``deduct_payg_minutes`` (делимый минутный баланс). НЕ
+    удаляем — rollback-safety.
     """
     if credits <= 0:
         return
@@ -720,6 +748,20 @@ def deduct_payg(user_id: str, credits: int) -> None:
         )
 
 
+def deduct_payg_minutes(user_id: str, minutes: float) -> None:
+    """Списать PAYG-минуты (PAYG-покрытая часть джоба). Пол 0; minutes<=0 → no-op."""
+    if minutes <= 0:
+        return
+    if supa.supa_enabled():
+        supa.deduct_payg_minutes(user_id, minutes)
+        return
+    with _conn() as c:
+        c.execute(
+            "UPDATE profiles SET payg_minutes=MAX(0, payg_minutes-?), updated_at=? WHERE user_id=?",
+            (float(minutes), time.time(), user_id),
+        )
+
+
 def get_user_plan(user_id: str) -> str:
     """План пользователя для гейта квоты. Нет записи → "free" (безопасный дефолт)."""
     if supa.supa_enabled():
@@ -730,16 +772,24 @@ def get_user_plan(user_id: str) -> str:
 
 
 def get_profile(user_id: str) -> dict[str, Any]:
-    """Профиль для гейта квоты → {"plan", "payg_credits"}. Нет записи → free / 0."""
+    """Профиль для гейта квоты → {"plan", "payg_credits", "payg_minutes"}. Нет записи → free / 0.
+
+    ``payg_minutes`` — делимый минутный PAYG-баланс (источник правды PAYG); ``payg_credits``
+    остаётся в ответе для обратной совместимости (dormant после 0016, см. add_payg_credits).
+    """
     if supa.supa_enabled():
         return supa.get_profile(user_id)
     with _conn() as c:
         row = c.execute(
-            "SELECT plan, payg_credits FROM profiles WHERE user_id=?", (user_id,)
+            "SELECT plan, payg_credits, payg_minutes FROM profiles WHERE user_id=?", (user_id,)
         ).fetchone()
     if row is None:
-        return {"plan": "free", "payg_credits": 0}
-    return {"plan": str(row["plan"]), "payg_credits": int(row["payg_credits"])}
+        return {"plan": "free", "payg_credits": 0, "payg_minutes": 0.0}
+    return {
+        "plan": str(row["plan"]),
+        "payg_credits": int(row["payg_credits"]),
+        "payg_minutes": float(row["payg_minutes"] or 0),
+    }
 
 
 def get_job_owner(job_id: str) -> str | None:

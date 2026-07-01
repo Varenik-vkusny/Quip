@@ -427,6 +427,51 @@ def test_deduct_payg_missing_profile_is_safe(monkeypatch, tmp_path) -> None:
     assert db.get_profile("ghost")["payg_credits"] == 0
 
 
+# ─────────────── PAYG-минуты: делимый баланс (0016), списываем РОВНО ───────────────
+# Денежный инвариант: PAYG-минуты убывают на покрытый объём точно (без округления),
+# НИКОГДА не отрицательны. Заменяет целочисленную payg_credits-модель (та dormant).
+
+
+def test_add_payg_minutes_credits_balance(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "p.db")
+    db.init_db()
+    db.add_payg_minutes("u1", 90.0)
+    assert db.get_profile("u1")["payg_minutes"] == 90.0
+
+
+def test_deduct_payg_minutes_decrements_exactly(monkeypatch, tmp_path) -> None:
+    # Списываем РОВНО покрытые минуты (не округляем до кредита): 90 − 10 = 80.
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "p.db")
+    db.init_db()
+    db.add_payg_minutes("u1", 90.0)
+    db.deduct_payg_minutes("u1", 10.0)
+    assert db.get_profile("u1")["payg_minutes"] == 80.0
+
+
+def test_deduct_payg_minutes_floors_at_zero_never_negative(monkeypatch, tmp_path) -> None:
+    # Списание больше баланса не уводит в минус (защита от двойного учёта/гонки).
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "p.db")
+    db.init_db()
+    db.add_payg_minutes("u1", 90.0)
+    db.deduct_payg_minutes("u1", 999.0)
+    assert db.get_profile("u1")["payg_minutes"] == 0.0
+
+
+def test_add_payg_minutes_creates_profile_when_missing(monkeypatch, tmp_path) -> None:
+    # Профиля ещё нет (оплата до signup-row) → upsert создаёт его, начисление не теряется.
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "p.db")
+    db.init_db()
+    db.add_payg_minutes("u_new", 60.0)
+    assert db.get_profile("u_new")["payg_minutes"] == 60.0
+
+
+def test_add_payg_minutes_zero_is_noop(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "p.db")
+    db.init_db()
+    db.add_payg_minutes("u1", 0.0)
+    assert db.get_profile("u1")["payg_minutes"] == 0.0
+
+
 # ─────────────────────────── list_jobs_for_user (per-user library) ───────────────────────────
 
 

@@ -191,7 +191,7 @@ def _enforce_quota(user_id: str | None) -> None:
     used = db.get_monthly_usage(user_id, billing.current_month())
     plan = billing.resolve_plan(profile["plan"])
     monthly_remaining = billing.plan_monthly_minutes(plan) - float(used["minutes"])
-    payg_minutes = int(profile["payg_credits"]) * billing.MINUTES_PER_VIDEO
+    payg_minutes = float(profile["payg_minutes"])
     if monthly_remaining <= 0 and payg_minutes <= 0:
         raise HTTPException(
             status_code=402,
@@ -216,17 +216,21 @@ def get_usage(
     used_minutes = (
         float(db.get_monthly_usage(user_id, billing.current_month())["minutes"]) if user_id else 0.0
     )
-    payg_videos = int(db.get_profile(user_id)["payg_credits"]) if user_id else 0
-    return _usage_payload(plan, used_minutes, payg_videos)
+    payg_minutes = float(db.get_profile(user_id)["payg_minutes"]) if user_id else 0.0
+    return _usage_payload(plan, used_minutes, payg_minutes)
 
 
 def _usage_payload(
-    plan: billing.PlanLimits, used_minutes: float, payg_videos: int
+    plan: billing.PlanLimits, used_minutes: float, payg_minutes: float
 ) -> dict[str, Any]:
-    """Сборка ответа /usage в МИНУТАХ и «видео» (= минуты/60) для UsageMeter. PURE-ish."""
+    """Сборка ответа /usage в МИНУТАХ и «видео» (= минуты/60) для UsageMeter. PURE-ish.
+
+    ``payg_minutes`` — делимый минутный PAYG-баланс (источник правды); «видео» выводим из него
+    (``minutes_to_videos``) для UI. Отдаём оба: минуты (точность) + видео (человекочитаемо).
+    """
     monthly_minutes = billing.plan_monthly_minutes(plan)
     remaining_minutes = max(0.0, monthly_minutes - used_minutes)
-    payg_minutes = payg_videos * billing.MINUTES_PER_VIDEO
+    payg_videos = billing.minutes_to_videos(payg_minutes)
     return {
         "plan": plan.id,
         "plan_name": plan.name,
@@ -236,7 +240,7 @@ def _usage_payload(
         "remaining_minutes": round(remaining_minutes, 1),
         "remaining_videos": billing.minutes_to_videos(remaining_minutes),
         "payg_videos": payg_videos,
-        "payg_minutes": payg_minutes,
+        "payg_minutes": round(payg_minutes, 1),
     }
 
 
@@ -508,7 +512,8 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
         db.set_user_plan(user_id, plan)
         return {"ok": True, "applied": True, "user_id": user_id, "plan": plan}
 
-    # Разовая оплата PAYG → начислить не сгорающие кредиты.
+    # Разовая оплата PAYG → начислить не сгорающие МИНУТЫ (делимый баланс, 0016): $3-заказ =
+    # 60 делимых минут (parse_payg_order по-прежнему отдаёт целые credits; конвертируем здесь).
     payg = polar.parse_payg_order(
         payload,
         product_payg=os.environ.get("POLAR_PRODUCT_PAYG", ""),
@@ -516,8 +521,9 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
     )
     if payg is not None:
         user_id, credits = payg
-        db.add_payg_credits(user_id, credits)
-        return {"ok": True, "applied": True, "user_id": user_id, "payg_credits": credits}
+        minutes = credits * billing.MINUTES_PER_VIDEO
+        db.add_payg_minutes(user_id, minutes)
+        return {"ok": True, "applied": True, "user_id": user_id, "payg_minutes": minutes}
 
     return {"ok": True, "applied": False}
 

@@ -259,7 +259,8 @@ def test_polar_webhook_applies_plan(monkeypatch) -> None:
     assert db.get_user_plan("user_wh") == "starter"
 
 
-def test_polar_webhook_grants_payg_credits(monkeypatch) -> None:
+def test_polar_webhook_grants_payg_minutes(monkeypatch) -> None:
+    # PAYG теперь ДЕЛИМЫЙ минутный баланс (0016): $3-заказ (1 credit) → +60 делимых минут.
     from app.main import app
 
     monkeypatch.setenv("POLAR_WEBHOOK_SECRET", _SW_SECRET)
@@ -277,12 +278,13 @@ def test_polar_webhook_grants_payg_credits(monkeypatch) -> None:
         "webhook-signature": _sign(_SW_SECRET, "msg_payg", ts, body),
         "content-type": "application/json",
     }
-    before = db.get_profile("user_payg")["payg_credits"]
+    before = db.get_profile("user_payg")["payg_minutes"]
     with TestClient(app) as client:
         r = client.post("/webhooks/polar", content=body, headers=headers)
     assert r.status_code == 200
     assert r.json()["applied"] is True
-    assert db.get_profile("user_payg")["payg_credits"] == before + 1
+    assert r.json()["payg_minutes"] == billing.MINUTES_PER_VIDEO  # 1 credit × 60 = 60 мин
+    assert db.get_profile("user_payg")["payg_minutes"] == before + billing.MINUTES_PER_VIDEO
 
 
 def test_polar_webhook_rejects_bad_signature(monkeypatch) -> None:

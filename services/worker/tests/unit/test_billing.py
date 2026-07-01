@@ -216,38 +216,39 @@ class TestMinBilledFloor:
         assert d.from_monthly_min == 1.0 and d.from_payg_min == 1.0
 
 
-class TestPaygCreditsForSplit:
-    # BE-H: PAYG-минуты split'а → целое число PAYG-кредитов к списанию. Округление ВВЕРХ
-    # (1 кредит = 60 мин): покрытый объём не должен недосписываться. 0 минут → 0 кредитов.
-    def test_no_payg_portion_zero_credits(self) -> None:
-        from app.billing import payg_credits_for_split
+class TestPaygMinutesForSplit:
+    # PAYG теперь ДЕЛИМЫЙ минутный баланс: списываем РОВНО покрытые минуты, БЕЗ округления
+    # (было: целые кредиты с ceil → 10-мин видео жгло полный 60-мин кредит). 0 минут → 0.0.
+    def test_no_payg_portion_zero_minutes(self) -> None:
+        from app.billing import payg_minutes_for_split
 
         d = check_quota("starter", used_minutes=0.0, payg_minutes=0.0, source_minutes=40.0)
         assert d.from_payg_min == 0.0
-        assert payg_credits_for_split(d) == 0
+        assert payg_minutes_for_split(d) == 0.0
 
-    def test_partial_payg_rounds_up(self) -> None:
-        from app.billing import payg_credits_for_split
+    def test_exact_minutes_no_rounding(self) -> None:
+        from app.billing import payg_minutes_for_split
 
-        # 5 месячных + 60 PAYG → 60 мин из PAYG = ровно 1 кредит.
+        # 5 месячных + 60 PAYG → ровно 60 мин из PAYG, списываем 60.0 (не округляем).
         d = check_quota("starter", used_minutes=595.0, payg_minutes=180.0, source_minutes=65.0)
         assert d.from_payg_min == 60.0
-        assert payg_credits_for_split(d) == 1
+        assert payg_minutes_for_split(d) == 60.0
 
-    def test_payg_61_min_rounds_up_to_two(self) -> None:
-        from app.billing import payg_credits_for_split
+    def test_partial_payg_video_stays_exact_not_a_full_credit(self) -> None:
+        from app.billing import payg_minutes_for_split
 
-        # всё из PAYG, 61 мин → ceil(61/60) = 2 кредита.
-        d = check_quota("starter", used_minutes=600.0, payg_minutes=180.0, source_minutes=61.0)
-        assert d.from_monthly_min == 0.0 and d.from_payg_min == 61.0
-        assert payg_credits_for_split(d) == 2
+        # АНТИ-ПОТЕРЯ ОСТАТКА (весь смысл фикса): месячные исчерпаны, 10-мин видео целиком из
+        # PAYG → списываем РОВНО 10 мин, а НЕ 60 (раньше ceil(10/60)=1 кредит = 60 мин впустую).
+        d = check_quota("starter", used_minutes=600.0, payg_minutes=180.0, source_minutes=10.0)
+        assert d.from_monthly_min == 0.0 and d.from_payg_min == 10.0
+        assert payg_minutes_for_split(d) == 10.0
 
     def test_blocked_decision_charges_nothing(self) -> None:
-        from app.billing import payg_credits_for_split
+        from app.billing import payg_minutes_for_split
 
         d = check_quota("starter", used_minutes=600.0, payg_minutes=0.0, source_minutes=10.0)
         assert d.allowed is False
-        assert payg_credits_for_split(d) == 0
+        assert payg_minutes_for_split(d) == 0.0
 
 
 class TestPlansShape:

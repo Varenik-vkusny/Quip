@@ -75,7 +75,9 @@ def _stub_profile(monkeypatch, plan: str) -> None:
     from app import db
     from app import main as main_mod
 
-    monkeypatch.setattr(db, "get_profile", lambda uid: {"plan": plan, "payg_credits": 0})
+    monkeypatch.setattr(
+        db, "get_profile", lambda uid: {"plan": plan, "payg_credits": 0, "payg_minutes": 0.0}
+    )
     monkeypatch.setattr(
         db, "get_monthly_usage", lambda uid, month: {"videos": 0, "minutes": 0.0, "credits": 0}
     )
