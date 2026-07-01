@@ -84,32 +84,22 @@ export function UsageMeter({ className }: { className?: string }) {
     plan = v.planName;
     body = (
       <>
-        {/* Hero readout: the one number — how many videos you can make right now. */}
+        {/* Hero readout: the one number — how many minutes you can make right now. */}
         <Stat
-          label={t("videosLeft")}
-          value={fmtVideos(v.videosLeft)}
+          label={t("minutesLeft")}
+          value={fmtMinutes(v.minutesLeft)}
           size="lg"
           tone={v.out ? "bad" : "ink"}
           meter={Math.max(0, 1 - v.usedPct / 100)}
           meterTone={v.out ? "bad" : v.near ? "warn" : "neutral"}
         />
 
-        {/* Compact mono footer: monthly pool, PAYG, reset rule — one line each, varied weight. */}
+        {/* Compact mono footer: friendly video estimate, PAYG, reset rule, short-clip hint. */}
         <dl className="mt-4 space-y-1.5 border-t border-line pt-3.5 text-xs">
           <div className="flex items-center justify-between">
-            <dt className="text-muted">{t("monthlyPlan")}</dt>
+            <dt className="text-muted">{t("videosLeft")}</dt>
             <dd>
-              <Numeral className={v.near ? "text-warn" : "text-ink"}>
-                {fmtVideos(v.monthlyUsedVideos)} / {v.monthlyTotalVideos}
-              </Numeral>
-              <span className="ml-1 text-faint">{t("used")}</span>
-            </dd>
-          </div>
-          <div className="flex items-center justify-between">
-            <dt className="text-muted">{t("minutesLeft")}</dt>
-            <dd>
-              <Numeral className="text-ink">{fmtMinutes(v.minutesLeft)}</Numeral>
-              <span className="ml-1 text-faint">{t("min")}</span>
+              <Numeral className="text-ink">≈{fmtVideos(v.videosLeft)}</Numeral>
             </dd>
           </div>
           {v.paygVideos > 0 && (
@@ -125,6 +115,7 @@ export function UsageMeter({ className }: { className?: string }) {
           )}
         </dl>
         <p className="mt-2.5 text-eyebrow text-faint">{t("resetNote")}</p>
+        <p className="mt-2 text-eyebrow text-faint">{t("shortHint")}</p>
 
         <Link
           href="/pricing"

@@ -270,7 +270,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         {
           n: "01",
           title: "Upload your video",
-          body: "Drop your video: podcast, interview, stream, or lecture. Up to 90 minutes.",
+          body: "Drop your video: podcast, interview, stream, or lecture. Up to 3 hours.",
         },
         {
           n: "02",
@@ -357,7 +357,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$0",
           cadence: "forever",
           blurb: "See it work, no card required.",
-          allowance: "2 videos / mo · 120 min",
+          allowance: "120 min / mo · ~2 videos",
           features: [
             "Explainable clips with hook, score and reason",
             "Smooth 9:16 reframe that tracks the speaker",
@@ -373,7 +373,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$15",
           cadence: "/ mo",
           blurb: "For creators shipping weekly.",
-          allowance: "10 videos / mo · 600 min",
+          allowance: "600 min / mo · ~10 videos",
           features: [
             "Everything in Free",
             "No watermark, full 1080p",
@@ -389,7 +389,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$35",
           cadence: "/ mo",
           blurb: "For heavy repurposing.",
-          allowance: "30 videos / mo · 1,800 min",
+          allowance: "1,800 min / mo · ~30 videos",
           features: [
             "Everything in Starter",
             "Priority processing",
@@ -419,7 +419,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
         {
           q: "What kind of videos work best?",
-          a: "Talking-heavy long-form: podcasts, interviews, streams, lectures, and webinars, up to 90 minutes. The more speech, the better the moments.",
+          a: "Talking-heavy long-form: podcasts, interviews, streams, lectures, and webinars, up to 3 hours. The more speech, the better the moments.",
         },
         {
           q: "Which languages does it support?",
@@ -560,7 +560,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         {
           n: "01",
           title: "Загрузите видео",
-          body: "Перетащите видео: подкаст, интервью, стрим или лекцию. До 90 минут.",
+          body: "Перетащите видео: подкаст, интервью, стрим или лекцию. До 3 часов.",
         },
         {
           n: "02",
@@ -647,7 +647,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$0",
           cadence: "навсегда",
           blurb: "Посмотрите, как работает. Без карты.",
-          allowance: "2 видео / мес · 120 мин",
+          allowance: "120 мин / мес · ~2 видео",
           features: [
             "Объяснимые клипы: хук, оценка и причина",
             "Плавный рефрейм 9:16 за спикером",
@@ -663,7 +663,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$15",
           cadence: "/ мес",
           blurb: "Для авторов, что постят каждую неделю.",
-          allowance: "10 видео / мес · 600 мин",
+          allowance: "600 мин / мес · ~10 видео",
           features: [
             "Всё из Free",
             "Без вотермарки, полное 1080p",
@@ -679,7 +679,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$35",
           cadence: "/ мес",
           blurb: "Для тех, кто переупаковывает много.",
-          allowance: "30 видео / мес · 1 800 мин",
+          allowance: "1 800 мин / мес · ~30 видео",
           features: [
             "Всё из Starter",
             "Приоритетная обработка",
@@ -709,7 +709,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
         {
           q: "Какие видео подходят лучше всего?",
-          a: "Длинные говорящие форматы: подкасты, интервью, стримы, лекции и вебинары — до 90 минут. Чем больше речи, тем сильнее моменты.",
+          a: "Длинные говорящие форматы: подкасты, интервью, стримы, лекции и вебинары — до 3 часов. Чем больше речи, тем сильнее моменты.",
         },
         {
           q: "Какие языки поддерживаются?",

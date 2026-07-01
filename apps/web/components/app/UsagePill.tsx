@@ -37,7 +37,7 @@ export function UsagePill({ className }: { className?: string }) {
   return (
     <Link
       href="/pricing"
-      title="Videos left right now — 1 video = 60 min. Click to upgrade or top up."
+      title="Minutes left right now — a short video uses only its length; 1 video ≈ 60 min. Click to upgrade or top up."
       className={cn(
         "inline-flex items-center gap-1.5 rounded-pill border px-3 py-1.5 font-mono text-eyebrow uppercase transition-colors",
         low ? "border-warn/50 text-warn" : "border-line text-muted hover:text-ink",
@@ -49,7 +49,7 @@ export function UsagePill({ className }: { className?: string }) {
         <span className="text-faint">—</span>
       ) : (
         <Numeral>
-          {fmtVideos(v.videosLeft)} videos · {fmtMinutes(v.minutesLeft)} min
+          {fmtMinutes(v.minutesLeft)} min · ≈{fmtVideos(v.videosLeft)} videos
         </Numeral>
       )}
     </Link>

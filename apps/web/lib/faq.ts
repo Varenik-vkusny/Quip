@@ -6,7 +6,7 @@ export const FAQ: { q: string; a: string }[] = [
   },
   {
     q: "What kind of videos work best?",
-    a: "Talking-heavy long-form — podcasts, interviews, streams, lectures, and webinars, up to 90 minutes. The more speech, the better the moments.",
+    a: "Talking-heavy long-form — podcasts, interviews, streams, lectures, and webinars, up to 3 hours. The more speech, the better the moments.",
   },
   {
     q: "Which languages does it support?",
@@ -18,7 +18,7 @@ export const FAQ: { q: string; a: string }[] = [
   },
   {
     q: "What is a credit?",
-    a: "One credit is one video — up to 60 minutes of source. Longer videos use minutes proportionally (a 90-minute upload counts as 1.5). Your plan includes a set number of video-credits per month, so you always know your limit. Pay-as-you-go credits cost $2 each and never expire.",
+    a: "One credit is one video — up to 60 minutes of source. Longer videos use minutes proportionally (a 90-minute upload counts as 1.5). Your plan includes a set number of video-credits per month, so you always know your limit. Pay-as-you-go credits cost $3 each and never expire.",
   },
   {
     q: "Is the free plan actually free?",

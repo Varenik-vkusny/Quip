@@ -3,9 +3,11 @@
  * (the enforcement source of truth). Keep numbers in sync when billing.py changes.
  *
  * Video-minutes model: 1 "video" = 60 min of source. A plan's monthly limit is a pool of
- * minutes (videos × 60); a longer video just uses minutes proportionally (90 min = 1.5
- * videos), so the balance is shown as both videos and minutes. No token casino, no surprise
- * paywalls. A single video can be up to 3 hours; length is limited only by your remaining minutes.
+ * minutes, and the display now LEADS WITH MINUTES (the real quota) — the video count is a
+ * friendly, derived ESTIMATE (minutes / 60), not a hard cap: a shorter video only uses its
+ * own length, so the real number of videos you can make is often well above the nominal
+ * count. No token casino, no surprise paywalls. A single video can be up to 3 hours; length
+ * is limited only by your remaining minutes.
  */
 export type PlanId = "free" | "starter" | "pro";
 
@@ -14,9 +16,9 @@ export interface PlanDisplay {
   name: string;
   price: number; // USD / month
   tagline: string;
-  /** Headline limit, shown large under the price (e.g. "10 videos / month"). */
+  /** Headline limit, shown large under the price (e.g. "600 minutes / month"). */
   limit: string;
-  /** One line clarifying what a "video" means on this plan. */
+  /** One line translating the minute pool into a friendly video estimate (not a hard cap). */
   limitNote: string;
   cta: string;
   /** The recommended plan gets the accent treatment (badge + ring + coral CTA). */
@@ -30,8 +32,8 @@ export const PLANS: PlanDisplay[] = [
     name: "Free",
     price: 0,
     tagline: "See it work, no card required.",
-    limit: "2 videos / month",
-    limitNote: "120 minutes of source to use however you like.",
+    limit: "120 minutes / month",
+    limitNote: "That's about 2 videos — a short clip uses only its length, so you can make more.",
     cta: "Start free",
     features: [
       "Explainable clips with hook, score and reason",
@@ -45,8 +47,8 @@ export const PLANS: PlanDisplay[] = [
     name: "Starter",
     price: 15,
     tagline: "For creators shipping weekly.",
-    limit: "10 videos / month",
-    limitNote: "600 min total. Longer videos use minutes proportionally.",
+    limit: "600 minutes / month",
+    limitNote: "About 10 hour-long videos — or 100 short ones. A 6-min clip uses just 6 minutes.",
     cta: "Choose Starter",
     features: [
       "Everything in Free",
@@ -60,8 +62,8 @@ export const PLANS: PlanDisplay[] = [
     name: "Pro",
     price: 35,
     tagline: "For heavy repurposing.",
-    limit: "30 videos / month",
-    limitNote: "1800 min total. Longer videos use minutes proportionally.",
+    limit: "1,800 minutes / month",
+    limitNote: "About 30 hour-long videos — or many more if they're shorter.",
     cta: "Choose Pro",
     recommended: true,
     features: [

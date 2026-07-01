@@ -9,7 +9,7 @@ const steps = [
   {
     n: "01",
     title: "Paste a link or upload",
-    body: "Drop a YouTube link or a file — podcast, interview, stream, or lecture. Up to 90 minutes.",
+    body: "Drop a YouTube link or a file — podcast, interview, stream, or lecture. Up to 3 hours.",
   },
   {
     n: "02",
