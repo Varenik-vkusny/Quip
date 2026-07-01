@@ -309,15 +309,18 @@ def test_polar_webhook_503_when_unconfigured(monkeypatch) -> None:
 # ─────────────────────────── quota gate in create_job ───────────────────────────
 
 
-def test_create_job_quota_gate_blocks_over_limit(monkeypatch) -> None:
+def test_create_job_quota_gate_blocks_over_limit(monkeypatch, tmp_path) -> None:
     from app.main import app
 
+    # Изоляция локальной БД (иначе расход пишется мимо и гейт его не видит → тест был флаки/red).
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "q.db")
+    db.init_db()
     monkeypatch.setenv("BILLING_ENABLED", "true")
     uid = "user_gate_over"
     db.set_user_plan(uid, "free")
     month = billing.current_month()
-    db.record_usage(uid, "j1", 5.0, month)
-    db.record_usage(uid, "j2", 5.0, month)  # 2 видео = лимит free
+    db.record_usage(uid, "j1", 60.0, month)
+    db.record_usage(uid, "j2", 60.0, month)  # 120 мин = весь месячный пул free исчерпан (2×60)
     with TestClient(app) as client:
         r = client.post(
             "/jobs",
