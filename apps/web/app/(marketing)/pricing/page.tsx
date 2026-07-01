@@ -30,8 +30,8 @@ export default function PricingPage() {
           Pricing that respects your wallet.
         </h1>
         <p className="mx-auto mt-4 max-w-lg text-lead text-muted">
-          One credit is one video, up to 60 minutes. No tokens to ration, no surprise paywalls, no
-          dark patterns. Start free.
+          Your plan is a pool of minutes, not a cap on uploads — a short video uses only its length,
+          so you can make far more than the headline number. No surprise paywalls. Start free.
         </p>
       </Container>
       <Container className="pb-8 pt-14">

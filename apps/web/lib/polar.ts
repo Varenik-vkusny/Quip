@@ -13,10 +13,8 @@ const PRODUCT: Record<Exclude<PlanId, "free"> | "payg", string> = {
   starter:
     process.env.NEXT_PUBLIC_POLAR_PRODUCT_STARTER ?? "64607ae8-4d14-4eb2-a873-4c07a88cc83e",
   pro: process.env.NEXT_PUBLIC_POLAR_PRODUCT_PRO ?? "3d989817-94b9-41ee-958b-d1b56013c980",
-  // No default id yet: the founder still needs to create the Studio product in Polar and set
-  // NEXT_PUBLIC_POLAR_PRODUCT_STUDIO. Until then this is "", which is harmless — /checkout
-  // dual-modes to /signup locally when no access token / product id is wired.
-  studio: process.env.NEXT_PUBLIC_POLAR_PRODUCT_STUDIO ?? "",
+  studio:
+    process.env.NEXT_PUBLIC_POLAR_PRODUCT_STUDIO ?? "708186c8-52eb-4d69-a2f7-dbcaa818e1e2",
   payg: process.env.NEXT_PUBLIC_POLAR_PRODUCT_PAYG ?? "e7966387-a84b-4e2e-847d-df99862cf2b6",
 };
 
