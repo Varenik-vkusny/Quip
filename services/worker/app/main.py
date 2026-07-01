@@ -506,6 +506,7 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
         payload,
         product_starter=os.environ.get("POLAR_PRODUCT_STARTER", ""),
         product_pro=os.environ.get("POLAR_PRODUCT_PRO", ""),
+        product_studio=os.environ.get("POLAR_PRODUCT_STUDIO", ""),
     )
     if change is not None:
         user_id, plan = change

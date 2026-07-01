@@ -87,24 +87,26 @@ def verify_signature(
     return False
 
 
-def product_to_plan(product_id: str, *, starter: str, pro: str) -> str | None:
-    """``product_id`` (Polar) → "starter" / "pro" / None (не наш продукт). PURE."""
+def product_to_plan(product_id: str, *, starter: str, pro: str, studio: str = "") -> str | None:
+    """``product_id`` (Polar) → "starter" / "pro" / "studio" / None (не наш продукт). PURE."""
     if starter and product_id == starter:
         return "starter"
     if pro and product_id == pro:
         return "pro"
+    if studio and product_id == studio:
+        return "studio"
     return None
 
 
 def _metadata_plan(data: dict[str, Any]) -> str | None:
     """Фолбэк-маппинг плана через ``metadata.plan`` продукта/заказа (forward-compat:
-    фаундер может выставить metadata.plan=starter|pro на продукте в Polar). PURE."""
+    фаундер может выставить metadata.plan=starter|pro|studio на продукте в Polar). PURE."""
     for src in (data.get("product"), data):
         if isinstance(src, dict):
             meta = src.get("metadata")
             if isinstance(meta, dict):
                 plan = str(meta.get("plan", "")).lower()
-                if plan in ("starter", "pro"):
+                if plan in ("starter", "pro", "studio"):
                     return plan
     return None
 
@@ -123,11 +125,15 @@ def _extract_user_id(data: dict[str, Any]) -> str | None:
 
 
 def parse_plan_change(
-    payload: dict[str, Any], *, product_starter: str, product_pro: str
+    payload: dict[str, Any],
+    *,
+    product_starter: str,
+    product_pro: str,
+    product_studio: str = "",
 ) -> tuple[str, str] | None:
     """Из Polar webhook-payload достать ``(user_id, plan_id)``. PURE.
 
-    Активная подписка наших продуктов → план starter/pro; canceled/revoked → "free".
+    Активная подписка наших продуктов → план starter/pro/studio; canceled/revoked → "free".
     None, если ивент не про план, нет user_id, или продукт не наш (вебхук игнорируем —
     отвечаем 200, Polar не ретраит).
     """
@@ -143,7 +149,10 @@ def parse_plan_change(
     if event in _DOWNGRADE_EVENTS:
         return (user_id, "free")
     plan = product_to_plan(
-        str(data.get("product_id", "")), starter=product_starter, pro=product_pro
+        str(data.get("product_id", "")),
+        starter=product_starter,
+        pro=product_pro,
+        studio=product_studio,
     )
     if plan is None:
         plan = _metadata_plan(data)  # фолбэк: metadata.plan на продукте/заказе

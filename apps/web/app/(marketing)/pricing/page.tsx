@@ -10,7 +10,7 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 export const metadata: Metadata = {
   title: "Pricing",
   description:
-    "Simple, honest pricing for Quip. One credit is one video (up to 60 min). Free, Starter ($15/mo), and Pro ($35/mo), plus pay-as-you-go at $3 a video. No surprise paywalls.",
+    "Simple, honest pricing for Quip. Your plan is a pool of minutes (1 video = 60 min), not a hard cap on uploads. Free, Starter ($15/mo), Pro ($35/mo), and Studio ($49/mo), plus pay-as-you-go at $3 a video. No surprise paywalls.",
   alternates: { canonical: "/pricing" },
 };
 

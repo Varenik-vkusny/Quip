@@ -8,7 +8,7 @@ import { PAYG, PLANS } from "@/lib/plans";
 import { checkoutHref, paygCheckoutHref } from "@/lib/polar";
 
 // ────────────────────────────────────────────────────────────────────────────
-// PricingCards — three plan panels (shared by landing section + /pricing) + a
+// PricingCards — four plan panels (shared by landing section + /pricing) + a
 // pay-as-you-go strip. Warm Precision: hairline panels on near-black, every
 // price/limit in mono tabular numerals (the data signature), and the coral accent
 // reserved for the ONE recommended plan (badge + ring + lit surface). Panels lift
@@ -19,7 +19,7 @@ export function PricingCards() {
   return (
     <>
       <Reveal>
-        <div className="mx-auto grid max-w-5xl items-stretch gap-5 lg:grid-cols-3">
+        <div className="mx-auto grid max-w-6xl items-stretch gap-5 lg:grid-cols-2 xl:grid-cols-4">
           {PLANS.map((plan) => {
             const recommended = plan.recommended ?? false;
             return (

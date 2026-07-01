@@ -31,6 +31,7 @@ class TestVideoUnits:
         assert plan_monthly_minutes(resolve_plan("free")) == 120  # 2 видео
         assert plan_monthly_minutes(resolve_plan("starter")) == 600  # 10 видео
         assert plan_monthly_minutes(resolve_plan("pro")) == 1800  # 30 видео
+        assert plan_monthly_minutes(resolve_plan("studio")) == 2520  # 42 видео
 
     def test_minutes_per_video_is_60(self) -> None:
         assert MINUTES_PER_VIDEO == 60
@@ -253,13 +254,19 @@ class TestPaygMinutesForSplit:
 
 class TestPlansShape:
     def test_three_tiers_ordered_by_price(self) -> None:
-        assert set(PLANS) == {"free", "starter", "pro"}
-        assert PLANS["free"].price_usd < PLANS["starter"].price_usd < PLANS["pro"].price_usd
+        assert set(PLANS) == {"free", "starter", "pro", "studio"}
+        assert (
+            PLANS["free"].price_usd
+            < PLANS["starter"].price_usd
+            < PLANS["pro"].price_usd
+            < PLANS["studio"].price_usd
+        )
 
     def test_monthly_videos(self) -> None:
         assert PLANS["free"].monthly_videos == 2
         assert PLANS["starter"].monthly_videos == 10
         assert PLANS["pro"].monthly_videos == 30
+        assert PLANS["studio"].monthly_videos == 42
 
 
 def test_current_month_format() -> None:

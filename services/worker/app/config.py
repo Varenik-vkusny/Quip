@@ -167,6 +167,7 @@ class Settings(BaseSettings):
     polar_webhook_secret: str = ""  # Standard Webhooks секрет Polar.sh (whsec_...)
     polar_product_starter: str = ""  # Polar product_id → план "starter"
     polar_product_pro: str = ""  # Polar product_id → план "pro"
+    polar_product_studio: str = ""  # Polar product_id → план "studio"
     supabase_url: str = ""
     supabase_service_role_key: str = ""  # 🔴 ТОЛЬКО сервер; пишет profiles.plan/usage_events
 

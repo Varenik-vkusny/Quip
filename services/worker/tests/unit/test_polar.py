@@ -102,6 +102,10 @@ def test_product_to_plan() -> None:
     assert polar.product_to_plan("p_x", starter="p_s", pro="p_p") is None
 
 
+def test_product_to_plan_studio() -> None:
+    assert polar.product_to_plan("p_st", starter="p_s", pro="p_p", studio="p_st") == "studio"
+
+
 def test_parse_plan_change_active_via_external_id() -> None:
     payload = {
         "type": "subscription.created",
@@ -122,6 +126,16 @@ def test_parse_plan_change_active_via_metadata() -> None:
         "user_2",
         "pro",
     )
+
+
+def test_parse_plan_change_studio() -> None:
+    payload = {
+        "type": "subscription.created",
+        "data": {"product_id": "p_st", "customer": {"external_id": "user_studio"}},
+    }
+    assert polar.parse_plan_change(
+        payload, product_starter="p_s", product_pro="p_p", product_studio="p_st"
+    ) == ("user_studio", "studio")
 
 
 def test_parse_plan_change_downgrade_on_cancel() -> None:
