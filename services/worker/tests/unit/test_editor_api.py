@@ -369,3 +369,27 @@ def test_render_job_writes_captioned_never_overwrites_clean(monkeypatch, tmp_pat
     assert clean.read_bytes() == b"CLEAN-REFRAME-CLIP"  # чистый клип НЕ перетёрт
     assert captured["status"] == "done"
     assert captured["url"] == "clips/clip_01_captioned.mp4"
+
+
+def test_get_jobs_lists_only_callers_jobs(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    db.insert_job("job_x1", "upload", "x1.mp4", user_id="user-X")
+    db.insert_job("job_y1", "upload", "y1.mp4", user_id="user-Y")
+    from app.main import app
+
+    with TestClient(app) as client:
+        r = client.get("/jobs", headers={"X-User-Id": "user-X"})
+    assert r.status_code == 200
+    assert [j["id"] for j in r.json()["jobs"]] == ["job_x1"]  # only caller's job
+
+
+def test_get_jobs_no_user_returns_empty(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    from app.main import app
+
+    with TestClient(app) as client:
+        r = client.get("/jobs")  # no X-User-Id, auth off (dev) → user_id None
+    assert r.status_code == 200
+    assert r.json() == {"jobs": []}

@@ -522,6 +522,23 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
     return {"ok": True, "applied": False}
 
 
+@app.get("/jobs")
+def list_user_jobs(
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Список джобов текущего юзера для дашборд-библиотеки (per-account, кросс-девайс).
+
+    Auth включён → user из проверенного JWT (``_resolve_user`` рейзит 401 при отсутствии/
+    невалиде токена). Без юзера (dev/dual-mode без X-User-Id) → пустой список. Воркер ходит
+    service-role (обходит RLS) → фильтрацию по user_id делаем САМИ, не полагаясь на RLS.
+    """
+    user_id = _resolve_user(authorization, x_user_id)
+    if user_id is None:
+        return {"jobs": []}
+    return {"jobs": db.list_jobs_for_user(user_id)}
+
+
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     """Статус задачи (wire-Job) из SQLite. 404, если задачи нет."""
