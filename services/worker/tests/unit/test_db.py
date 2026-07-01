@@ -425,3 +425,20 @@ def test_deduct_payg_missing_profile_is_safe(monkeypatch, tmp_path) -> None:
     db.init_db()
     db.deduct_payg("ghost", 2)
     assert db.get_profile("ghost")["payg_credits"] == 0
+
+
+# ─────────────────────────── list_jobs_for_user (per-user library) ───────────────────────────
+
+
+def test_list_jobs_for_user_returns_newest_first(monkeypatch, tmp_path) -> None:
+    # Дашборд-библиотека: список джобов конкретного user_id, новые сверху, чужие джобы не текут.
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "j.db")
+    db.init_db()
+    db.insert_job("job_a1", "upload", "a1.mp4", user_id="user-A")
+    db.insert_job("job_a2", "upload", "a2.mp4", user_id="user-A")
+    db.insert_job("job_b1", "upload", "b1.mp4", user_id="user-B")
+
+    rows = db.list_jobs_for_user("user-A")
+
+    ids = [r["id"] for r in rows]
+    assert ids == ["job_a2", "job_a1"]  # newest first (id DESC tiebreak), user-B excluded

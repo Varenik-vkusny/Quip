@@ -286,6 +286,24 @@ def get_job_row(job_id: str) -> dict[str, Any] | None:
     return first_row(r.json())
 
 
+def list_jobs_for_user(user_id: str) -> list[dict[str, Any]]:
+    """Lightweight per-user job list (newest first) for the dashboard library. Cloud path."""
+    r = httpx.get(
+        f"{_base()}/jobs",
+        params={
+            "user_id": f"eq.{user_id}",
+            "select": "id,status,source_minutes,created_at",
+            "order": "created_at.desc",
+            "limit": "50",
+        },
+        headers=_headers(),
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    return rows if isinstance(rows, list) else []
+
+
 # ─────────────────────────── job_artifacts (meta/segments/transcript) ───────────────────────────
 
 

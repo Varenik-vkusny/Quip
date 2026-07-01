@@ -45,7 +45,7 @@ def init_db() -> None:
             """CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 status TEXT, stage TEXT, progress INTEGER,
-                source_type TEXT, source_ref TEXT, error TEXT,
+                source_type TEXT, source_ref TEXT, error TEXT, user_id TEXT,
                 clips_json TEXT, cost_usd REAL, duration_sec REAL, elapsed_sec REAL,
                 function_call_id TEXT, cancellable INTEGER NOT NULL DEFAULT 1,
                 created_at REAL, updated_at REAL
@@ -104,6 +104,10 @@ def init_db() -> None:
         _ensure_column(c, "jobs", "moments_found", "INTEGER")
         # Per-user дефолт-стиль (зеркало 0014_style_preferences.sql), jsonb→TEXT локально.
         _ensure_column(c, "profiles", "style_preferences", "TEXT")
+        # Владелец джобы (зеркало cloud jobs.user_id, 0001_init_billing.sql) — раньше локально
+        # не писался (insert_job принимал user_id, но SQLite-путь его отбрасывал). Нужен для
+        # list_jobs_for_user (дашборд-библиотека) в dual-mode.
+        _ensure_column(c, "jobs", "user_id", "TEXT")
 
 
 def insert_job(
@@ -115,10 +119,9 @@ def insert_job(
     now = time.time()
     with _conn() as c:
         c.execute(
-            "INSERT INTO jobs"
-            " (id,status,stage,progress,source_type,source_ref,cancellable,created_at,updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
-            (job_id, "queued", "queued", 0, source_type, source_ref, 1, now, now),
+            "INSERT INTO jobs (id,status,stage,progress,source_type,source_ref,user_id,"
+            "cancellable,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (job_id, "queued", "queued", 0, source_type, source_ref, user_id, 1, now, now),
         )
 
 
@@ -456,6 +459,19 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return None
     row = dict(fetched)
     return _resolve_clip_urls(row_to_wire(row), cache_token=_cache_token(row))
+
+
+def list_jobs_for_user(user_id: str) -> list[dict[str, Any]]:
+    """Per-user job list (newest first): id, status, source_minutes, created_at. Dual-mode."""
+    if cs.cloud_enabled():
+        return cs.list_jobs_for_user(user_id)
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, status, source_minutes, created_at FROM jobs "
+            "WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 50",
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── артефакты пайплайна (meta/segments/transcript) — durable для лёгкого API на Modal ──
