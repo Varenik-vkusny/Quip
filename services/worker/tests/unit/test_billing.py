@@ -145,8 +145,9 @@ class TestCheckQuota:
         assert d.from_monthly_min == 10.0 and d.from_payg_min == 0.0
 
     def test_free_two_videos_equals_120_min(self) -> None:
-        # free = 2 видео = 120 мин: 119 мин использовано → ещё 1 мин ок; ровно 120 → отказ.
-        assert check_quota("free", 119.0, 0.0, 1.0).allowed is True
+        # free = 2 видео = 120 мин: 118 использовано → 2 мин остатка хватает на 1-мин видео
+        # (биллится по полу 2 мин); ровно 120 → отказ.
+        assert check_quota("free", 118.0, 0.0, 1.0).allowed is True
         assert check_quota("free", 120.0, 0.0, 5.0).allowed is False
 
     def test_free_has_no_per_video_cap_only_quota(self) -> None:
@@ -188,6 +189,31 @@ class TestCheckQuota:
 
     def test_decision_type(self) -> None:
         assert isinstance(check_quota("free", 0.0, 0.0, 1.0), QuotaDecision)
+
+
+class TestMinBilledFloor:
+    # Пол списания за видео (MIN_BILLED_MINUTES_PER_VIDEO): фикс. косты на джобу (cold start,
+    # рендер клипов, Gemini) НЕ масштабируются с длиной → короткое видео биллится минимум как
+    # пол. Честные видео (> пола) не задеты; убивает абьюз «пачка секундных роликов».
+    def test_tiny_video_billed_at_floor(self) -> None:
+        d = check_quota("starter", used_minutes=0.0, payg_minutes=0.0, source_minutes=1.0)
+        assert d.allowed is True
+        assert d.from_monthly_min == 2.0  # 1-мин видео биллится как 2 мин (пол), не 1
+        assert d.minutes == 1.0  # реальная длина сохранена (пол — только для списания)
+
+    def test_normal_video_billed_at_real_length(self) -> None:
+        d = check_quota("starter", used_minutes=0.0, payg_minutes=0.0, source_minutes=30.0)
+        assert d.from_monthly_min == 30.0  # выше пола → без изменений
+
+    def test_floor_bounds_tiny_video_exploit(self) -> None:
+        # 600-мин пул; каждое 1-мин видео биллится 2 → влезет максимум 300, не 600.
+        assert check_quota("starter", 599.0, 0.0, 1.0).allowed is False
+
+    def test_floor_spills_into_payg_at_edge(self) -> None:
+        # 1 месячная минута осталась, 1-мин видео (пол 2): 1 с месячного, 1 из PAYG.
+        d = check_quota("starter", used_minutes=599.0, payg_minutes=60.0, source_minutes=1.0)
+        assert d.allowed is True
+        assert d.from_monthly_min == 1.0 and d.from_payg_min == 1.0
 
 
 class TestPaygCreditsForSplit:

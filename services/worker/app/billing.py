@@ -33,6 +33,14 @@ MINUTES_PER_VIDEO = 60
 # плоский лимит 90 мин в stage0 (не связанный с планами) — заменён этим единым потолком.
 MAX_VIDEO_MINUTES = 180
 
+# Пол списания за ОДНО видео (минуты). Фикс. косты на джобу (Modal cold start N+3 контейнеров,
+# рендер/reframe каждого клипа + пере-скачивание исходника из R2, обязательные Gemini-вызовы) НЕ
+# масштабируются с длиной → короткий ролик стоит нам в 2–5× дороже за входную минуту. Биллим
+# каждое видео минимум как этот пол: честные видео (> пола) не задеты, но «пачка секундных
+# роликов» больше не гонит себестоимость выше выручки плана. Меняет ТОЛЬКО списание — реальную
+# длину (``QuotaDecision.minutes``) и техпотолок ``MAX_VIDEO_MINUTES`` он не трогает.
+MIN_BILLED_MINUTES_PER_VIDEO = 2.0
+
 
 @dataclass(frozen=True)
 class PlanLimits:
@@ -226,10 +234,13 @@ def check_quota(
             minutes=source_minutes,
         )
 
-    # (2) Месячный пул минут, затем PAYG (не сгорает).
+    # (2) Месячный пул минут, затем PAYG (не сгорает). Списываем НЕ МЕНЬШЕ пола за видео
+    # (``MIN_BILLED_MINUTES_PER_VIDEO``): фикс. косты на джобу не масштабируются с длиной →
+    # анти-абьюз мелких видео. Честные видео (> пола) не задеты (billed == source_minutes).
+    billed = max(source_minutes, MIN_BILLED_MINUTES_PER_VIDEO)
     monthly_remaining = max(0.0, plan_monthly_minutes(plan) - used_minutes)
-    from_monthly = min(source_minutes, monthly_remaining)
-    shortfall = source_minutes - from_monthly
+    from_monthly = min(billed, monthly_remaining)
+    shortfall = billed - from_monthly
 
     if shortfall <= payg_minutes + 1e-6:
         return QuotaDecision(
@@ -244,7 +255,7 @@ def check_quota(
     avail = monthly_remaining + payg_minutes
     return QuotaDecision(
         False,
-        f"Not enough minutes left: this video needs {source_minutes:.0f} min but you have "
+        f"Not enough minutes left: this video needs {billed:.0f} min but you have "
         f"{avail:.0f} min ({minutes_to_videos(avail):.1f} videos) on {plan.name}. "
         f"Top up (${PAYG_PRICE_USD:.0f}/video) or upgrade your plan.",
         minutes=source_minutes,
