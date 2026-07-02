@@ -28,6 +28,7 @@ def edit_matches_baked(
     Условия (ВСЕ обязательны — иначе геометрия baked-клипа уже не та):
       • ``aspect == "9:16"`` — baked всегда 9:16; другой аспект = другой кадр.
       • нет ``reframe_overrides`` — ручной кроп меняет регионы → нужен пересчёт.
+      • ``lock_per_shot is True`` — baked рендерится LOCKED (дефолт батча); follow (пан) = пиксели.
       • РОВНО один source-интервал — мульти-интервал = пере-монтаж (concat), не один клип.
       • границы интервала совпадают с сегментом (в пределах ``tol``) — клип не тримили/не сдвигали
         (baked рендерился именно из [seg_start, seg_end]; default_clip_edit сидит этот интервал).
@@ -37,6 +38,9 @@ def edit_matches_baked(
     if edit.aspect != _BAKED_ASPECT:
         return False
     if edit.reframe_overrides:
+        return False
+    if not edit.lock_per_shot:
+        # baked рендерится LOCKED (дефолт); follow = пан вместо статики = другие пиксели → пересчёт.
         return False
     if len(edit.source_intervals) != 1:
         return False

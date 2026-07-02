@@ -4,6 +4,7 @@ import { Captions, ChevronDown, Download, FileText, Film, Loader2 } from "lucide
 import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { captionedDownloadUrl, clipCleanExportUrl, clipSrtUrl } from "@/lib/api";
+import { ConfirmRenderModal } from "@/components/editor/ConfirmRenderModal";
 
 // Меню «Скачать» — экспорт-свобода: юзер уносит клип в любой редактор.
 //  • С субтитрами (MP4)  — прожжённый клип. Если есть СВЕЖИЙ рендер (bakedUrl) — отдаём его
@@ -44,6 +45,8 @@ export function ExportMenu({
   bakedUrl = null,
   cleanBakedUrl = null,
   dirty = false,
+  pixelDirty = false,
+  onRender,
   align = "right",
   placement = "down",
   className = "",
@@ -59,6 +62,12 @@ export function ExportMenu({
   /** Есть НЕ-отрендеренные правки (изменён шрифт хука и т.п.)? → bakedUrl устарел,
    *  скачиваем свежий on-demand рендер, а не протухший CDN-снимок. */
   dirty?: boolean;
+  /** Pixel-level edits (framing/crop/aspect/trim/motion) since last render — the downloaded
+   *  file has wrong pixels. When true, captioned/clean download shows a re-render confirm modal. */
+  pixelDirty?: boolean;
+  /** Trigger a full re-render (same as the Render button). Called when user picks "Re-render now"
+   *  in the ConfirmRenderModal. Required when pixelDirty can be true (editor context). */
+  onRender?: () => void;
   align?: "left" | "right";
   placement?: "up" | "down";
   className?: string;
@@ -68,6 +77,14 @@ export function ExportMenu({
   // Which item is currently being prepared/downloaded (its key), or null. Disables clicks + spins.
   const [busy, setBusy] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+
+  // ── ConfirmRenderModal state (pixelDirty gate) ──
+  // confirmOpen: modal is visible. pendingRef: the download that was intercepted by the modal.
+  // awaitingRenderRef: user picked "Re-render now" — when pixelDirty clears we auto-download.
+  // A ref (not state) so the effect only re-runs on pixelDirty / url changes, not on this flag.
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const pendingRef = useRef<{ key: string; fallbackName: string } | null>(null);
+  const awaitingRenderRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -98,8 +115,46 @@ export function ExportMenu({
   // endpoints render on the fly → fetch + spinner so the user sees progress instead of dead-clicking.
   const captionedInstant = !!bakedUrl && !dirty;
 
+  // After "Re-render now": once pixelDirty clears (render completed), trigger the queued download
+  // with the fresh post-render urls (bakedUrl will be set, captionedInstant will be true).
+  // awaitingRenderRef is a ref — we read it here but don't put it in deps; the effect re-runs
+  // only when pixelDirty / urls change, which is exactly when we need to act.
+  useEffect(() => {
+    if (!awaitingRenderRef.current || pixelDirty) return;
+    awaitingRenderRef.current = false; // consume the flag (ref mutation — no re-render)
+    const p = pendingRef.current;
+    pendingRef.current = null;
+    if (!p) return;
+    const url = p.key === "captioned" ? captionedUrl : cleanUrl;
+    const instant = p.key === "captioned" ? captionedInstant : cleanInstant;
+    if (instant) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = p.fallbackName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } else {
+      setBusy(p.key);
+      void downloadFile(url, p.fallbackName)
+        .then(() => setBusy(null))
+        .catch((e) => {
+          console.warn("[export] post-render blob download failed, falling back:", e);
+          setBusy(null);
+          window.location.href = url;
+        });
+    }
+  }, [pixelDirty, captionedUrl, cleanUrl, captionedInstant, cleanInstant]);
+
   const pick = async (key: string, url: string, fallbackName: string, instant: boolean) => {
     if (busy) return;
+    // Gate: if there are unrendered pixel edits (framing/crop/aspect/trim/motion), intercept
+    // captioned and clean downloads and show the ConfirmRenderModal instead.
+    if (pixelDirty && (key === "captioned" || key === "clean")) {
+      pendingRef.current = { key, fallbackName };
+      setConfirmOpen(true);
+      return;
+    }
     if (instant) {
       // Stable CDN artifact — let the browser stream it to disk natively (no render wait).
       const a = document.createElement("a");
@@ -122,6 +177,44 @@ export function ExportMenu({
     } finally {
       setBusy(null);
     }
+  };
+
+  // Modal: "Re-render now" — trigger a full render; the useEffect above auto-downloads when done.
+  const handleRerender = () => {
+    setConfirmOpen(false);
+    setOpen(false);
+    awaitingRenderRef.current = true; // arm the auto-download; effect fires when pixelDirty clears
+    onRender?.();
+  };
+
+  // Modal: "Download anyway" — proceed with the current on-demand download, bypassing the gate.
+  const handleDownloadAnyway = () => {
+    setConfirmOpen(false);
+    const p = pendingRef.current;
+    pendingRef.current = null;
+    if (!p) return;
+    // Resolve urls from current props (pixelDirty is still true → on-demand endpoint).
+    const url = p.key === "captioned" ? captionedUrl : cleanUrl;
+    const instant = p.key === "captioned" ? captionedInstant : cleanInstant;
+    if (busy) return;
+    if (instant) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = p.fallbackName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setOpen(false);
+      return;
+    }
+    setBusy(p.key);
+    void downloadFile(url, p.fallbackName)
+      .then(() => { setBusy(null); setOpen(false); })
+      .catch((e) => {
+        console.warn("[export] blob download failed, falling back to direct link:", e);
+        setBusy(null);
+        window.location.href = url;
+      });
   };
 
   return (
@@ -173,6 +266,16 @@ export function ExportMenu({
           />
         </div>
       )}
+      {/* Render-required gate: shown when the user downloads after framing/crop/aspect/trim/motion edits. */}
+      <ConfirmRenderModal
+        open={confirmOpen}
+        onRerender={handleRerender}
+        onDownloadAnyway={handleDownloadAnyway}
+        onClose={() => {
+          setConfirmOpen(false);
+          pendingRef.current = null;
+        }}
+      />
     </div>
   );
 }

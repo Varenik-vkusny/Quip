@@ -18,8 +18,11 @@ import json
 import re
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from app.errors import JobError
 from app.models import CropWindow
@@ -50,6 +53,43 @@ _GLIDE_MAX_DCX = 0.10
 # НЕ считался», а НЕ «молчит»: один однозначный говорящий → это сильнейший сигнал для FILL. Поэтому
 # silence-gate (→ wide) НЕ срабатывает на сентинеле: требуем РЕАЛЬНЫЙ отрицательный скор (> этого).
 _ASD_NODATA = -5.0
+# Мин. покрытие шота дорожкой, чтобы лицо считалось СУБЪЕКТОМ для fill-кропа. Ниже — лица по сути
+# нет (хвост дорожки заполз за склейку / мелькнувшее лицо в establishing-плане) → fit (wide), а НЕ
+# tight-кроп в «ноги»/торс. Репро CARDI B: говорящий бьётся 3 кадра (1.3%) в 7.9с B-roll → кроп ног.
+# Совпадает с coverage_min гейта _is_wide_shot (чистый разрыв 1–6% ↔ 35–100% покрытия).
+_FILL_MIN_COVERAGE = 0.25
+
+
+# ─────────────────── Фазовые тайминги (observability, [reframe]-строка) ───────────────────
+
+# Per-thread копилка длительностей фаз reframe: наполняют detect_scene_cuts (scene_detect/
+# refine) и asd_reframe.score_tracks_in_segment (sample/detect/asd), печатает ОДНОЙ строкой
+# reframe_segment. thread-local ОБЯЗАТЕЛЕН: клипы рендерятся параллельными потоками
+# (RENDER_CONCURRENCY) — модульный dict перемешал бы фазы разных клипов.
+_PHASE_TIMINGS = threading.local()
+
+
+def _phase_reset() -> None:
+    """Начать сбор фазовых таймингов reframe для ТЕКУЩЕГО потока (зовёт reframe_segment)."""
+    _PHASE_TIMINGS.d = {}
+
+
+def _phase_add(name: str, seconds: float) -> None:
+    """Прибавить длительность фазы (сек) в копилку текущего потока.
+
+    Копилки нет (детектор/ASD позваны ВНЕ reframe_segment: main.py:_tight_lock_cx,
+    reframe_cache) → замер некуда сводить, пропускаем. Это штатный режим сбора, не
+    фолбэк-на-ошибке (правило «no silent fallbacks» не про это).
+    """
+    d: dict[str, float] | None = getattr(_PHASE_TIMINGS, "d", None)
+    if d is not None:
+        d[name] = d.get(name, 0.0) + seconds
+
+
+def _phase_get(name: str) -> float:
+    """Суммарная длительность фазы (сек) в текущем потоке; фаза не бегала → 0.0."""
+    d: dict[str, float] = getattr(_PHASE_TIMINGS, "d", {})
+    return d.get(name, 0.0)
 
 
 # ─────────────────────────── Dataclasses ───────────────────────────
@@ -156,6 +196,27 @@ def smooth_centers(
             last = last + smoothing * (cx - last)
         result.append(last)
     return result
+
+
+def compute_locked_cx(centers: list[float], face_width: float, crop_w_frac: float) -> float | None:
+    """ОДИН статичный cx на шот, при котором ВСЁ лицо влезает в 9:16-кроп на каждом кадре. PURE.
+
+    Размах центров лица за шот [min, max] плюс ширина лица должен влезть в ширину кропа
+    (crop_w_frac): тогда ставим кроп на СЕРЕДИНУ размаха — лицо целиком на каждом кадре,
+    статикой, без слежения («лок на шот», фокус на конкретном месте после склейки). Если НЕ
+    влезает (субъект реально проходит через кадр дальше, чем кроп может удержать) → None →
+    вызывающий фолбэчит на слежение (_track_trajectory), чтобы не потерять движущегося.
+
+    Меняет ТОЛЬКО значение cx ВНУТРИ fill-региона (одна точка вместо траектории) — границы
+    режима fill/fit и кадровая сетка НЕ тронуты (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md
+    цел: рендер схлопывает одно-точечную траекторию в постоянный кроп, флеши невозможны).
+    """
+    if not centers:
+        return None
+    lo, hi = min(centers), max(centers)
+    if (hi - lo) + face_width <= crop_w_frac:
+        return (lo + hi) / 2
+    return None
 
 
 def classify_frame(all_faces: list[tuple[float, float]], crop_w_frac: float) -> str:
@@ -314,6 +375,32 @@ def _pick_target(active: list[SpeakerTrack], speak_threshold: float) -> SpeakerT
     return best
 
 
+def locked_cx_for_tracks(
+    tracks: list[SpeakerTrack],
+    src_w: int,
+    src_h: int,
+    *,
+    speak_threshold: float,
+    smoothing: float,
+) -> float | None:
+    """Лок-центр лица для РУЧНОГО tight-override (таб «Кадр»): cx говорящего/крупнейшего лица в
+    диапазоне, вмещающий лицо в 9:16 (compute_locked_cx); не влезает (субъект панорамирует шире
+    кропа) → медиана сглаженных центров. Нет лиц/дорожек → None (вызывающий оставит честный
+    0.5-фолбэк). PURE (вход — уже посчитанные дорожки). Меняет ТОЛЬКО cx ВНУТРИ fill-региона —
+    границы режима / кадровая сетка НЕ тронуты (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md цел).
+    """
+    target = _pick_target(tracks, speak_threshold)
+    if target is None or not target.cx:
+        return None
+    crop_w_frac = round(src_h * _ASPECT_W / _ASPECT_H) / src_w
+    sm = smooth_centers(list(target.cx), smoothing, init=target.cx[0])
+    locked = compute_locked_cx(sm, target.width, crop_w_frac)
+    if locked is not None:
+        return locked
+    ordered = sorted(sm)
+    return ordered[len(ordered) // 2]
+
+
 def _track_trajectory(
     t: SpeakerTrack,
     f0: int,
@@ -357,6 +444,7 @@ def plan_regions(
     *,
     crop_w_frac: float,
     smoothing: float = 0.15,
+    lock_per_shot: bool = True,
     speak_threshold: float = 0.0,
     wide_spread_min: float | None = None,
     mode_setting: str = "auto",
@@ -411,7 +499,17 @@ def plan_regions(
             regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
             prev_fill_end_cx = None
             continue
-        target = _pick_target(active, speak_threshold)
+        # FILL-кандидаты: дорожки с покрытием ≥ _FILL_MIN_COVERAGE кадров шота. Хвост дорожки,
+        # заползший за склейку в face-sparse план (покрытие ~1%), НЕ субъект → не кропим широкий
+        # план в «ноги»/торс (репро CARDI B: 3 кадра в 7.9с B-roll). Нет покрытой дорожки → fit.
+        covered = [
+            t for t in active if len(_track_cx_in_shot(t, f0, f1)) >= _FILL_MIN_COVERAGE * (f1 - f0)
+        ]
+        target = _pick_target(covered, speak_threshold)
+        if mode_setting != "fill" and target is None:
+            regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
+            prev_fill_end_cx = None
+            continue
         # Одиночное лицо → fill ТОЛЬКО если это УВЕРЕННЫЙ говорящий И достаточно крупное лицо.
         # → fit (wide), если: (а) лицо уверенно МОЛЧИТ (speak < _SILENCE_WIDE_MAX) = B-roll/реакция/
         # широкий establishing-план (реклайн) — НЕ режем вертикальный strip по телу/ногам; ИЛИ
@@ -428,24 +526,46 @@ def plan_regions(
             regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
             prev_fill_end_cx = None
             continue
-        # Hybrid-наведение: новый fill ДОЕЗЖАЕТ от центра прошлого fill-шота (continuity, плавный
-        # кинематографичный пан) если новый говорящий БЛИЗКО (|Δ| ≤ _GLIDE_MAX_DCX); если ДАЛЬШЕ
-        # (другая камера/спикер) — init=None → СНАП на лицо (иначе кроп откроется «пол-лица» и
-        # медленно поползёт — баг, пойманный на Tom Holland). EMA ВНУТРИ шота не тронут → steady-
-        # state плавность та же. Кадровая сетка / границы режима НЕ трогаются (инвариант
-        # docs/REFRAME_FPS_GRID_INVARIANT.md цел).
-        target_first = None
-        if target is not None:
-            cxs = _track_cx_in_shot(target, f0, f1)
-            target_first = cxs[0] if cxs else None
-        init = prev_fill_end_cx
-        if init is not None and (target_first is None or abs(target_first - init) > _GLIDE_MAX_DCX):
-            init = None
-        pts = (
-            _track_trajectory(target, f0, f1, fps, smoothing, init_cx=init)
-            if target is not None
-            else (TrackPoint(t=t0, mode="fill", cx=0.5 if init is None else init),)
-        )
+        # FILL: фокус ЗАФИКСИРОВАН на шот (lock_per_shot, дефолт) — один статичный центр,
+        # вмещающий ВСЁ лицо за весь шот → камера НЕ следует за лицом, после склейки сразу стоит
+        # на месте (запрос фаундера: «фиксировать фокус, а не следовать»). Субъект, реально
+        # проходящий через кадр дальше бюджета кропа → compute_locked_cx=None → фолбэк на слежение
+        # (_track_trajectory, init=None → СНАП на лицо с первого кадра, без «пол-лица»).
+        # Одна точка ⇒ рендер = постоянный кроп; границы режима / кадровая сетка не тронуты
+        # (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md цел).
+        if lock_per_shot:
+            raw = _track_cx_in_shot(target, f0, f1) if target is not None else []
+            locked = (
+                compute_locked_cx(
+                    smooth_centers(list(raw), smoothing, init=raw[0]), target.width, crop_w_frac
+                )
+                if (target is not None and raw)
+                else None
+            )
+            if locked is not None:
+                pts: tuple[TrackPoint, ...] = (TrackPoint(t=t0, mode="fill", cx=locked),)
+            elif target is not None:
+                pts = _track_trajectory(target, f0, f1, fps, smoothing)  # снап + слежение
+            else:
+                pts = (TrackPoint(t=t0, mode="fill", cx=0.5),)
+        else:
+            # Legacy hybrid-наведение (глайд на близких склейках, снап на дальних). Сохранён ПОД
+            # ФЛАГОМ для отката/совместимости. ⚠️ EMA ВНУТРИ шота = «следование», от которого
+            # фаундер просил уйти — поэтому это больше НЕ дефолт.
+            target_first = None
+            if target is not None:
+                cxs = _track_cx_in_shot(target, f0, f1)
+                target_first = cxs[0] if cxs else None
+            init = prev_fill_end_cx
+            if init is not None and (
+                target_first is None or abs(target_first - init) > _GLIDE_MAX_DCX
+            ):
+                init = None
+            pts = (
+                _track_trajectory(target, f0, f1, fps, smoothing, init_cx=init)
+                if target is not None
+                else (TrackPoint(t=t0, mode="fill", cx=0.5 if init is None else init),)
+            )
         regions.append(TrackRegion(t0=t0, t1=t1, mode="fill", points=pts))
         prev_fill_end_cx = pts[-1].cx
     return regions
@@ -624,6 +744,67 @@ def _scene_cut_offset(fps: float) -> int:
     return 1 if abs(fps - round(fps)) > 1e-3 else 0
 
 
+def _argmax_jump(diffs: list[tuple[int, float]], fallback: int) -> int:
+    """Кадр с МАКСИМАЛЬНЫМ скачком контента (diff vs предыдущий). Пусто → fallback. PURE."""
+    if not diffs:
+        return fallback
+    return max(diffs, key=lambda d: d[1])[0]
+
+
+def _refine_cut_native(video: Path, start: float, candidate: int, *, window: int = 4) -> int:
+    """Снап PySceneDetect-кандидата на ТОЧНЫЙ кадр контент-склейки в НАТИВНОМ декоде. Fail-safe.
+
+    PySceneDetect гоняется на ПЕРЕ-сжатом сегменте; фиксированный fps-offset (_scene_cut_offset)
+    пересаливал на видео, где реэнкод НЕ ресэмплил (репро CARDI B 29.97: PySceneDetect raw=322 =
+    истинная склейка, а offset −1 уводил границу на 321 = ФЛЕШ на fill↔fit). Здесь декодим узкое
+    окно НАТИВНЫХ кадров [candidate±window] от того же origin (start=aligned_start, как режет
+    рендер) и снапим границу на кадр МАКС. скачка яркости → граница == реальная склейка независимо
+    от fps/ресэмпла (ground-truth, не эвристика). Δ=0 цел (целые нативные кадры). Сбой ffmpeg / нет
+    кадров → возвращаем candidate (без тихого вреда — хуже не делаем).
+
+    ⚠️ Декод КАПИТСЯ `-frames:v (hi-lo+1)` — иначе ffmpeg после `-ss` декодит исходник до EOF
+    на КАЖДЫЙ кандидат, оставляя ~9 PNG (на 86-мин сорсе ранние клипы ждали 491–776с в этой
+    фазе). select пропускает ровно кадры n∈[lo,hi] → лимит выходных кадров достигается ТОЛЬКО
+    после кадра hi → декод глохнет сразу за окном, остановиться РАНЬШЕ hi он не может →
+    множество PNG байт-в-байт прежнее. Кап — СЧЁТЧИК кадров в той же n-сетке от -ss-origin,
+    что и select (fps не нужен, округления времени нет); `-ss`/select-выражение НЕ трогать —
+    сместится нумерация n = выберутся другие кадры. Запас (+margin) счётчику ПРОТИВОПОКАЗАН:
+    select больше hi-lo+1 кадров не отдаст → лимит недостижим → декод снова уйдёт в EOF.
+    """
+    import cv2  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    lo = max(1, candidate - window)
+    hi = candidate + window
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(start), "-i", str(video),
+            "-vf", f"select='gte(n\\,{lo})*lte(n\\,{hi})'", "-vsync", "0",
+            "-frames:v", str(hi - lo + 1),
+            "-start_number", str(lo), str(out / "r_%06d.png"),
+        ]  # fmt: skip
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            return candidate
+        if proc.returncode != 0:
+            return candidate
+        grays: list[tuple[int, Any]] = []
+        for p in sorted(out.glob("r_*.png")):
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            grays.append(
+                (int(p.stem.split("_")[1]), cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype("int16"))
+            )
+    diffs = [
+        (grays[i][0], float(np.mean(np.abs(grays[i][1] - grays[i - 1][1]))))
+        for i in range(1, len(grays))
+    ]
+    return _argmax_jump(diffs, candidate)
+
+
 def detect_scene_cuts(
     video: Path,
     start: float,
@@ -645,6 +826,7 @@ def detect_scene_cuts(
     """
     from scenedetect import ContentDetector, SceneManager, open_video  # noqa: PLC0415
 
+    t0 = time.monotonic()
     with tempfile.TemporaryDirectory() as td:
         seg = Path(td) / "seg.mp4"
         cut_cmd = [
@@ -697,8 +879,15 @@ def detect_scene_cuts(
     # 29.97: cut@261, PySceneDetect 262), ЦЕЛЫЙ fps → 0. Жёсткий -1 на 25fps уводил границу на кадр
     # РАНЬШЕ контент-склейки = 1 кадр старого шота в НОВОМ режиме = флеш на tight↔wide
     # (REFRAME_FPS_GRID_INVARIANT). Δ=0 цел: t0=(cut-off)/fps ТОЧНЫЙ кадр → round(t0*fps)=cut-off.
-    off = _scene_cut_offset(fps)
-    return [max(1, s[0].get_frames() - off) for s in scenes[1:]]
+    # Снап КАЖДОЙ границы на РЕАЛЬНУЮ контент-склейку в нативном декоде (_refine_cut_native) =
+    # ground-truth вместо хрупкого fps-offset (_scene_cut_offset вычитал 1 на любом дробном fps;
+    # при ТОЧНОМ нативном fps ресэмпла нет → −1 уводил на кадр РАНЬШЕ склейки = ФЛЕШ fill↔fit,
+    # репро CARDI B 29.97: raw=322=истина, −1→321). Снап на макс. скачок яркости верен на ЛЮБОМ fps.
+    _phase_add("scene_detect", time.monotonic() - t0)
+    t0 = time.monotonic()
+    refined = [_refine_cut_native(video, start, s[0].get_frames()) for s in scenes[1:]]
+    _phase_add("refine", time.monotonic() - t0)
+    return refined
 
 
 # ─────────────────────────── I/O: кадры (ffmpeg) + лица (MediaPipe) ───────────────────────────
@@ -815,6 +1004,7 @@ def reframe_segment(
     speaker_crop_scale: float = 0.55,
     face_fps: float = 25.0,
     smoothing: float = 0.15,
+    lock_per_shot: bool = True,
     min_hold_sec: float = 1.5,
     speak_threshold: float = 0.0,
     scene_threshold: float = 27.0,
@@ -829,6 +1019,8 @@ def reframe_segment(
     """
     from app.pipeline.asd_reframe import score_tracks_in_segment  # noqa: PLC0415
 
+    _phase_reset()  # копилка фазовых таймингов ЭТОГО клипа (см. [reframe]-строку ниже)
+    t_total = time.monotonic()
     # Геометрия (склейки/шоты/регионы) И рендер работают в НАТИВНОЙ сетке fps источника.
     # origin = aligned_start (= round(start*fps)/fps) — ТА ЖЕ граница кадра, что в render_clip,
     # иначе t0 регионов уезжает на <1 кадр от filtergraph-часов → флеш. ASD остаётся @face_fps
@@ -856,6 +1048,7 @@ def reframe_segment(
             fps,
             crop_w_frac=crop_w_frac,
             smoothing=smoothing,
+            lock_per_shot=lock_per_shot,
             speak_threshold=speak_threshold,
             mode_setting=mode_setting,
             split_enabled=split_enabled,
@@ -868,4 +1061,14 @@ def reframe_segment(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_reframe_json(out_dir, clip_id, regions)
+    # Одна компактная строка фазовых таймингов на клип: прод-лог между стартом контейнера и
+    # финальной clip-строкой иначе ПУСТ — тюнить перф вслепую нельзя. Фазы копят
+    # detect_scene_cuts (scene_detect/refine) и score_tracks_in_segment (sample/detect/asd).
+    print(
+        f"[reframe] clip={clip_id} "
+        f"scene_detect={_phase_get('scene_detect'):.1f}s cuts={len(cuts)} "
+        f"refine={_phase_get('refine'):.1f}s sample={_phase_get('sample'):.1f}s "
+        f"detect={_phase_get('detect'):.1f}s asd={_phase_get('asd'):.1f}s "
+        f"tracks={len(tracks_native)} total={time.monotonic() - t_total:.1f}s"
+    )
     return regions, face_found

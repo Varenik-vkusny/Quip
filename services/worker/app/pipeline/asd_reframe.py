@@ -13,6 +13,7 @@ from __future__ import annotations
 import glob
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ import numpy as np
 
 from app.config import get_settings
 from app.errors import JobError
-from app.pipeline.stage3_reframe import SpeakerTrack
+from app.pipeline.stage3_reframe import SpeakerTrack, _phase_add
 from app.pipeline.stage3_speaker import build_tracks, should_score_asd
 
 _STAGE = "reframe"
@@ -83,6 +84,10 @@ def score_tracks_in_segment(
 
     model = _ensure_face_model()
     with tempfile.TemporaryDirectory() as td:
+        # Фазовые тайминги ([reframe]-строка reframe_segment): sample = ffmpeg-экстракция
+        # кадров/аудио + чтение JPEG; detect = MediaPipe-детект + build_tracks; asd = crop +
+        # torch-скоринг (0.0s при скипе single-track). Сбор — stage3_reframe._phase_add.
+        t0 = time.monotonic()
         fdir = Path(td) / "f"
         fdir.mkdir()
         _ffmpeg(
@@ -133,9 +138,11 @@ def score_tracks_in_segment(
             if img is None:
                 raise JobError(_STAGE, f"cannot read frame {fpath}")
             frames.append(img)
+        _phase_add("sample", time.monotonic() - t0)
         if not frames:
             return []
 
+        t0 = time.monotonic()
         opts = mp_vision.FaceDetectorOptions(
             base_options=mp_python.BaseOptions(model_asset_path=str(model)),
             min_detection_confidence=0.5,
@@ -162,6 +169,7 @@ def score_tracks_in_segment(
                 frame_faces.append(ff)
 
         tracks = build_tracks(frame_faces)
+        _phase_add("detect", time.monotonic() - t0)
         if not tracks:
             return []
 
@@ -173,6 +181,7 @@ def score_tracks_in_segment(
         score_asd = (not get_settings().reframe_skip_asd_single_track) or should_score_asd(
             len(tracks)
         )
+        t0 = time.monotonic()
         sr, audio = wavfile.read(wav) if score_asd else (0, None)
         out: list[SpeakerTrack] = []
         for tr in tracks:
@@ -196,4 +205,5 @@ def score_tracks_in_segment(
                     speak=speak,
                 )
             )
+        _phase_add("asd", time.monotonic() - t0)
         return out

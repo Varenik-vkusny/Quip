@@ -237,6 +237,7 @@ def resolve_regions_accurate(
     speaker_crop_scale: float = 0.55,
     face_fps: float = 25.0,
     smoothing: float = 0.15,
+    lock_per_shot: bool = True,
     min_hold_sec: float = 1.5,
     speak_threshold: float = 0.0,
     scene_threshold: float = 27.0,
@@ -263,7 +264,9 @@ def resolve_regions_accurate(
         # Wide, или старый сломанный per-shot) схлопывал /reframe в ОДИН регион → мини-таймлайн
         # показывал один блок «как будто нет сегментов», и пошотовый контроль было НЕ вернуть (#5,
         # повторный фидбек). Перекрас сохраняет границы (инвариант цел); ASD амортизируется кэшем.
-        cache = cache_dir / f"acc_{iv.source_start:.2f}_{iv.source_end:.2f}.json"
+        # Ключ кэша РАЗЛИЧАЕТ lock/follow — иначе follow отдал бы залоченные регионы.
+        lk = "lock" if lock_per_shot else "follow"
+        cache = cache_dir / f"acc_{iv.source_start:.2f}_{iv.source_end:.2f}_{lk}.json"
         if cache.exists():
             regions = [_region_from_dict(d) for d in json.loads(cache.read_text("utf-8"))]
         else:
@@ -272,6 +275,7 @@ def resolve_regions_accurate(
                 video, src_w, src_h, iv.source_start, iv.source_end,
                 clip_id=cid, out_dir=out_dir, fps=fps, mode_setting=mode_setting,
                 speaker_crop_scale=speaker_crop_scale, face_fps=face_fps, smoothing=smoothing,
+                lock_per_shot=lock_per_shot,
                 min_hold_sec=min_hold_sec, speak_threshold=speak_threshold,
                 scene_threshold=scene_threshold, min_scene_sec=min_scene_sec,
                 split_enabled=split_enabled, wide_speak_min=wide_speak_min,

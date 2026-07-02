@@ -313,11 +313,15 @@ def test_create_job_quota_gate_blocks_over_limit(monkeypatch) -> None:
     from app.main import app
 
     monkeypatch.setenv("BILLING_ENABLED", "true")
-    uid = "user_gate_over"
+    # Свежий uid: изолируемся от persist-БД tests (services/worker/tmp/jobs.db не сбрасывается).
+    uid = f"user_gate_over_{int(time.time())}"
     db.set_user_plan(uid, "free")
     month = billing.current_month()
-    db.record_usage(uid, "j1", 5.0, month)
-    db.record_usage(uid, "j2", 5.0, month)  # 2 видео = лимит free
+    # Create-time гейт (_enforce_quota) меряет МИНУТЫ (SUM source_minutes), НЕ число событий, и
+    # роняет 402 только когда месячный пул + PAYG на нуле. Исчерпываем весь пул free (2 видео =
+    # 120 мин). Уникальные job_id ({uid}_*): record_usage дедуплит по ГЛОБАЛЬНОМУ job_id.
+    db.record_usage(uid, f"{uid}_j1", 60.0, month)
+    db.record_usage(uid, f"{uid}_j2", 60.0, month)  # 120 мин = месячный пул free исчерпан
     with TestClient(app) as client:
         r = client.post(
             "/jobs",

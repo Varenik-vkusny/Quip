@@ -85,10 +85,12 @@ def ensure_source(job_id: str) -> Path:
     out = job_dir(job_id)
     src = out / "source.mp4"
     if src.exists():
+        print(f"[artifacts] source cached: {job_id}")
         return src
     if cloud_enabled():
         from app.storage import download_source
 
+        print(f"[artifacts] source missing -> downloading: {job_id}")
         out.mkdir(parents=True, exist_ok=True)
         download_source(job_id, src)
         return src

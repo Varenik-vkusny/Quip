@@ -12,7 +12,9 @@ Pure-билдеры покрыты unit-тестами; R2 upload/presign — I/
 
 from __future__ import annotations
 
+import json
 import math
+import time
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -349,12 +351,16 @@ def set_upload_cors() -> dict[str, object]:
 def download_source(job_id: str, dest: Path) -> None:
     """Скачать source.mp4 из R2 в dest (для редактор-рендера). JobError при сбое."""
     s = get_settings()
+    key = source_object_key(job_id)
+    t0 = time.monotonic()
     try:
-        _r2_client().download_file(
-            s.r2_bucket, source_object_key(job_id), str(dest), Config=_transfer_config()
-        )
+        _r2_client().download_file(s.r2_bucket, key, str(dest), Config=_transfer_config())
     except Exception as e:  # noqa: BLE001
         raise JobError("storage", f"R2 download source {job_id} failed: {e}") from e
+    elapsed = time.monotonic() - t0
+    size_mb = dest.stat().st_size / (1024 * 1024)
+    mbps = size_mb / elapsed if elapsed > 0 else 0.0
+    print(f"[storage] download {key} {size_mb:.1f}MB in {elapsed:.1f}s ({mbps:.1f} MB/s)")
 
 
 def download_clip(job_id: str, clip_id: str, dest: Path, *, variant: str = "") -> None:
@@ -373,6 +379,51 @@ def download_clip(job_id: str, clip_id: str, dest: Path, *, variant: str = "") -
         )
     except Exception as e:  # noqa: BLE001
         raise JobError("storage", f"R2 download clip {job_id}/{clip_id} failed: {e}") from e
+
+
+def fanout_result_key(job_id: str, clip_index: int) -> str:
+    """PURE. R2-ключ result-dict'а ОДНОГО клипа при контейнерном фан-ауте рендера. Координатор
+    (главный job) читает их по clip_index и собирает итоговый список результатов рендера."""
+    return f"{job_id}/_fanout/clip_{clip_index:02d}.json"
+
+
+def upload_fanout_result(job_id: str, clip_index: int, data: dict[str, Any]) -> None:
+    """Записать result-dict одного fanout-клипа в R2 (координатор и клип — на РАЗНЫХ контейнерах,
+    вернуть по RPC как Modal нельзя). r2-режим обязателен для фан-аута. JobError при сбое (№8)."""
+    s = get_settings()
+    if s.storage_backend != "r2":
+        raise JobError("render", "container fan-out requires r2 storage backend")
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    key = fanout_result_key(job_id, clip_index)
+    t0 = time.monotonic()
+    try:
+        _r2_client().put_object(
+            Bucket=s.r2_bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+        )
+    except Exception as e:  # noqa: BLE001
+        raise JobError("render", f"fanout result upload clip {clip_index} failed: {e}") from e
+    elapsed = time.monotonic() - t0
+    print(f"[storage] upload {key} {len(body)}B in {elapsed:.1f}s")
+
+
+def download_fanout_result(job_id: str, clip_index: int) -> dict[str, Any] | None:
+    """Прочитать result-dict fanout-клипа из R2. ``None`` — объекта нет (execution клипа упал/убит
+    ДО записи), координатор синтезирует failed_clip_result. Иные ошибки НЕ прячем (№8)."""
+    from botocore.exceptions import ClientError
+
+    s = get_settings()
+    try:
+        obj = _r2_client().get_object(Bucket=s.r2_bucket, Key=fanout_result_key(job_id, clip_index))
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if code in {"NoSuchKey", "NotFound", "404"}:
+            return None
+        raise JobError("render", f"fanout result read clip {clip_index} failed: {e}") from e
+    result: dict[str, Any] = json.loads(obj["Body"].read().decode("utf-8"))
+    return result
 
 
 def preview_object_key(job_id: str) -> str:
@@ -443,6 +494,7 @@ def upload_clip(local_path: Path, job_id: str, clip_id: str, *, variant: str = "
         return local_url(clip_id, variant=variant)
     key = storage_object_key(job_id, clip_id, variant=variant)
     client = _r2_client()
+    t0 = time.monotonic()
     try:
         # upload_file СТРИМИТ с диска (+ авто-multipart) — НЕ read_bytes() (тот держал весь клип
         # в RAM). Как upload_source/upload_preview → консистентно и без RAM-спайка.
@@ -457,6 +509,10 @@ def upload_clip(local_path: Path, job_id: str, clip_id: str, *, variant: str = "
         )
     except Exception as e:  # noqa: BLE001 — оборачиваем в JobError, не глотаем
         raise JobError("storage", f"R2 upload {clip_id} failed: {e}") from e
+    elapsed = time.monotonic() - t0
+    size_mb = local_path.stat().st_size / (1024 * 1024)
+    mbps = size_mb / elapsed if elapsed > 0 else 0.0
+    print(f"[storage] upload {key} {size_mb:.1f}MB in {elapsed:.1f}s ({mbps:.1f} MB/s)")
     if s.r2_public_url:
         return public_url(s.r2_public_url, key)
     return key_ref(key)

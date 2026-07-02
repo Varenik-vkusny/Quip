@@ -251,6 +251,7 @@ export interface ClipEdit {
   aspect?: string;
   captions: CaptionTrack;
   id: string;
+  lock_per_shot?: boolean;
   reframe_overrides?: CropOverride[];
   source_intervals: SourceInterval[];
   version?: number;

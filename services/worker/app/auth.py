@@ -72,7 +72,11 @@ def verify_token(
     try:
         if jwt_secret:
             return jwt.decode(
-                token, jwt_secret, algorithms=["HS256"], audience=audience, leeway=leeway
+                token,
+                jwt_secret,
+                algorithms=["HS256"],
+                audience=audience,
+                leeway=leeway,
             )
         if not jwks_url:
             raise AuthError("no verification key configured")

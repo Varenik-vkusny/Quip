@@ -327,6 +327,9 @@ class ClipEdit(BaseModel):
     captions: CaptionTrack
     reframe_overrides: list[CropOverride] = Field(default_factory=list)
     aspect: str = "9:16"
+    # Наведение в fill-шотах: True = ЛОК (статичный кроп на шот, дефолт), False = слежение.
+    # Переключатель на клип (таб «Кадр»). RENDER-REQUIRED: меняет ПИКСЕЛИ → нужен ре-рендер.
+    lock_per_shot: bool = True
 
 
 class CaptionPreset(BaseModel):

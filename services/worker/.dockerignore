@@ -1,0 +1,21 @@
+# Держим build-контекст маленьким: в образ копируем только app/ и fonts/ (см. Dockerfile).
+# Всё тяжёлое/локальное — вон из контекста.
+.venv
+tmp
+data
+tests
+*.db
+*.sqlite
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.env
+.env.*
+README.md
+Dockerfile
+.dockerignore
+# gitignored cookie-джары (в облаке их нет; YouTube-резилиенс — отдельный follow-up)
+www.youtube.com_cookies*.txt

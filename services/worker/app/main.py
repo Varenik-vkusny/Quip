@@ -46,6 +46,7 @@ from app.editor.ops import (
     apply_extend,
     apply_trim,
     clear_crop_overrides,
+    replace_edit_content,
     set_crop_override,
     set_interval,
 )
@@ -63,6 +64,7 @@ from app.models import (
     CropOverride,
     HighlightStyle,
     RefreshClipBody,
+    SourceInterval,
 )
 from app.pipeline.stage5_render import aspect_to_dims
 from app.run import DATA_ROOT
@@ -71,6 +73,7 @@ from app.tasks import (
     render_edit_to_file,
     run_pipeline_job,
     run_upload_job,
+    run_upload_job_from_r2,
 )
 
 _UPLOAD_CHUNK = 1024 * 1024  # 1 МБ потоковой записи (не держим весь файл в памяти)
@@ -255,7 +258,7 @@ def create_job(
     db.insert_job(job_id, body.source_type, body.source_ref, user_id=user_id)
     # На Modal: spawn отдельной долгоживущей CPU-функции (web scale-to-zero убил бы фон-таск).
     # Локально: BackgroundTask, как в Phase 0.
-    if dispatch.modal_spawn_enabled():
+    if dispatch.spawn_enabled():
         # spawn упал ДО старта пайплайна → джоб застрял бы в "queued" навсегда. Помечаем
         # failed и поднимаем 500 (правило №8): юзер видит причину, а не вечную очередь.
         try:
@@ -316,7 +319,7 @@ async def create_upload_job(
     # YouTube-пути). Поэтому стейджим исходник в R2 (upload_source) и spawn'им долгоживущую
     # upload_job (она скачает исходник из R2 на своём контейнере → run_upload_job). Локально/dev
     # (MODAL_SPAWN не задан) — BackgroundTask на этом же процессе, как в Phase 0.
-    if dispatch.modal_spawn_enabled():
+    if dispatch.spawn_enabled():
         try:
             storage.upload_source(upload_path, job_id)  # r2-режим; иначе no-op
             dispatch.spawn("upload_job", job_id, filename, max_clips, user_id, language)
@@ -406,6 +409,7 @@ class UploadCompleteBody(BaseModel):
 def complete_upload(
     job_id: str,
     body: UploadCompleteBody,
+    bg: BackgroundTasks,
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -421,8 +425,6 @@ def complete_upload(
     user_id = _resolve_user(authorization, x_user_id)
     _enforce_free_identity(authorization, user_id)
     _enforce_quota(user_id)
-    if not dispatch.modal_spawn_enabled():
-        raise HTTPException(status_code=400, detail="direct upload only in cloud mode")
     db.insert_job(job_id, "upload", body.filename, user_id=user_id)
     # Multipart: сначала собрать объект из частей (иначе upload_job скачает пусто/битое).
     if body.upload_id and body.parts:
@@ -435,14 +437,21 @@ def complete_upload(
         except Exception as e:  # noqa: BLE001 — сборка не удалась → видимый failed, не тихо
             db.set_failed(job_id, f"multipart complete failed: {e}")
             raise HTTPException(status_code=500, detail=f"multipart complete failed: {e}") from e
-    try:
-        fc_id = dispatch.spawn(
-            "upload_job", job_id, body.filename, body.max_clips, user_id, body.language
+    # Modal: spawn долгоживущей upload_job. Always-on хостинг (Railway) без spawn → bg.add_task
+    # in-process (download исходника из R2 + тот же run_upload_job). Симметрично create_job.
+    if dispatch.spawn_enabled():
+        try:
+            fc_id = dispatch.spawn(
+                "upload_job", job_id, body.filename, body.max_clips, user_id, body.language
+            )
+            db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
+        except Exception as e:  # noqa: BLE001 — сбой диспатча = видимый failed, не вечная очередь
+            db.set_failed(job_id, f"dispatch failed: {e}")
+            raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
+    else:
+        bg.add_task(
+            run_upload_job_from_r2, job_id, body.filename, body.max_clips, user_id, body.language
         )
-        db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
-    except Exception as e:  # noqa: BLE001 — сбой диспатча = видимый failed, не вечная очередь
-        db.set_failed(job_id, f"dispatch failed: {e}")
-        raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
 
@@ -564,9 +573,7 @@ def cancel_job(
     fc_id = row.get("function_call_id")
     if fc_id:
         try:
-            import modal
-
-            modal.FunctionCall.from_id(str(fc_id)).cancel(terminate_containers=False)
+            dispatch.cancel(str(fc_id))  # Cloud Run execution cancel / Modal FunctionCall cancel
         except Exception as e:  # noqa: BLE001 — отмена Modal не удалась → НЕ молча (правило №8)
             # Всё равно фиксируем cancelled в БД (поллинг остановится), но сигналим 502, чтобы
             # фронт знал: фон-функция могла не остановиться (нет тихого фолбэка).
@@ -692,7 +699,7 @@ def get_video_map(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict
         return cached.model_dump()
     pending = VideoMap(status="pending")
     save_video_map(job_id, pending)
-    if dispatch.modal_spawn_enabled():
+    if dispatch.spawn_enabled():
         dispatch.spawn("generate_video_map_job", job_id)
     else:
         bg.add_task(tasks_mod.generate_video_map_job, job_id)
@@ -917,17 +924,47 @@ def op_extend(job_id: str, clip_id: str, body: ExtendBody) -> dict[str, Any]:
     return _save_or_409(job_id, clip_id, new, body.version)
 
 
+def _tight_lock_cx(job_id: str, start: float, end: float) -> float | None:
+    """Лок-центр лица для ручного tight-override: анализ лиц диапазона source → cx говорящего.
+    Best-effort: сбой CV / нет лиц → None (вызывающий оставит 0.5). НЕ трогает кадровую сетку
+    (только значение cx). Тяжёлый путь (ensure_source + ASD); фронт показывает «пересчитываю»."""
+    from app import artifacts
+    from app.pipeline.asd_reframe import score_tracks_in_segment
+    from app.pipeline.stage3_reframe import locked_cx_for_tracks
+
+    s = get_settings()
+    try:
+        meta = artifacts.load_meta(job_id)
+        out = artifacts.ensure_source(job_id).parent
+        tracks = score_tracks_in_segment(
+            out / "source.mp4", meta.width, meta.height, start, end, s.reframe_face_fps,
+            crop_scale=s.reframe_speaker_crop_scale,
+        )  # fmt: skip
+        return locked_cx_for_tracks(
+            tracks, meta.width, meta.height,
+            speak_threshold=s.reframe_speak_threshold, smoothing=s.reframe_smoothing,
+        )  # fmt: skip
+    except Exception as e:  # noqa: BLE001 — анализ best-effort; сбой → None (0.5), save не рушим
+        print(f"[op_crop] WARN tight face-lock failed job={job_id} [{start:.2f},{end:.2f}]: {e}")
+        return None
+
+
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/crop")
 def op_crop(job_id: str, clip_id: str, body: CropBody) -> dict[str, Any]:
     edit = _load_or_404(job_id, clip_id)
     if body.mode == "auto":
         new = clear_crop_overrides(edit, body.source_start, body.source_end)
         return _save_or_409(job_id, clip_id, new, body.version)
+    # Ручной tight (fill) БЕЗ явного центра → лочим кроп на ЛИЦО говорящего (иначе 0.5 = пол-лица
+    # на off-center субъекте). Анализ best-effort; нет лиц/сбой → None (честный 0.5-фолбэк).
+    center = body.center
+    if body.mode == "fill" and center is None:
+        center = _tight_lock_cx(job_id, body.source_start, body.source_end)
     ov = CropOverride(
         source_start=body.source_start,
         source_end=body.source_end,
         mode=body.mode,
-        center=body.center,
+        center=center,
         center_b=body.center_b,
     )
     return _save_or_409(job_id, clip_id, set_crop_override(edit, ov), body.version)
@@ -945,6 +982,48 @@ def op_set_aspect(job_id: str, clip_id: str, body: AspectBody) -> dict[str, Any]
     edit = _load_or_404(job_id, clip_id)
     return _save_or_409(
         job_id, clip_id, edit.model_copy(update={"aspect": body.aspect}), body.version
+    )
+
+
+class RestoreEditBody(BaseModel):
+    version: int
+    source_intervals: list[SourceInterval]
+    captions: CaptionTrack
+    reframe_overrides: list[CropOverride]
+    aspect: str
+    lock_per_shot: bool
+
+
+@app.put("/jobs/{job_id}/clips/{clip_id}/edit/restore")
+def op_restore_edit(job_id: str, clip_id: str, body: RestoreEditBody) -> dict[str, Any]:
+    """Atomically replace the whole edit CONTENT (undo/redo). Optimistic-lock on version
+    (409 on mismatch). Does NOT restore the old version NUMBER — version keeps climbing;
+    undo/redo are forward writes carrying historical content."""
+    edit = _load_or_404(job_id, clip_id)
+    new = replace_edit_content(
+        edit,
+        source_intervals=body.source_intervals,
+        captions=body.captions,
+        reframe_overrides=body.reframe_overrides,
+        aspect=body.aspect,
+        lock_per_shot=body.lock_per_shot,
+    )
+    return _save_or_409(job_id, clip_id, new, body.version)
+
+
+class MotionBody(BaseModel):
+    version: int
+    lock_per_shot: bool
+
+
+@app.post("/jobs/{job_id}/clips/{clip_id}/edit/motion")
+def op_set_motion(job_id: str, clip_id: str, body: MotionBody) -> dict[str, Any]:
+    """Наведение клипа: lock_per_shot=True (статичный кроп на шот) / False (слежение, follower).
+    RENDER-REQUIRED — меняет ПИКСЕЛИ (пан vs статика) → клип нужно пере-рендерить (фронт ставит
+    pixelDirty + предлагает Render). Превью /reframe пересчитывается (follow обходит fast-path)."""
+    edit = _load_or_404(job_id, clip_id)
+    return _save_or_409(
+        job_id, clip_id, edit.model_copy(update={"lock_per_shot": body.lock_per_shot}), body.version
     )
 
 
@@ -1064,7 +1143,7 @@ def agent_start(
     for ev in _seed_events(prior):
         runs_store.append_event(run_id, ev)
     runs_store.append_event(run_id, AgentEvent(role="user", text=msg).model_dump())
-    if dispatch.modal_spawn_enabled():
+    if dispatch.spawn_enabled():
         try:
             fc_id = dispatch.spawn("agent_edit_job", run_id)
         except Exception as e:  # noqa: BLE001 — сбой диспатча видим (правило №8)
@@ -1112,10 +1191,8 @@ def agent_cancel(job_id: str, clip_id: str, run_id: str) -> dict[str, Any]:
     fc_id = run.get("function_call_id")
     if fc_id:
         try:
-            import modal
-
-            modal.FunctionCall.from_id(str(fc_id)).cancel(terminate_containers=False)
-        except Exception as e:  # noqa: BLE001 — отмена Modal не удалась → НЕ молча (правило №8)
+            dispatch.cancel(str(fc_id))  # Cloud Run execution cancel / Modal FunctionCall cancel
+        except Exception as e:  # noqa: BLE001 — отмена не удалась → НЕ молча (правило №8)
             runs_store.set_cancelled(run_id)
             raise HTTPException(status_code=502, detail=f"cancel failed: {e}") from e
     runs_store.set_cancelled(run_id)
@@ -1132,7 +1209,7 @@ def post_render(job_id: str, clip_id: str, bg: BackgroundTasks) -> dict[str, Any
     """
     _load_or_404(job_id, clip_id)
     db.set_render_status(job_id, clip_id, "rendering", None, None)
-    if dispatch.modal_spawn_enabled():
+    if dispatch.spawn_enabled():
         # spawn может упасть (modal import/lookup) ДО старта рендера → клип застрял бы в
         # "rendering" навсегда. Переводим в failed и поднимаем 500 (правило №8, не молча).
         try:
@@ -1207,8 +1284,15 @@ def get_clip_reframe(job_id: str, clip_id: str) -> dict[str, Any]:
     # границ override-split в нативном fps (инвариант кадровой сетки). Тяжёлый ensure_source
     # остаётся ниже, на slow-path.
     meta = artifacts.load_meta(job_id)
-    if persisted and intervals_match_default(
-        edit.source_intervals, persisted.get("default_start", -1), persisted.get("default_end", -1)
+    # follow (lock_per_shot=False) НЕ может брать запечённые регионы (они LOCKED) → пересчёт ниже.
+    if (
+        edit.lock_per_shot
+        and persisted
+        and intervals_match_default(
+            edit.source_intervals,
+            persisted.get("default_start", -1),
+            persisted.get("default_end", -1),
+        )
     ):
         iv = edit.source_intervals[0]
         return {
@@ -1232,6 +1316,7 @@ def get_clip_reframe(job_id: str, clip_id: str) -> dict[str, Any]:
             speaker_crop_scale=s.reframe_speaker_crop_scale,
             face_fps=s.reframe_face_fps,
             smoothing=s.reframe_smoothing,
+            lock_per_shot=edit.lock_per_shot,
             min_hold_sec=s.reframe_min_hold_sec,
             speak_threshold=s.reframe_speak_threshold,
             scene_threshold=s.reframe_scene_threshold,
@@ -1254,7 +1339,13 @@ def get_clip_reframe(job_id: str, clip_id: str) -> dict[str, Any]:
     #   • persisted is None — НИКОГДА не перетираем канонический batch-entry (или чужой shift);
     #   • без reframe_overrides — region_lists ЧИСТЫЕ авто-регионы (fast-path наложит override сам);
     #   • один интервал — payload хранит ровно один дефолтный интервал.
-    if persisted is None and not edit.reframe_overrides and len(region_lists) == 1:
+    # Персистим как канонические ТОЛЬКО locked-регионы (follow НЕ перетирает baked-дефолт).
+    if (
+        edit.lock_per_shot
+        and persisted is None
+        and not edit.reframe_overrides
+        and len(region_lists) == 1
+    ):
         iv = edit.source_intervals[0]
         try:
             db.put_reframe_regions(

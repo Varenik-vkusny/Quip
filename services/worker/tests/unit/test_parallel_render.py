@@ -74,7 +74,10 @@ def test_build_clip_out_maps_segment_and_url() -> None:
     assert [w.text for w in clip.words] == ["hello"]
 
 
-def test_render_all_clips_local_uses_loop(monkeypatch, tmp_path: Path) -> None:
+def test_render_all_clips_local_renders_every_clip_in_order(monkeypatch, tmp_path: Path) -> None:
+    # Локальная ветка (Cloud Run / local) теперь ПАРАЛЛЕЛИТ клипы потоками (RENDER_CONCURRENCY):
+    # порядок ИСПОЛНЕНИЯ не гарантирован (потому sorted), но каждый клип рендерится РОВНО раз,
+    # а результаты собираются В ПОРЯДКЕ сегментов (executor.map сохраняет порядок входа).
     import app.run as run_mod
 
     monkeypatch.setattr(run_mod.dispatch, "modal_spawn_enabled", lambda: False)
@@ -104,8 +107,74 @@ def test_render_all_clips_local_uses_loop(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(run_mod, "render_one_clip", fake_one)
     segs = [_seg(0, 10), _seg(20, 35)]
     results = run_mod._render_all_clips("job_x", tmp_path, "source.mp4", segs, _meta(), "user_42")
-    assert calls == [1, 2]
+    assert sorted(calls) == [1, 2]  # каждый клип отрендерен ровно раз (порядок потоков не важен)
     assert seen_users == ["user_42", "user_42"]  # owner прокинут в каждый клип
+    assert [r["video_url"] for r in results] == ["u1", "u2"]  # результаты — в порядке сегментов
+
+
+def test_render_all_clips_cloudrun_fanout(monkeypatch, tmp_path: Path) -> None:
+    # Cloud Run с фан-аутом: _render_all_clips делегирует в map_render_clips_cloudrun
+    # (контейнер-на-клип), user_id несётся в args, результаты возвращаются в порядке сегментов.
+    import app.run as run_mod
+
+    monkeypatch.setattr(run_mod.dispatch, "modal_spawn_enabled", lambda: False)
+    monkeypatch.setattr(run_mod.dispatch, "cloudrun_fanout_enabled", lambda: True)
+    seen: dict[str, object] = {}
+
+    def fake_fanout(job_id: str, args: list[tuple]) -> list[dict]:
+        seen["job_id"] = job_id
+        seen["args"] = args
+        return [
+            {
+                "clip_id": f"clip_{a[1]:02d}",
+                "clip_index": a[1],
+                "video_url": f"u{a[1]}",
+                "reframe_lat": 1.0,
+                "render_lat": 2.0,
+                "face_found": True,
+            }
+            for a in args
+        ]
+
+    monkeypatch.setattr(run_mod.dispatch, "map_render_clips_cloudrun", fake_fanout)
+    segs = [_seg(0, 10), _seg(20, 35)]
+    results = run_mod._render_all_clips("job_x", tmp_path, "source.mp4", segs, _meta(), "user_42")
+    assert seen["job_id"] == "job_x"
+    assert seen["args"][0][4] == "user_42"  # owner в args фан-аута
+    assert [r["clip_index"] for r in results] == [1, 2]
+
+
+def test_render_all_clips_cloudrun_fanout_falls_back_in_process(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Фан-аут сломался (квота/API) → деградация в in-process рендер главного контейнера (не валим).
+    import app.run as run_mod
+
+    monkeypatch.setattr(run_mod.dispatch, "modal_spawn_enabled", lambda: False)
+    monkeypatch.setattr(run_mod.dispatch, "cloudrun_fanout_enabled", lambda: True)
+
+    def boom(job_id: str, args: list[tuple]) -> list[dict]:
+        raise RuntimeError("quota exhausted")
+
+    monkeypatch.setattr(run_mod.dispatch, "map_render_clips_cloudrun", boom)
+    monkeypatch.setenv("RENDER_CONCURRENCY", "1")  # детерминированный sequential-фолбэк
+    calls: list[int] = []
+
+    def fake_one(out, source_name, clip_index, seg, meta, user_id=None):
+        calls.append(clip_index)
+        return {
+            "clip_id": f"clip_{clip_index:02d}",
+            "clip_index": clip_index,
+            "video_url": f"u{clip_index}",
+            "reframe_lat": 1.0,
+            "render_lat": 2.0,
+            "face_found": True,
+        }
+
+    monkeypatch.setattr(run_mod, "render_one_clip", fake_one)
+    segs = [_seg(0, 10), _seg(20, 35)]
+    results = run_mod._render_all_clips("job_x", tmp_path, "source.mp4", segs, _meta(), "u")
+    assert calls == [1, 2]  # упал в in-process рендер
     assert [r["video_url"] for r in results] == ["u1", "u2"]
 
 

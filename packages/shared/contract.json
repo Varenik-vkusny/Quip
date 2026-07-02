@@ -449,6 +449,10 @@
         "id": {
           "type": "string"
         },
+        "lock_per_shot": {
+          "default": true,
+          "type": "boolean"
+        },
         "reframe_overrides": {
           "items": {
             "$ref": "#/$defs/CropOverride"

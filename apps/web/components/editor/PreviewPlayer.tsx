@@ -1,7 +1,7 @@
 "use client";
 
 import { Loader2, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── PreviewPlayer — превью 9:16 с СОБСТВЕННЫМИ контролами ──
 // Видео = ИСТОЧНИК (source.mp4), залуплен в [outerStart, outerEnd). Нативные
@@ -58,21 +58,11 @@ export function PreviewPlayer({
   const cx = frame?.cx ?? 0.5;
   const cxB = frame?.cxB ?? 0.7;
 
-  // На СМЕНЕ режима (между шотами: fill↔fit↔split) переключаемся МГНОВЕННО — гасим 300мс
-  // CSS-анимацию object-position на мастер-видео на ОДИН кадр (иначе браузер пан-анимирует кроп
-  // на стыке tight↔wide = «зум-эффект»/мельк; фаундер: на склейке нужен мгновенный hard-switch
-  // ровно на переходе, как в рендере, без зума). Плавный transition (для пана cx ВНУТРИ одного
-  // fill-шота) возвращаем сразу следующим кадром. useLayoutEffect (до отрисовки) + imperative
-  // style — чтобы НЕ читать ref в фазе рендера (eslint react-hooks/refs).
-  useLayoutEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.style.transition = "none"; // мгновенный switch режима без пан-анимации
-    const raf = requestAnimationFrame(() => {
-      if (videoRef.current) videoRef.current.style.transition = "";
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [mode, videoRef]);
+  // Превью переключает кроп МГНОВЕННО на склейке: cx внутри лок-шота — КОНСТАНТА, на границе шота —
+  // жёсткий скачок (ровно как режет рендер). НЕТ CSS-анимации object-position: раньше висел
+  // transition-300 (под пан follower-модели) — он превращал лок-скачок в плавный ГЛАЙД и держал кроп
+  // off-face ~300мс = ПОЛ-ЛИЦА. lock-модель пана ВНУТРИ шота не делает; редкие многоточечные паны
+  // (moving-subject фолбэк / старые клипы) идут плавно через per-frame cxAt, без CSS-анимации.
 
   // ── numeric aspect ratio (W/H) parsed from aspectClass (`aspect-[9/16]` → 9/16) ──
   // Drives the CSS-only "contain" width: the render box width = min(full container
@@ -312,7 +302,7 @@ export function PreviewPlayer({
           playsInline
           preload="auto"
           onClick={togglePlay}
-          className={`absolute inset-0 size-full cursor-pointer transition-[object-position] duration-300 ease-linear ${
+          className={`absolute inset-0 size-full cursor-pointer ${
             mode === "fit" ? "object-contain" : "object-cover"
           } ${mode === "split" ? "opacity-0" : ""}`}
           style={mode === "fill" ? { objectPosition: `${cx * 100}% 50%` } : undefined}
@@ -458,7 +448,7 @@ function SplitHalf({
         muted
         playsInline
         preload="metadata"
-        className="absolute inset-0 size-full object-cover transition-[object-position] duration-300 ease-linear"
+        className="absolute inset-0 size-full object-cover"
         style={{ objectPosition: `${cx * 100}% 50%` }}
       />
     </div>

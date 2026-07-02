@@ -8,6 +8,8 @@ import {
   Film,
   Loader2,
   Palette,
+  Redo2,
+  Undo2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -36,9 +38,14 @@ export function EditorHeader({
   renderState,
   busy,
   dirty,
+  pixelDirty,
   saving,
   onBeforeLeave,
   onSwitchClip,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   onRender,
   templates,
   defaultTemplateId,
@@ -59,12 +66,20 @@ export function EditorHeader({
   busy: boolean;
   /** Есть правки после последнего рендера → результат увидишь только после «Рендер». */
   dirty: boolean;
+  /** Pixel-level edits (framing/crop/aspect/trim/motion) since last render — the downloaded
+   *  file has wrong pixels until re-rendered. Drives the ConfirmRenderModal gate in ExportMenu. */
+  pixelDirty: boolean;
   /** Есть НЕсохранённые правки (debounce-PATCH в полёте) → индикатор «Сохраняю…». */
   saving?: boolean;
   /** Дожать несохранённые правки ПЕРЕД уходом со страницы (без потери данных). */
   onBeforeLeave?: () => Promise<void>;
   /** Переключить клип IN-PAGE (без remount) — flush/queue-isolation/URL внутри редактора. */
   onSwitchClip: (nextId: string) => void;
+  /** Undo/redo availability + handlers (Ctrl+Z / Ctrl+Shift+Z; also wired to the header buttons). */
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   onRender: () => void;
   // ── Style templates (global, cross-panel look reuse) — opened from a header popover ──
   /** The user's saved style templates + which one seeds new clips of future videos. */
@@ -164,6 +179,30 @@ export function EditorHeader({
           </button>
         </div>
 
+        {/* Undo / Redo — restore historical edit content (also Ctrl+Z / Ctrl+Shift+Z). */}
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={!canUndo || busy}
+            onClick={onUndo}
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo"
+            className="inline-flex size-9 items-center justify-center rounded-lg border border-line text-muted transition enabled:hover:border-accent/50 enabled:hover:text-ink disabled:opacity-30 sm:size-8"
+          >
+            <Undo2 className="size-4" />
+          </button>
+          <button
+            type="button"
+            disabled={!canRedo || busy}
+            onClick={onRedo}
+            title="Redo (Ctrl+Shift+Z)"
+            aria-label="Redo"
+            className="inline-flex size-9 items-center justify-center rounded-lg border border-line text-muted transition enabled:hover:border-accent/50 enabled:hover:text-ink disabled:opacity-30 sm:size-8"
+          >
+            <Redo2 className="size-4" />
+          </button>
+        </div>
+
         <span className="hidden font-mono text-xs tabular-nums text-muted sm:inline">
           {totalSec.toFixed(1)}s
         </span>
@@ -255,6 +294,8 @@ export function EditorHeader({
           clipId={clipId}
           bakedUrl={downloadUrl}
           dirty={dirty}
+          pixelDirty={pixelDirty}
+          onRender={onRender}
           align="right"
         />
       </div>

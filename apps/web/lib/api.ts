@@ -434,6 +434,52 @@ export async function setClipAspect(
   return res.json();
 }
 
+export async function setClipMotion(
+  jobId: string,
+  clipId: string,
+  version: number,
+  lockPerShot: boolean,
+): Promise<ClipEdit> {
+  // T5-motion: toggle camera motion (Lock = static crop per shot; Follow = camera pans).
+  // Render-required: changes pixels identically to aspect — flush + dirty + reload reframe.
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/motion`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version, lock_per_shot: lockPerShot }),
+  });
+  if (res.status === 409) throw new Error("Edit conflict — reload and retry");
+  if (!res.ok) throw new Error(`setClipMotion failed: ${res.status}`);
+  return res.json();
+}
+
+export async function restoreEdit(
+  jobId: string,
+  clipId: string,
+  version: number,
+  content: Omit<ClipEdit, "id" | "version">,
+): Promise<ClipEdit> {
+  // Undo/redo: atomically replace the whole edit CONTENT under an optimistic version lock.
+  // PUT carries a HISTORICAL snapshot forward (409 on version mismatch; the backend bumps the
+  // version on success — undo/redo are forward writes, the old version number is never restored).
+  // Mirrors setClipAspect/setClipMotion's fetch/error/return shape, but method PUT.
+  const { source_intervals, captions, reframe_overrides, aspect, lock_per_shot } = content;
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/restore`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      version,
+      source_intervals,
+      captions,
+      reframe_overrides,
+      aspect,
+      lock_per_shot,
+    }),
+  });
+  if (res.status === 409) throw new Error("Edit conflict — reload and retry");
+  if (!res.ok) throw new Error(`restoreEdit failed: ${res.status}`);
+  return res.json();
+}
+
 export async function setClipInterval(
   jobId: string,
   clipId: string,

@@ -22,7 +22,9 @@ import {
   patchClipEdit,
   patchClipEditKeepalive,
   regenerateHook,
+  restoreEdit,
   setClipAspect,
+  setClipMotion,
   setClipInterval,
   setCropOverride,
   startRenderClip,
@@ -54,6 +56,7 @@ import { EditorHeader, type RenderState } from "./EditorHeader";
 import { type Tab, TABS, EditorRail } from "./EditorRail";
 import { type EditorAction } from "@/lib/editorShortcuts";
 import { useEditorShortcuts } from "./useEditorShortcuts";
+import { useEditHistory } from "./useEditHistory";
 import { type FitRegion } from "./FitTimeline";
 import { FrameTab } from "./FrameTab";
 import { HookTab } from "./HookTab";
@@ -148,6 +151,13 @@ const CAPTION_SIZE_MAX = 140;
 const HOOK_SIZE_MIN = 36;
 const HOOK_SIZE_MAX = 120;
 
+// Undo/redo snapshots store a whole ClipEdit value taken straight from the immutable `edit`
+// STATE. The stored `version` is DEAD DATA — it is never restored. A restore is a forward write:
+// it always carries the LIVE editRef.current.version (the backend keeps bumping it), and the
+// endpoint replaces only the CONTENT (source_intervals/captions/reframe_overrides/aspect/
+// lock_per_shot). Snapshotting the frozen state object directly (rather than a derived copy)
+// keeps the React Compiler from freezing the mutation-queue editRef.
+
 export default function ClipEditorScreen({
   jobId,
   initialClipId,
@@ -232,11 +242,19 @@ export default function ClipEditorScreen({
   // Грузится ли план шотов (/reframe) → полоса показывает скелетон «Detecting shots…»
   // вместо мгновенного фейкового фолбэка равными кусками (это и путало юзера).
   const [reframeLoading, setReframeLoading] = useState(true);
+  // Показывает оверлей «Recomputing framing…» пока идёт setCropOverride + loadReframe
+  // (Tight-режим гоняет face-detection — может занять несколько секунд на cold-start).
+  const [recomputingFrame, setRecomputingFrame] = useState(false);
 
   const [renderState, setRenderState] = useState<RenderState>({ kind: "idle" });
   // есть правки после последнего рендера → юзеру явно видно, что скачивание/результат
   // отстаёт от превью, пока не нажмёт «Рендер» (фидбек фаундера)
   const [dirty, setDirty] = useState(false);
+  // Pixel-level edits since last render: framing mode, per-shot crop, aspect, trim/interval,
+  // motion toggle. These change the mp4 PIXELS — the downloaded file is wrong until re-rendered.
+  // Kept separate from `dirty` (which also covers caption/style edits that are composited at
+  // download time and need no full re-render).
+  const [pixelDirty, setPixelDirty] = useState(false);
   // есть НЕсохранённые правки (debounce-PATCH ещё не ушёл / в полёте) — индикатор
   // «Сохраняю…/Сохранено» + гарантия flush перед уходом (B-#5, без потери данных).
   const [unsaved, setUnsaved] = useState(false);
@@ -381,20 +399,58 @@ export default function ClipEditorScreen({
     }
   }, [jobId, clipId]);
 
+  // ── Undo/redo (Ctrl+Z / Ctrl+Shift+Z) over the whole edit CONTENT ──
+  // Snapshots store CONTENT only (stripVersion); the version stays live. The stacks live in a
+  // ref inside the hook (no re-render on push); canUndo/canRedo are reactive for the buttons.
+  const {
+    canUndo,
+    canRedo,
+    push: pushHistory,
+    undo: takeUndo,
+    redo: takeRedo,
+    reset: resetHistory,
+  } = useEditHistory<ClipEdit>();
+
+  // Record ONE undo step: a snapshot of the CURRENT settled `edit` STATE (NOT editRef). Handing
+  // the immutable state value straight to the history hook keeps the React Compiler from freezing
+  // the mutable mutation-queue editRef. Callers invoke this at the START of a forward action,
+  // where the state is settled (so `edit` === editRef.current) and no mutation has happened yet →
+  // undo restores the exact pre-action content. (flushPending may run AFTER this; it only
+  // persists/​reconciles the same captions + bumps version, so the snapshot's CONTENT stays right.)
+  const recordSnapshot = useCallback(() => {
+    if (edit) pushHistory(edit);
+  }, [edit, pushHistory]);
+
+  // Apply a version-bumping edit to the live state + mutation queue. PURE apply (no history):
+  // forward actions record their own undo step up-front via recordSnapshot, and undo/redo route
+  // through commitEdit (via refetchAfter) WITHOUT forking history. Replaces the bare
+  // `editRef.current = new; setEdit(new)` pair the immediate-op handlers used to do.
+  const commitEdit = useCallback((newEdit: ClipEdit) => {
+    editRef.current = newEdit; // мутации-очередь читает СВЕЖУЮ версию (иначе 409→reload)
+    setEdit(newEdit);
+  }, []);
+
   // W3: агент изменил edit-state (интервал/хук) на бэке → перечитать edit + ASS-превью.
   // editRef синхронизирует эффект [edit] (тут НЕ мутируем — это не путь мутации-очереди).
   const handleAgentEdited = useCallback(async () => {
     try {
+      recordSnapshot(); // pre-agent content → one undo step
+      const prevIntervals = editRef.current?.source_intervals;
       const fresh = await getClipEdit(jobId, clipId);
-      setEdit(fresh);
+      commitEdit(fresh); // apply the refetched edit (pure apply)
       await refreshAss();
+      // Mark pixel-dirty only when the agent actually changed source_intervals (trim/interval),
+      // since that changes the mp4 pixels. Hook/caption changes don't need a re-render.
+      if (JSON.stringify(prevIntervals) !== JSON.stringify(fresh.source_intervals)) {
+        setPixelDirty(true);
+      }
       // The agent can change framing (set_crop) — refresh the shot strip + per-shot preview too,
       // else the Frame tab + rawRegions-based preview stay stale and the change looks like a no-op.
       void loadReframe();
     } catch {
       /* реконсиляция не критична — следующий poll/действие повторит */
     }
-  }, [jobId, clipId, refreshAss, loadReframe]);
+  }, [jobId, clipId, refreshAss, loadReframe, commitEdit, recordSnapshot]);
 
   // clipIdRef = ВСЕГДА текущий активный clipId (синкается на каждый render, как editRef).
   // Switch-race guard (Task 7): любой async-путь, выпущенный для клипа A (flushed PATCH,
@@ -425,6 +481,7 @@ export default function ClipEditorScreen({
         setLibassFailed(false);
         setEditingReply(null);
         setRenderState({ kind: "idle" });
+        setPixelDirty(false); // fresh clip — no pending pixel edits
         setRawRegions(null);
         setReframeLoading(true);
       }
@@ -554,6 +611,10 @@ export default function ClipEditorScreen({
   // версию → 409 → reload (баг-класс, ради которого очередь и сделана).
   const editRef = useRef<ClipEdit | null>(null);
   useEffect(() => {
+    // editRef is the intentional MUTABLE mutation-queue ref. The React Compiler over-freezes it
+    // here because the immutable `edit` state it mirrors is also handed to useEditHistory (undo/
+    // redo); the alias makes it think editRef became frozen. This sync write is correct and safe.
+    // eslint-disable-next-line react-hooks/immutability
     editRef.current = edit;
   }, [edit]);
 
@@ -568,18 +629,21 @@ export default function ClipEditorScreen({
         getClipAnalysis(jobId, clipId),
         getClipAss(jobId, clipId).catch(() => null),
       ]);
-      editRef.current = newEdit; // мутации-очередь читает СВЕЖУЮ версию (иначе 409→reload)
-      setEdit(newEdit);
+      // editRef.current = newEdit + setEdit (pure apply, NO history push). The forward callers
+      // (trim/cut/interval) record their own undo step up-front via recordSnapshot; undo/redo no
+      // longer route through here (applyHistory applies + reconciles optimistically on its own).
+      commitEdit(newEdit);
       setWords(analysisData.words);
       setEditingReply(null);
       setPhase("ready");
       setDirty(true);
+      setPixelDirty(true); // trim/interval changes mp4 pixels → re-render required
       if (ass !== null && seq === assSeq.current) setAssText(ass);
       // D2: интервал изменился → пере-считать reframe-план для НОВОГО окна (превью-кроп
       // больше не устаревает после сдвига/трима — эндпоинт отражает текущие интервалы).
       void loadReframe();
     },
-    [jobId, clipId, loadReframe],
+    [jobId, clipId, loadReframe, commitEdit],
   );
 
   // ── правки субтитров/стиля → PATCH + refetch ASS ──
@@ -657,8 +721,15 @@ export default function ClipEditorScreen({
       const cur = editRef.current;
       if (!cur) return;
       setError(null);
+      // Burst-start coalescing: pendingCaptionsRef is null BETWEEN bursts, so the first edit of a
+      // new burst snapshots the PRE-burst content ONCE (recordSnapshot reads the settled `edit`
+      // state, which equals editRef.current at burst start). Subsequent edits keep pending
+      // non-null → no further push → one drag / one typing burst = exactly one undo step.
+      if (pendingCaptionsRef.current === null) recordSnapshot();
       const next = update(cur.captions);
       const optimistic = { ...cur, captions: next };
+      // Mutation-queue write; over-frozen by the React Compiler via the edit↔useEditHistory alias.
+      // eslint-disable-next-line react-hooks/immutability
       editRef.current = optimistic;
       setEdit(optimistic);
       // instant: переписать Style-строки локально (цвет/размер/шрифт/контур/плашка/позиция).
@@ -672,7 +743,7 @@ export default function ClipEditorScreen({
       pendingCaptionsRef.current = next;
       scheduleFlush();
     },
-    [scheduleFlush],
+    [scheduleFlush, recordSnapshot],
   );
 
   // Гарантированный flush ДО операции, бампающей версию (trim/interval/frame/aspect/preset),
@@ -706,10 +777,13 @@ export default function ClipEditorScreen({
       assSeq.current++; // invalidate any in-flight /ass for the outgoing clip
       optGenRef.current++; // invalidate any in-flight optimistic reconcile
       pendingGenRef.current = optGenRef.current; // queue isolation self-evident (not just guard inequality)
+      resetHistory(); // undo/redo stacks are per-clip — a new clip starts with no history
       const cached = clipCacheRef.current?.get(nextId);
       if (cached) {
         // Instant paint: the user just switched and hasn't edited, so painting cached data
         // then revalidating in the background is safe (assSeq/optGenRef guards still hold).
+        // Mutation-queue write; over-frozen by the React Compiler via the edit↔useEditHistory alias.
+        // eslint-disable-next-line react-hooks/immutability
         editRef.current = cached.edit;
         setEdit(cached.edit);
         setWords(cached.words);
@@ -720,6 +794,7 @@ export default function ClipEditorScreen({
         setActivePresetId(null);
         setLibassFailed(false);
         setRenderState({ kind: "idle" });
+        setPixelDirty(false); // switching clips resets pixel-dirty (new clip, fresh state)
         setError(null);
         setPhase("ready");
         paintedClipRef.current = nextId; // load effect skips the loading flash, still revalidates
@@ -732,7 +807,7 @@ export default function ClipEditorScreen({
         console.warn("[editor] shallow URL sync failed:", e);
       }
     },
-    [clipId, jobId, flushPending],
+    [clipId, jobId, flushPending, resetHistory],
   );
 
   // ── ДОЛГОВЕЧНОСТЬ (B-#5): дожать pending-правки при уходе со страницы ──
@@ -770,6 +845,7 @@ export default function ClipEditorScreen({
       if (!edit) return;
       setPhase("saving");
       setError(null);
+      recordSnapshot(); // pre-interval content → one undo step (before any mutation)
       try {
         await flushPending(); // персист накопленных правок субтитров ДО смены интервала
         const v = editRef.current?.version ?? edit.version ?? 1;
@@ -787,7 +863,7 @@ export default function ClipEditorScreen({
         failOr409(e);
       }
     },
-    [edit, jobId, clipId, refetchAfter, failOr409, flushPending],
+    [edit, jobId, clipId, refetchAfter, failOr409, flushPending, recordSnapshot],
   );
 
   const handleCutReply = useCallback(
@@ -797,6 +873,7 @@ export default function ClipEditorScreen({
       if (!reply || reply.word_refs.length === 0) return;
       setPhase("saving");
       setError(null);
+      recordSnapshot(); // pre-trim content → one undo step (before any mutation)
       try {
         await flushPending();
         const v = editRef.current?.version ?? edit.version ?? 1;
@@ -806,7 +883,7 @@ export default function ClipEditorScreen({
         failOr409(e);
       }
     },
-    [edit, jobId, clipId, refetchAfter, failOr409, flushPending],
+    [edit, jobId, clipId, refetchAfter, failOr409, flushPending, recordSnapshot],
   );
 
   // Low-level: merge a style patch (and drop the active preset — customised now).
@@ -940,6 +1017,7 @@ export default function ClipEditorScreen({
   // персистнутого состояния и ничего не потерялось.
   const handlePresetApply = useCallback(
     async (presetId: string) => {
+      recordSnapshot(); // pre-preset content → one undo step (before any mutation)
       await flushPending();
       const p = patchChain.current.then(async () => {
         const cur = editRef.current;
@@ -947,8 +1025,7 @@ export default function ClipEditorScreen({
         setError(null);
         try {
           const updated = await applyPreset(jobId, clipId, cur.version ?? 1, presetId);
-          editRef.current = updated;
-          setEdit(updated);
+          commitEdit(updated);
           setActivePresetId(presetId);
           setDirty(true);
           setUnsaved(false);
@@ -960,7 +1037,7 @@ export default function ClipEditorScreen({
       patchChain.current = p;
       return p;
     },
-    [jobId, clipId, refreshAss, failOr409, flushPending],
+    [jobId, clipId, refreshAss, failOr409, flushPending, commitEdit, recordSnapshot],
   );
 
   // ── Style memory (домен 5): собрать «look» текущего клипа (стиль + караоке + стиль хука) ──
@@ -1095,6 +1172,7 @@ export default function ClipEditorScreen({
   // В ТОЙ ЖЕ очереди мутаций (свежая версия). Меняет только hook.text; стиль не трогает.
   const [regeneratingHook, setRegeneratingHook] = useState(false);
   const handleHookRegenerate = useCallback(async () => {
+    recordSnapshot(); // pre-regenerate content → one undo step (before any mutation)
     await flushPending();
     const p = patchChain.current.then(async () => {
       const cur = editRef.current;
@@ -1103,8 +1181,7 @@ export default function ClipEditorScreen({
       setRegeneratingHook(true);
       try {
         const updated = await regenerateHook(jobId, clipId, cur.version ?? 1);
-        editRef.current = updated;
-        setEdit(updated);
+        commitEdit(updated);
         setDirty(true);
         setUnsaved(false);
         // hook.text меняется в Dialogue-теге → пересобрать ASS (как пресет)
@@ -1117,7 +1194,7 @@ export default function ClipEditorScreen({
     });
     patchChain.current = p;
     return p;
-  }, [jobId, clipId, refreshAss, failOr409, flushPending]);
+  }, [jobId, clipId, refreshAss, failOr409, flushPending, commitEdit, recordSnapshot]);
 
   // ── кадр (таб «Кадр») ──
   const handleFrameApply = useCallback(
@@ -1128,6 +1205,8 @@ export default function ClipEditorScreen({
     ) => {
       if (!edit) return;
       setError(null);
+      recordSnapshot(); // pre-frame content → one undo step (before any mutation)
+      setRecomputingFrame(true);
       try {
         await flushPending();
         const v = editRef.current?.version ?? edit.version ?? 1;
@@ -1138,18 +1217,31 @@ export default function ClipEditorScreen({
           center,
           center_b: centerB,
         });
-        editRef.current = newEdit; // см. editRef-комментарий: очередь читает свежую версию
-        setEdit(newEdit);
+        commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
         setDirty(true);
+        setPixelDirty(true); // crop/frame override changes mp4 pixels → re-render required
         // mode:"auto" → бэкенд чистит override → план возвращается к слежению за лицом; mode:wide/fill
         // → план перекрашивается. Без перечитки rawRegions осталось бы «всё wide» и трекинг пропадал
         // (баг: whole-video Wide → Auto не возвращал слежение). Зеркалит handleApplyRange.
-        void loadReframe();
+        await loadReframe();
       } catch (e) {
         failOr409(e);
+      } finally {
+        setRecomputingFrame(false);
       }
     },
-    [edit, jobId, clipId, outerStart, outerEnd, failOr409, flushPending, loadReframe],
+    [
+      edit,
+      jobId,
+      clipId,
+      outerStart,
+      outerEnd,
+      failOr409,
+      flushPending,
+      loadReframe,
+      commitEdit,
+      recordSnapshot,
+    ],
   );
 
   // ── FitTimeline (#1): форсировать кадр на source-диапазон ШОТОВ ──
@@ -1160,6 +1252,8 @@ export default function ClipEditorScreen({
     async (sourceStart: number, sourceEnd: number, mode: "fit" | "fill" | "auto") => {
       if (!edit) return;
       setError(null);
+      recordSnapshot(); // pre-range content → one undo step (before any mutation)
+      setRecomputingFrame(true);
       try {
         await flushPending();
         const v = editRef.current?.version ?? edit.version ?? 1;
@@ -1170,15 +1264,17 @@ export default function ClipEditorScreen({
           center: null,
           center_b: null,
         });
-        editRef.current = newEdit; // см. editRef-комментарий: очередь читает свежую версию
-        setEdit(newEdit);
+        commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
         setDirty(true);
-        void loadReframe(); // полоса + превью отражают новый план
+        setPixelDirty(true); // per-shot crop override changes mp4 pixels → re-render required
+        await loadReframe(); // полоса + превью отражают новый план
       } catch (e) {
         failOr409(e);
+      } finally {
+        setRecomputingFrame(false);
       }
     },
-    [edit, jobId, clipId, failOr409, flushPending, loadReframe],
+    [edit, jobId, clipId, failOr409, flushPending, loadReframe, commitEdit, recordSnapshot],
   );
 
   // ── соотношение сторон (T5): меняет выход + PlayRes ASS → рефетчим ASS ──
@@ -1186,20 +1282,130 @@ export default function ClipEditorScreen({
     async (aspect: Aspect) => {
       if (!edit || edit.aspect === aspect) return;
       setError(null);
+      recordSnapshot(); // pre-aspect content → one undo step (before any mutation)
       try {
         await flushPending();
         const v = editRef.current?.version ?? edit.version ?? 1;
         const newEdit = await setClipAspect(jobId, clipId, v, aspect);
-        editRef.current = newEdit; // см. editRef-комментарий: очередь читает свежую версию
-        setEdit(newEdit);
+        commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
         setDirty(true);
+        setPixelDirty(true); // aspect ratio changes mp4 pixels → re-render required
         await refreshAss(); // PlayRes изменился → libass перерисует в новом аспекте
       } catch (e) {
         failOr409(e);
       }
     },
-    [edit, jobId, clipId, refreshAss, failOr409, flushPending],
+    [edit, jobId, clipId, refreshAss, failOr409, flushPending, commitEdit, recordSnapshot],
   );
+
+  // ── движение камеры (T5-motion): Lock = статичный кроп per-shot; Follow = слежение за лицом ──
+  // Render-required (меняет пиксели как aspect): flush → версия-bump → dirty → reload reframe.
+  const handleMotionChange = useCallback(
+    async (lockPerShot: boolean) => {
+      if (!edit || (edit.lock_per_shot ?? true) === lockPerShot) return;
+      setError(null);
+      recordSnapshot(); // pre-motion content → one undo step (before any mutation)
+      try {
+        await flushPending();
+        const v = editRef.current?.version ?? edit.version ?? 1;
+        const newEdit = await setClipMotion(jobId, clipId, v, lockPerShot);
+        commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
+        setDirty(true);
+        setPixelDirty(true); // follow/lock motion changes mp4 pixels → re-render required
+        void loadReframe(); // lock_per_shot меняет reframe-план → обновить полосу + превью
+      } catch (e) {
+        failOr409(e);
+      }
+    },
+    [edit, jobId, clipId, loadReframe, failOr409, flushPending, commitEdit, recordSnapshot],
+  );
+
+  // ── Undo / Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, header buttons) ──
+  // OPTIMISTIC restore for perceived speed: the historical snapshot is applied to LOCAL state
+  // IMMEDIATELY (instant UI revert), then persisted + reconciled in the BACKGROUND. Caption/style/
+  // hook undos (CONTENT only) feel instant — a local ASS style-patch reverts the preview at once and
+  // a quiet refreshAss reconciles the Dialogue tags; NO spinner. Geometry undos (trim/interval/crop/
+  // aspect/motion) change the mp4 PIXELS and need the server's recomputed reframe regions before the
+  // preview crop is right → a small spinner (phase:"saving") while loadReframe runs.
+  // Correctness over speed: the restore PUT is enqueued on patchChain so it never races a caption
+  // PATCH on the optimistic-version lock, and it reads the LIVE version at execution time (the
+  // snapshot's own `version` is dead data). A 409 routes through failOr409 (reload). `present` is
+  // read from editRef.current (synchronously up-to-date) so a fast Ctrl+Z key-repeat pops the RIGHT
+  // step even before React re-renders. Any un-persisted pending caption burst is DROPPED — the
+  // restore is authoritative and supersedes it (one fewer round-trip too).
+  const applyHistory = useCallback(
+    (take: (present: ClipEdit) => ClipEdit | null) => {
+      if (busy) return; // a geometry restore / save / render is in flight → let it settle
+      const present = editRef.current ?? edit;
+      if (!present) return;
+      const target = take(present); // authoritative: reads the hook's live ref, null when empty
+      if (!target) return;
+
+      // Drop any un-persisted pending caption burst — the restore replaces the whole content.
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      pendingCaptionsRef.current = null;
+      setUnsaved(false);
+
+      // Classify the change → how much server work the background reconcile genuinely needs.
+      const intervalsChanged =
+        JSON.stringify(present.source_intervals) !== JSON.stringify(target.source_intervals);
+      const geometryChanged =
+        intervalsChanged ||
+        JSON.stringify(present.reframe_overrides ?? null) !==
+          JSON.stringify(target.reframe_overrides ?? null) ||
+        present.aspect !== target.aspect ||
+        (present.lock_per_shot ?? true) !== (target.lock_per_shot ?? true);
+
+      // 1) OPTIMISTIC LOCAL APPLY — instant revert. Carry the LIVE version (snapshot version is dead
+      //    data) so a racing caption PATCH keeps a valid optimistic lock.
+      const liveVersion = present.version ?? 1;
+      commitEdit({ ...target, version: liveVersion });
+      setAssText((prev) =>
+        patchAssStyles(prev, target.captions.style, target.captions.highlight, target.captions.hook),
+      );
+      setError(null);
+      setDirty(true);
+      if (geometryChanged) {
+        setPixelDirty(true);
+        setPhase("saving"); // crop preview needs the recomputed reframe plan → small spinner
+      }
+
+      // 2) BACKGROUND PERSIST + RECONCILE — serialized on the mutation queue (no version race).
+      const persist = patchChain.current.then(async () => {
+        const base = editRef.current;
+        if (!base) return;
+        try {
+          const restored = await restoreEdit(jobId, clipId, base.version ?? liveVersion, target);
+          if (clipIdRef.current !== clipId) return; // user switched clips mid-flight → drop
+          // Reconcile the server-bumped version but KEEP our optimistic captions (the user may have
+          // typed during the round-trip — same guard as the flushCaptions reconcile).
+          editRef.current = {
+            ...restored,
+            captions: editRef.current?.captions ?? restored.captions,
+          };
+          setEdit((prev) => (prev ? { ...restored, captions: prev.captions } : restored));
+          if (intervalsChanged) {
+            const analysis = await getClipAnalysis(jobId, clipId);
+            if (clipIdRef.current === clipId) setWords(analysis.words);
+          }
+          await refreshAss(); // authoritative ASS reconcile (Dialogue tags / new offsets)
+          if (geometryChanged) await loadReframe();
+        } catch (e) {
+          failOr409(e);
+        } finally {
+          if (geometryChanged) setPhase("ready");
+        }
+      });
+      patchChain.current = persist;
+    },
+    [busy, edit, jobId, clipId, commitEdit, refreshAss, loadReframe, failOr409],
+  );
+
+  const onUndo = useCallback(() => applyHistory(takeUndo), [applyHistory, takeUndo]);
+  const onRedo = useCallback(() => applyHistory(takeRedo), [applyHistory, takeRedo]);
 
   // ── рендер ──
   const handleRender = useCallback(async () => {
@@ -1236,6 +1442,7 @@ export default function ClipEditorScreen({
           stopPoll();
           setRenderState({ kind: "done" });
           setDirty(false); // рендер догнал правки
+          setPixelDirty(false); // framing changes are now in the file
           setDownloadUrl(resolveUrl(st.video_url));
         } else if (st.status === "failed") {
           stopPoll();
@@ -1261,6 +1468,10 @@ export default function ClipEditorScreen({
       } else if (a === "render") {
         // `busy` already includes renderState.kind === "rendering" → covers the guard.
         if (!busy) void handleRender();
+      } else if (a === "undo") {
+        void onUndo();
+      } else if (a === "redo") {
+        void onRedo();
       } else if (a === "closeOverlay") {
         setEditingReply(null);
         setInspectorOpen(false);
@@ -1278,7 +1489,7 @@ export default function ClipEditorScreen({
         }
       }
     },
-    [busy, handleRender, clipIds, clipId, onSwitchClip],
+    [busy, handleRender, clipIds, clipId, onSwitchClip, onUndo, onRedo],
   );
   useEditorShortcuts(dispatchShortcut);
 
@@ -1592,6 +1803,7 @@ export default function ClipEditorScreen({
           busy={busy}
           onApply={handleFrameApply}
           onAspectChange={handleAspectChange}
+          onMotionChange={handleMotionChange}
           shotRegions={stripRegions}
           shotIntervals={edit.source_intervals}
           shotOverrides={edit.reframe_overrides}
@@ -1638,9 +1850,14 @@ export default function ClipEditorScreen({
         renderState={renderState}
         busy={busy}
         dirty={dirty}
+        pixelDirty={pixelDirty}
         saving={unsaved}
         onBeforeLeave={flushPending}
         onSwitchClip={onSwitchClip}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={onUndo}
+        onRedo={onRedo}
         onRender={handleRender}
         templates={templates}
         defaultTemplateId={defaultTemplateId}
@@ -1834,6 +2051,18 @@ export default function ClipEditorScreen({
                       <p className="mt-1 text-center text-xs text-muted">
                         Enter to save · Esc to cancel
                       </p>
+                    </div>
+                  )}
+
+                  {/* «Recomputing framing…» overlay — visible while setCropOverride + loadReframe
+                      are in flight (Tight mode runs face-detection on cold-start → a few seconds).
+                      pointer-events-none so it doesn't block interaction with other overlays. */}
+                  {recomputingFrame && (
+                    <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
+                      <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2/90 px-3 py-2 text-xs font-semibold text-ink shadow-lg backdrop-blur-sm">
+                        <Spinner size="sm" />
+                        Recomputing framing…
+                      </div>
                     </div>
                   )}
                 </PreviewPlayer>

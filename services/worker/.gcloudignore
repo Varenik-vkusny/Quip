@@ -1,0 +1,17 @@
+# Контекст для `gcloud builds submit` (сборка образа Cloud Run). Держим маленьким —
+# в образ копируем только app/ и fonts/ (см. Dockerfile).
+.venv
+tmp
+data
+tests
+*.db
+*.sqlite
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.env
+.env.*
+www.youtube.com_cookies*.txt

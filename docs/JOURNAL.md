@@ -4,6 +4,51 @@
 > «как и почему так сделано». Актуальное состояние проекта = docs/README.md. Правила = CLAUDE.md.
 > Новые заметные решения дописывай СЮДА (не в CLAUDE.md).
 
+### 2026-07-02 (ресёрч, вечер) — боевой E2E-замер фан-аута + план ускорения рендера (4 саб-агента)
+Первый боевой прогон фан-аута замерен: 86,5-мин source / 13 клипов = **~31 мин** (vs 60,5 мин
+in-process = ~2×). ГЛАВНАЯ находка: тормоз не «reframe-CV вообще», а `_refine_cut_native`
+(stage3_reframe.py) — ffmpeg-декод на каждую кандидат-склейку идёт от начала клипа ДО КОНЦА source
+(нет `-t` капа), стоимость ∝ C·(S−o); подтверждено позиционно (ранние клипы 491–776 с паузы, поздние
+20–40 с; худший execution 983,7 с при таймауте 1200 с). Прочее: батчи ≤6 строго последовательны
+(один страггер держал батч 16,5 мин), preview/video_map — серийный хвост, энкод на 4vCPU в 2–3×
+медленнее 8vCPU, cold start 37–60 с = python-импорты (image streaming уже есть), квоты не душат
+(старты 5–8 с). Экономика: квота = минуты source, клипы НЕ биллятся; джоба 60 мин/6 клипов ≈ $0.74 →
+маржа Starter ~50% / Pro ~37% / PAYG ~75% («~73–90%» в billing.py/BENCHMARKS — Modal-эпоха, врут);
+GPU L4 (есть в europe-west1 для Jobs, NVENC официально) — latency-игра, маржу НЕ улучшает. Полный
+отчёт с ранжированными рычагами и ценами: `docs/archive/2026-07-02-render-speedup-research.md`.
+НИЧЕГО из предложенного ещё не реализовано.
+
+### 2026-07-02 (perf, follow-up) — рендер: in-process потоки → КОНТЕЙНЕРНЫЙ фан-аут (как Modal)
+Потоковый пул (запись ниже) на боевом видео оказался НЕ быстрее: на ОДНОМ 8-vCPU контейнере каждый
+клип уже сам многопоточный (нативный cv2/MediaPipe + ffmpeg 8 потоков), поэтому 4 клипа сразу
+ПЕРЕПОДПИСЫВАЮТ ядра (замер: `render=77с` под нагрузкой против `25с` соло) — латентность до первых
+клипов ХУЖЕ последовательного. Настоящий bottleneck — reframe-CV (MediaPipe+ASD+PySceneDetect),
+~2–6 мин/клип (для 2-лицевого подкаста CARDI B ~6 мин; ASD считает активного спикера покадрово по 2
+трекам). Modal прятал это КОНТЕЙНЕРОМ-НА-КЛИП (свои ядра). Восстановил ту же модель на Cloud Run:
+новый job **`quip-render`** (cpu=4/mem=16Gi) + `dispatch.map_render_clips_cloudrun` — координатор
+(`quip-pipeline`) спавнит ПО ОДНОМУ execution `quip-render` на клип (батчами ≤ `RENDER_FANOUT_MAX`=6
+под квоту CPU), каждый качает source из R2, рендерит свой клип, пишет result-dict в R2
+(`storage.upload_fanout_result`; Cloud Run execution'ы не возвращают значение как Modal RPC);
+дождавшись (`_wait_executions`: `succeeded+failed>=task_count`), координатор читает результаты и
+собирает список В ПОРЯДКЕ сегментов, нет результата (клип-контейнер упал) → `failed_clip_result`.
+Гейт `cloudrun_fanout_enabled` (нужен `CLOUDRUN_RENDER_JOB`; kill-switch `CLOUDRUN_FANOUT=0`); ВЕСЬ
+путь под try/except → фолбэк в in-process рендер главного контейнера (квота/сбой API → worst case =
+прежнее поведение, не хуже; правило №8). Потоковый `_render_clips_in_process` СОХРАНЁН как фолбэк и
+локальный/dev-путь. Новое: `tasks.fanout_render_clip_job`, `cloudrun_job` handler `fanout_render_clip`,
+storage put/get result, dispatch `_run_job_on`/`map_render_clips_cloudrun`/`_wait_executions`/`_chunk`.
+Тесты: `test_fanout_render.py` (батчинг, сборка в порядке, missing→failed, gating) + 2 ветки в
+`test_parallel_render.py` (fanout + фолбэк). 1110 pytest + mypy + ruff зелёные. Деплой: образ
+`quip@sha256:1ebad8b9…` на quip-pipeline (координатор, +`CLOUDRUN_JOB/REGION/RENDER_JOB`,
+`RENDER_FANOUT_MAX=6`) + новый quip-render + Service. ОТКРЫТО: боевой E2E-замер (юзер тестит, смотрю
+логи); preview/video_map пока inline в координаторе ПОСЛЕ клипов (можно тоже увести в фан-аут);
+`RENDER_FANOUT_MAX` поднять до 8–10 после подтверждения квоты; source на tmpfs (нет ephemeral-disk).
+
+### 2026-07-02 (инфра + perf) — миграция Modal→Cloud Run + восстановление параллелизма рендера
+Modal-аккаунт забанен по ToS (после spend-limit 429, замаскированного под CORS) → срочная миграция воркера на **Google Cloud Run** (проект `quip-project-500711`, регион `europe-west1`) + свежий Supabase (`mwfnjbnsowiaywkdrlyz`, старый упал). Архитектура: **один образ, два деплоя** — `quip-api` (Cloud Run Service, FastAPI/uvicorn, публичный) на `POST /jobs` триггерит `quip-pipeline` (Cloud Run **Job**, `python -m app.cloudrun_job`, 8 vCPU/32Gi, task-timeout 3ч) через `dispatch.spawn` → `run_v2.JobsClient().run_job()` с per-execution env `JOB_KIND`+`JOB_ARGS`. Новые файлы воркера: `Dockerfile` (порт Modal-образа: статик ffmpeg≥7, Deno+bgutil POT, MediaPipe/cv2, CPU-torch; `COPY app /root/app` = запекает РАБОЧЕЕ ДЕРЕВО, включая незакоммиченные reframe-правки), `app/cloudrun_job.py` (entrypoint-диспетчер), `dispatch.py` (cloudrun_enabled/spawn_enabled + Cloud Run ветка run/cancel), `tasks.py` (`run_upload_job_from_r2`/`run_preview_job`). Схему БД восстановил из инфра-плана (`job_artifacts`/`transcript_cache`/`clip_edits`/`runs` + полная `jobs` — их не было в нумерованных 000X-миграциях). Пойманный баг: `dispatch._cloudrun_job_path` читал `os.environ["CLOUDRUN_PROJECT"]`, а Cloud Run не ставит его сам → KeyError → чистый HTTPException(500) без трейса на upload-complete; фикс — задал env `CLOUDRUN_PROJECT`. **Perf-фикс (ядро сессии):** рендер НЕ параллелился — на Modal каждый клип уходил в свой контейнер (`map_render_clips` фан-аут), а на Cloud Run `modal_spawn_enabled()`=False → «локальная» ветка = ПОСЛЕДОВАТЕЛЬНЫЙ цикл (клип за клипом, медленно). Восстановил параллелизм ВНУТРИ Job-контейнера: `_render_clips_parallel` через **`ThreadPoolExecutor`** (`RENDER_CONCURRENCY`, деф.4) — потоки, а не процессы, потому что тяжёлое (нативный cv2/MediaPipe + ffmpeg-СУБПРОЦЕСС stage5) отпускает GIL, детекторы MediaPipe создаются per-call (потокобезопасно), spawn-процессы дали бы ×N re-import cv2/mediapipe и ×N памяти + ломали monkeypatch-тесты. Порядок результатов сохранён (`executor.map`), per-clip провал контейнирован (`render_one_clip_contained`), пул сломался → sequential-фолбэк. Движок оставлен **B** (плавный cv2 per-frame; моя ошибочная замена на A ухудшила кадрирование — откатил). Тесты: `test_parallel_render.py` обновлён под параллельный контракт (порядок исполнения не гарантирован → `sorted(calls)`, результаты в порядке сегментов). 1102 pytest + mypy + ruff зелёные. Задеплоено: образ `quip@sha256:fc6e63e0…` на Job (RENDER_CONCURRENCY=4) и Service. Deploy-скрипт: `deploy/cloudrun/deploy.ps1`. ОТКРЫТО: реальный E2E-замер скорости на боевом аплоаде (юзер тестит); `/root/data` без ephemeral-disk volume (GA gcloud не смог) → source на tmpfs=RAM, для 2ч/1440p следить за памятью.
+
+### 2026-06-30 (качество студийного фидбека) — lock-per-shot фокус + coverage-gate «ноги» + flash-фикс + tight-lock + Undo/Ctrl+Z + Follow/Lock тумблер + re-render гейт
+Студийный фидбек (3 бага): (1) 2+ лица/no-face шоты кадрировались тайт («ноги» вместо wide); (2) авто-наведение всегда «следило» за лицом внутри шота → полу-лицо на границе; (3) forced Wide→Tight per-shot override игнорировал лицо (дефолт cx=0.5). Все три исправлены и ПРОВЕРЕНЫ на реальном видео (не синтетике) через переиспользуемый `.scratch/reframe_harness.py` (реальный `reframe_segment` → реальный stage5-рендер → face-containment метрика, BEFORE/AFTER/FIXED). Полный технический разбор (пороги, формулы, антипаттерны) → `docs/REFRAME_FPS_GRID_INVARIANT.md` §«Сессия 2026-06-30» и `docs/CORE_ARCHITECTURE_AND_FEATURES.md` §4.4/§8.2. Кратко: `lock_per_shot: bool` (дефолт True) — статичный кроп на шот вместо следящего; `_FILL_MIN_COVERAGE=0.25` — гейт от спурьез-треков; `_tight_lock_cx` — ручной Tight-override теперь реально наводится на лицо; при валидации фикса №1 на реальном видео поймали ЕЩЁ баг — `_refine_cut_native` заменил fps-эвристику `_scene_cut_offset` (флеш на полной точности fps типа 30000/1001). Плюс независимо найденный и исправленный CSS-баг превью: permanent `transition-[object-position]` на master-`<video>` анимировал то, что должно быть мгновенным cut'ом → визуальное «плавное наведение»/полу-лицо ДАЖЕ при уже-статичных данных (рендер был честен всегда, баг чисто в `PreviewPlayer.tsx`). Три новые фичи тем же заходом: Follow/Lock тумблер на Frame-табе (`lock_per_shot`, RENDER-REQUIRED), `pixelDirty` — гейт «пере-рендерить перед скачиванием?» (`ConfirmRenderModal`), Undo/Redo (Ctrl+Z, снепшот-стек `editHistory.ts`) — с фиксом layout-зависимого `e.key` (кириллица ЙЦУКЕН давала `e.key==="я"` на физическом Z, хоткей молча не срабатывал; кнопка работала, т.к. звала `onUndo` напрямую). Все воркер-тесты (1102) зелёные; задеплоено на Modal + Vercel по явному go-ahead фаундера. Старые клипы (baked до фикса) НЕ переобрабатываются автоматически — только новые; `reframe_regions` cache-clear для старых клипов в редакторе — отдельный опциональный шаг, не выполнен.
+
 ### 2026-06-30 (perf, скачивание) — composite-ASS: «скачать с субтитрами» 7.4× быстрее + фикс «тёмного первого файла»
 Базовый клип рендерится БЕЗ субтитров (`run.py` зовёт `render_clip` без `ass_name`) — субтитры это libass-оверлей в браузере. Поэтому каждое «скачать с субтитрами» гнало ВЕСЬ пайплайн от источника (download R2 → PySceneDetect → MediaPipe ASD → полный libx264) на лёгком web-контейнере = медленно + гонка холодного CV (битый/тёмный первый файл, H1). Фикс: новый `app/fast_export.py` — для caption/hook-only правок (один интервал 9:16, без crop-override, совпадает с границами клипа) `render_edit_to_file` накладывает ASS на УЖЕ готовый `clips/<id>.mp4` через `ffmpeg -vf subtitles -c:a copy` (без скачивания источника/CV/reframe). Гейт `can_composite_captions` явный + логируемый (нет тихого фолбэка); тримы/мульти-интервал/crop → полный путь. Замер: **240.5с → 32.4с (7.4×)**; в облаке больше (13MB клип vs 58MB источник). Cache-bust `?v=` теперь и на grid `video_url` (`db._resolve_clip_urls`, токен из `jobs.updated_at`) — добивает stale/partial Cloudflare-edge (H2). Multipart: порог 100→32MB, части 16MB, до 9000, `part_size` в ответе upload-url; клиент `UPLOAD_PART_CONCURRENCY` 3→6. UI: «Download all» = меню из 3 вариантов (с субтитрами / без / .SRT) вместо молчаливой отдачи клипов БЕЗ субтитров. grid-инвариант не тронут. Тесты: `test_fast_export.py`, `test_storage.py`, `test_db.py`, `lib/api.test.ts`.
 

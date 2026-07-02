@@ -24,6 +24,7 @@ def _edit(
     intervals: list[SourceInterval] | None = None,
     overrides: list[CropOverride] | None = None,
     aspect: str = "9:16",
+    lock_per_shot: bool = True,
 ) -> ClipEdit:
     return ClipEdit(
         id="clip_01",
@@ -32,6 +33,7 @@ def _edit(
         captions=CaptionTrack(style=CaptionStyle()),
         reframe_overrides=overrides or [],
         aspect=aspect,
+        lock_per_shot=lock_per_shot,
     )
 
 
@@ -71,6 +73,13 @@ def test_non_9_16_aspect_does_not_match() -> None:
     # baked-клип всегда 9:16 → смена аспекта требует полного ре-рендера.
     assert not edit_matches_baked(_edit(aspect="1:1"), seg_start=SEG_START, seg_end=SEG_END)
     assert not edit_matches_baked(_edit(aspect="16:9"), seg_start=SEG_START, seg_end=SEG_END)
+
+
+def test_follow_motion_does_not_match() -> None:
+    # baked-клип рендерится LOCKED (дефолт). Переключение в follow (lock_per_shot=False) меняет
+    # ПИКСЕЛИ (пан вместо статики) → дешёвый композит субтитров поверх locked-базы НЕВЕРЕН → полный
+    # ре-рендер. lock_per_shot=True (дефолт) совпадает с baked → fast-path остаётся.
+    assert not edit_matches_baked(_edit(lock_per_shot=False), seg_start=SEG_START, seg_end=SEG_END)
 
 
 # ─────────────────────────── can_composite_captions (полный гейт) ───────────────────────────

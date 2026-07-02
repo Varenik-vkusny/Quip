@@ -30,6 +30,11 @@ const MODES: { value: FrameMode; title: string; desc: string }[] = [
 
 const DEBOUNCE_MS = 250;
 
+const MOTION_OPTIONS: { value: boolean; label: string }[] = [
+  { value: true, label: "Lock" },
+  { value: false, label: "Follow" },
+];
+
 export function FrameTab({
   edit,
   outerStart,
@@ -37,6 +42,7 @@ export function FrameTab({
   busy,
   onApply,
   onAspectChange,
+  onMotionChange,
   shotRegions,
   shotIntervals,
   shotOverrides,
@@ -55,6 +61,7 @@ export function FrameTab({
     centerB: number | null,
   ) => Promise<void>;
   onAspectChange: (aspect: Aspect) => void;
+  onMotionChange: (lockPerShot: boolean) => void;
   // ── per-shot framing (was the separate "Shots" tab; both write reframe_overrides) ──
   shotRegions: FitRegion[] | null;
   shotIntervals: SourceInterval[];
@@ -65,6 +72,7 @@ export function FrameTab({
   onApplyShotRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
 }) {
   const aspect = (edit.aspect as Aspect) ?? "9:16";
+  const lockPerShot = edit.lock_per_shot ?? true;
   // текущий override на интервал (последний пересекающий) → стартовое состояние
   const current = (edit.reframe_overrides ?? [])
     .filter((ov) => ov.source_start < outerEnd && ov.source_end > outerStart)
@@ -143,6 +151,36 @@ export function FrameTab({
             </button>
           ))}
         </div>
+      </section>
+
+      {/* T5-motion: Lock = static crop per shot · Follow = camera tracks the face */}
+      <section className="space-y-2">
+        <Eyebrow tone="muted">Motion</Eyebrow>
+        <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Motion mode">
+          {MOTION_OPTIONS.map(({ value, label }) => {
+            const selected = lockPerShot === value;
+            return (
+              <button
+                key={label}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                disabled={busy}
+                onClick={() => onMotionChange(value)}
+                className={`rounded-lg border px-3 py-2.5 text-left text-sm font-semibold transition duration-150 ease-snappy disabled:opacity-50 ${
+                  selected
+                    ? "border-accent-line bg-surface-3 text-accent"
+                    : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-xs leading-snug text-muted">
+          Lock = steady crop per shot · Follow = camera tracks the face
+        </p>
       </section>
 
       <section className="space-y-2">

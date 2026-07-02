@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import threading
@@ -253,6 +254,61 @@ def render_one_clip_contained(
         return failed_clip_result(clip_index, f"unexpected: {e}")
 
 
+def _render_one_clip_star(a: tuple[Any, ...]) -> dict[str, Any]:
+    """Обёртка для executor.map (распаковка кортежа аргументов)."""
+    return render_one_clip_contained(*a)
+
+
+def _render_clips_sequential(
+    out: Path, source_name: str, segments: list[Segment], meta: SourceMeta, user_id: str | None
+) -> list[dict[str, Any]]:
+    return [
+        render_one_clip_contained(out, source_name, i, seg, meta, user_id)
+        for i, seg in enumerate(segments, start=1)
+    ]
+
+
+def _render_clips_parallel(
+    out: Path,
+    source_name: str,
+    segments: list[Segment],
+    meta: SourceMeta,
+    user_id: str | None,
+    workers: int,
+) -> list[dict[str, Any]]:
+    """Параллельный per-clip рендер в ПОТОКАХ (движок B). Тяжёлое — нативный cv2/MediaPipe и
+    ffmpeg-СУБПРОЦЕСС (stage5) — отпускает GIL, поэтому потоки дают реальный параллелизм по vCPU
+    контейнера БЕЗ spawn-оверхеда (re-import cv2/mediapipe/numpy на каждый воркер) и ×N памяти.
+    Детекторы MediaPipe создаются per-call (sample_faces_continuous/detect_scene_cuts) → нет
+    разделяемого небезопасного состояния. Порядок сегментов сохраняется (executor.map). Каждый
+    клип пишет СВОЙ файл и СВОЙ ключ R2; set_clip_ready сериализуется row-lock'ом Postgres → без
+    потери апдейтов. Так восстанавливаем параллелизм Modal-фан-аута ВНУТРИ одного job-контейнера."""
+    import concurrent.futures as cf
+
+    args = [(out, source_name, i, seg, meta, user_id) for i, seg in enumerate(segments, start=1)]
+    with cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="render") as ex:
+        return list(ex.map(_render_one_clip_star, args))
+
+
+def _render_clips_in_process(
+    out: Path, source_name: str, segments: list[Segment], meta: SourceMeta, user_id: str | None
+) -> list[dict[str, Any]]:
+    """Рендер клипов В ПРОЦЕССЕ job-контейнера (нет контейнерного фан-аута): параллелим ПОТОКАМИ на
+    vCPU (``RENDER_CONCURRENCY``, деф.4). Пул сломался → sequential (НЕ падаем, правило №8). Это и
+    фолбэк контейнерного фан-аута, и локальный/dev-путь. NB: несколько тяжёлых клипов на ОДНОМ
+    контейнере переподписывают ядра (каждый клип уже cv2/ffmpeg-многопоточный) → контейнерный
+    фан-аут (execution-на-клип) быстрее; этот путь оставлен как надёжный дефолт/фолбэк."""
+    n = len(segments)
+    workers = min(n, max(1, int(os.environ.get("RENDER_CONCURRENCY", "4"))))
+    if workers <= 1:
+        return _render_clips_sequential(out, source_name, segments, meta, user_id)
+    try:
+        return _render_clips_parallel(out, source_name, segments, meta, user_id, workers)
+    except Exception as e:  # noqa: BLE001 — пул сломался → sequential-фолбэк, не валим джоб
+        print(f"[render] parallel pool failed ({e}); sequential fallback")
+        return _render_clips_sequential(out, source_name, segments, meta, user_id)
+
+
 def _render_all_clips(
     job_id: str,
     out: Path,
@@ -274,15 +330,46 @@ def _render_all_clips(
     """
     if dispatch.modal_spawn_enabled():
         results = dispatch.map_render_clips(clip_spawn_args(job_id, segments, meta, user_id))
+    elif dispatch.cloudrun_fanout_enabled():
+        # Cloud Run: КОНТЕЙНЕР НА КЛИП (как Modal) — клипы рендерятся ПАРАЛЛЕЛЬНО, каждый на своих
+        # vCPU (in-process пул на одном 8-vCPU контейнере переподписывает ядра: каждый клип уже
+        # cv2/ffmpeg-многопоточный). Фан-аут сломался (квота/API) → деградация в in-process рендер
+        # главного контейнера (НЕ валим джоб, правило №8).
+        try:
+            results = dispatch.map_render_clips_cloudrun(
+                job_id, clip_spawn_args(job_id, segments, meta, user_id)
+            )
+        except Exception as e:  # noqa: BLE001 — фан-аут упал → in-process рендер, не валим джоб
+            print(f"[render] container fan-out failed ({e}); in-process render fallback")
+            results = _render_clips_in_process(out, source_name, segments, meta, user_id)
     else:
-        results = [
-            render_one_clip_contained(out, source_name, i, seg, meta, user_id)
-            for i, seg in enumerate(segments, start=1)
-        ]
+        results = _render_clips_in_process(out, source_name, segments, meta, user_id)
     if results and all(r.get("failed") for r in results):
         reasons = "; ".join(str(r.get("error", "")) for r in results)
         raise JobError("render", f"all {len(results)} clips failed to render: {reasons}")
     return results
+
+
+def _preview_and_video_map(
+    job_id: str, out: Path, preview_height: int, preview_crf: int, stages: dict[str, float]
+) -> None:
+    """Preview-прокси + VideoMap pre-warm для НЕ-Modal пути (Cloud Run / локально). Тот же код,
+    что прежний inline-«хвост» после клипов, — только теперь его гонит фоновый ПОТОК
+    ПАРАЛЛЕЛЬНО рендеру (см. run_pipeline: старт после заливки source в R2, join перед
+    финализацией). ffmpeg — субпроцесс, Gemini — HTTP: оба отпускают GIL (та же логика, что
+    у поточного рендера _render_clips_parallel). Требует ЛОКАЛЬНЫЙ source.mp4 (материализован
+    и проверен ДО старта потока; рендер его только читает — не двигает/не удаляет)."""
+    t0 = time.perf_counter()
+    build_preview_proxy(
+        out / "source.mp4", out / "preview.mp4", height=preview_height, crf=preview_crf
+    )
+    stages["preview_proxy"] = round(time.perf_counter() - t0, 2)
+    storage.upload_preview(out / "preview.mp4", job_id)
+    # VideoMap: нужны только transcript/segments из job_artifacts (персистнуты ДО старта потока)
+    # — рендер клипов ей не нужен. Ранний результат безопасен: фронт поллит /video-map когда угодно.
+    from app.tasks import generate_video_map_job
+
+    generate_video_map_job(job_id)
 
 
 def run_pipeline(
@@ -592,16 +679,36 @@ def run_pipeline(
 
     # ── #3 Preview-прокси СНЯТ с критического пути: на Modal — отдельная функция preview_job,
     #    спавним СЕЙЧАС → она строит прокси ПАРАЛЛЕЛЬНО с клипами и не держит set_done. Редактор
-    #    фолбэчит на source, пока прокси не готов (storage.preview_read_url). Локально строим
-    #    inline ПОСЛЕ клипов (dev: один процесс, клипы уже отданы). ──
+    #    фолбэчит на source, пока прокси не готов (storage.preview_read_url). Без Modal (Cloud
+    #    Run / локально) — фоновый ПОТОК ниже, тоже ПАРАЛЛЕЛЬНО с клипами. ──
     if dispatch.modal_spawn_enabled():
         dispatch.spawn("preview_job", job_id)
 
     # ── VideoMap pre-warm: на Modal спавним СЕЙЧАС (отдельный контейнер, durable в Postgres) →
-    #    карта обычно готова, когда юзер открыл результаты. Локально — inline ПОСЛЕ клипов (ниже),
-    #    чтобы НЕ блокировать рендер. НЕ держит set_done и не влияет на нарезку. ──
+    #    карта обычно готова, когда юзер открыл результаты. НЕ держит set_done и не влияет
+    #    на нарезку. ──
     if dispatch.modal_spawn_enabled():
         dispatch.spawn("generate_video_map_job", job_id)
+
+    # ── БЕЗ Modal-спавна (Cloud Run / локально): preview + VideoMap — в фоновом ПОТОКЕ, который
+    #    стартует СЕЙЧАС (source.mp4 материализован, проверен и залит выше) и работает
+    #    ПАРАЛЛЕЛЬНО с рендером клипов (координатор фан-аута всё равно простаивает в поллинге);
+    #    join — ПЕРЕД финализацией (ниже). Раньше это был ПОСЛЕДОВАТЕЛЬНЫЙ хвост ПОСЛЕ всех
+    #    клипов (+40–150с+ к джобу). Ошибка потока НЕ глотается (правило №8): ре-рейз на join →
+    #    джоб падает так же, как при inline-запуске. ──
+    preview_thread: threading.Thread | None = None
+    preview_errors: list[BaseException] = []
+    if not dispatch.modal_spawn_enabled():
+        _preview_h = min(s.preview_height, meta.height)
+
+        def _preview_worker() -> None:
+            try:
+                _preview_and_video_map(job_id, out, _preview_h, s.preview_crf, stages)
+            except BaseException as e:  # noqa: BLE001 — НЕ тихий фолбэк: ре-рейзится на join
+                preview_errors.append(e)
+
+        preview_thread = threading.Thread(target=_preview_worker, name="preview-map", daemon=True)
+        preview_thread.start()
 
     # ── Рендер реально стартует здесь: статус → rendering, progress 80. Клипы уже персистнуты
     #    выше (после select); тут только апдейт статуса/прогресса (клипы не переписываем). ──
@@ -618,20 +725,14 @@ def run_pipeline(
     stages["reframe"] = round(sum(r["reframe_lat"] for r in results), 2)
     stages["render"] = round(sum(r["render_lat"] for r in results), 2)
 
-    # Локально (нет Modal) preview строим inline ПОСЛЕ клипов (cloud уже спавнил preview_job выше).
-    if not dispatch.modal_spawn_enabled():
-        t0 = time.perf_counter()
-        build_preview_proxy(
-            out / "source.mp4", out / "preview.mp4",
-            height=min(s.preview_height, meta.height), crf=s.preview_crf,
-        )  # fmt: skip
-        stages["preview_proxy"] = round(time.perf_counter() - t0, 2)
-        storage.upload_preview(out / "preview.mp4", job_id)
-        # VideoMap pre-warm локально: inline ПОСЛЕ клипов (dev: один процесс, клипы уже отданы →
-        # не блокирует рендер). На Modal уже заспавнено выше отдельным контейнером.
-        from app.tasks import generate_video_map_job
-
-        generate_video_map_job(job_id)
+    # Join preview/VideoMap-потока ПЕРЕД финализацией (set_done у вызывателя): к done прокси уже
+    # в R2, карта в Postgres — идентично прежнему inline-хвосту, только раньше по wall-clock
+    # (поток работал, пока рендер блокировал). Исключение потока ре-рейзим ЗДЕСЬ (до job.json) →
+    # семантика ошибок 1:1 с inline-вариантом: провал preview/map = failed-джоб, НЕ тихо.
+    if preview_thread is not None:
+        preview_thread.join()
+        if preview_errors:
+            raise preview_errors[0]
 
     # ── job.json (wire-контракт) ──
     total_sec = round(time.perf_counter() - t_start, 2)

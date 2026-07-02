@@ -5,6 +5,8 @@ merge_short_regions, build_regions_from_shots, plan_regions, build_shots_frames.
 I/O (ffmpeg/MediaPipe) тестируем глазами на сэмпле.
 """
 
+from pathlib import Path
+
 import pytest
 
 from app.errors import JobError
@@ -466,6 +468,25 @@ class TestPlanRegions:
         regions = plan_regions([(0, 30)], [], fps=30.0, crop_w_frac=0.32)
         assert regions[0].mode == "fit"
 
+    def test_low_coverage_face_is_fit_not_legs(self) -> None:
+        # Хвост дорожки, заползший на 3/100 кадров за склейку в face-sparse establishing-план
+        # (покрытие 3%), НЕ субъект → fit (wide), а НЕ tight-кроп в «ноги»/торс. Репро на реальном
+        # CARDI B B-roll: говорящий бьётся 3 кадра в 7.9с реклайн-план → планировщик кропил ноги.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 3, 0.63, 0.12, 0.9)]
+        regions = plan_regions([(0, 100)], tracks, fps=30.0, crop_w_frac=0.32, speak_threshold=0.0)
+        assert regions[0].mode == "fit"
+        assert regions[0].points == ()
+
+    def test_partial_coverage_above_floor_stays_fill(self) -> None:
+        # Лицо появляется на 40% шота (вошёл в кадр позже) — реальный субъект → fill, не wide.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 40, 0.5, 0.12, 0.9)]
+        regions = plan_regions([(0, 100)], tracks, fps=30.0, crop_w_frac=0.32, speak_threshold=0.0)
+        assert regions[0].mode == "fill"
+
     def test_tiny_silent_face_is_fit(self) -> None:
         # «ambiguous → horizontal»: одно МЕЛКОЕ лицо (width < _MIN_FACE_FRAC=0.08) и молчит
         # (speak < threshold) → нет уверенного субъекта → fit (не кропим в никуда).
@@ -557,10 +578,15 @@ class TestPlanRegions:
             self._track(25, 50, 0.56, 0.16, 0.9),  # рядом (Δ=0.06)
         ]
         regions = plan_regions(
-            [(0, 25), (25, 50)], tracks, fps=25.0, crop_w_frac=0.3167, smoothing=0.15
+            [(0, 25), (25, 50)],
+            tracks,
+            fps=25.0,
+            crop_w_frac=0.3167,
+            smoothing=0.15,
+            lock_per_shot=False,
         )
         assert all(r.mode == "fill" for r in regions)
-        # 2-й стартует БЛИЗКО к концу 1-го (continuity), НЕ прыгает сразу в 0.56
+        # 2-й стартует БЛИЗКО к концу 1-го (continuity) — legacy follower под lock_per_shot=False
         assert abs(regions[1].points[0].cx - regions[0].points[-1].cx) <= 0.05
 
     def test_split_two_spread_stable_tracks(self) -> None:
@@ -711,6 +737,89 @@ class TestPlanRegions:
         regions = plan_regions([(0, 30)], [], fps=30.0, crop_w_frac=0.32, mode_setting="fill")
         assert regions[0].mode == "fill"
         assert regions[0].points and abs(regions[0].points[0].cx - 0.5) < 1e-9
+
+
+class TestComputeLockedCx:
+    """compute_locked_cx: ОДИН статичный центр на шот, гарантирующий ВСЁ лицо в 9:16-кропе.
+
+    Размах центров лица за шот + ширина лица должны влезть в ширину кропа — тогда ставим
+    кроп на середину размаха (лицо целиком на КАЖДОМ кадре). Не влезает (субъект реально
+    проходит через кадр) → None → вызывающий код фолбэчит на слежение (_track_trajectory).
+    """
+
+    def test_constant_center_returns_that_value(self) -> None:
+        from app.pipeline.stage3_reframe import compute_locked_cx
+
+        # лицо стоит на месте (cx=0.7) → лок ровно на нём
+        assert compute_locked_cx([0.7, 0.7, 0.7], face_width=0.12, crop_w_frac=0.32) == 0.7
+
+    def test_small_move_within_budget_locks_midpoint(self) -> None:
+        from app.pipeline.stage3_reframe import compute_locked_cx
+
+        # размах 0.10 + ширина 0.10 = 0.20 ≤ 0.32 → вмещается → центр = середина размаха
+        cx = compute_locked_cx([0.40, 0.45, 0.50], face_width=0.10, crop_w_frac=0.32)
+        assert cx is not None and abs(cx - 0.45) < 1e-9
+
+    def test_move_exceeds_budget_returns_none(self) -> None:
+        from app.pipeline.stage3_reframe import compute_locked_cx
+
+        # размах 0.6 + ширина 0.1 = 0.7 > 0.32 → статикой лицо не удержать → None (фолбэк слежения)
+        assert compute_locked_cx([0.2, 0.8], face_width=0.1, crop_w_frac=0.32) is None
+
+    def test_exact_budget_boundary_locks(self) -> None:
+        from app.pipeline.stage3_reframe import compute_locked_cx
+
+        # размах 0.22 + ширина 0.10 = 0.32 == crop_w_frac → ровно влезает (граница включительно)
+        cx = compute_locked_cx([0.39, 0.61], face_width=0.10, crop_w_frac=0.32)
+        assert cx is not None and abs(cx - 0.5) < 1e-9
+
+    def test_empty_returns_none(self) -> None:
+        from app.pipeline.stage3_reframe import compute_locked_cx
+
+        assert compute_locked_cx([], face_width=0.1, crop_w_frac=0.32) is None
+
+
+class TestPlanRegionsLock:
+    """plan_regions с lock_per_shot (дефолт ON): containable fill-шот → ОДНА статичная точка
+    (фокус зафиксирован на лице, камера не следует); субъект, реально проходящий через кадр
+    дальше бюджета → фолбэк на слежение (много точек). lock_per_shot=False = старый follower."""
+
+    def _moving(self, f0: int, f1: int, cx0: float, cx1: float, width: float, speak: float):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        n = f1 - f0
+        cx = tuple(cx0 + (cx1 - cx0) * i / (n - 1) for i in range(n))
+        return SpeakerTrack(f0=f0, f1=f1, cx=cx, width=width, speak=speak)
+
+    def test_small_move_locks_to_single_point(self) -> None:
+        from app.pipeline.stage3_reframe import plan_regions
+
+        # лицо чуть водит 0.45→0.55 (размах 0.10 + ширина 0.10 = 0.20 ≤ 0.32) → ЛОК: одна точка
+        tracks = [self._moving(0, 30, 0.45, 0.55, 0.10, 0.9)]
+        regions = plan_regions([(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, smoothing=1.0)
+        assert regions[0].mode == "fill"
+        assert len(regions[0].points) == 1  # ЛОК, не траектория слежения
+        assert abs(regions[0].points[0].cx - 0.5) < 1e-9  # на середине размаха
+
+    def test_large_traverse_falls_back_to_follow(self) -> None:
+        from app.pipeline.stage3_reframe import plan_regions
+
+        # лицо реально идёт 0.15→0.85 (размах 0.70 > бюджета) → статикой не удержать → слежение
+        tracks = [self._moving(0, 30, 0.15, 0.85, 0.10, 0.9)]
+        regions = plan_regions([(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, smoothing=1.0)
+        assert regions[0].mode == "fill"
+        assert len(regions[0].points) > 1  # фолбэк: следует за движущимся, не теряет
+
+    def test_lock_disabled_keeps_follower(self) -> None:
+        from app.pipeline.stage3_reframe import plan_regions
+
+        # lock_per_shot=False → старое поведение (follower) даже на малом движении
+        tracks = [self._moving(0, 30, 0.45, 0.55, 0.10, 0.9)]
+        regions = plan_regions(
+            [(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, smoothing=1.0, lock_per_shot=False
+        )
+        assert regions[0].mode == "fill"
+        assert len(regions[0].points) > 1  # follower: несколько точек на движении
 
 
 class TestDetectSceneCutsResourceRelease:
@@ -917,6 +1026,52 @@ class TestDetectSceneCutsMinSceneLen:
         assert captured.get("min_scene_len") == 12
 
 
+class TestLockedCxForTracks:
+    """locked_cx_for_tracks: лок-центр лица для РУЧНОГО tight-override (говорящий/крупнейший)."""
+
+    def _track(self, f0: int, f1: int, cx: float, width: float, speak: float):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        return SpeakerTrack(f0=f0, f1=f1, cx=tuple([cx] * (f1 - f0)), width=width, speak=speak)
+
+    def test_single_face_returns_its_center(self) -> None:
+        from app.pipeline.stage3_reframe import locked_cx_for_tracks
+
+        tracks = [self._track(0, 30, 0.7, 0.12, 0.9)]
+        cx = locked_cx_for_tracks(tracks, 1280, 720, speak_threshold=0.0, smoothing=1.0)
+        assert cx is not None and abs(cx - 0.7) < 1e-9
+
+    def test_no_tracks_returns_none(self) -> None:
+        from app.pipeline.stage3_reframe import locked_cx_for_tracks
+
+        assert locked_cx_for_tracks([], 1280, 720, speak_threshold=0.0, smoothing=1.0) is None
+
+    def test_picks_speaker_among_two(self) -> None:
+        from app.pipeline.stage3_reframe import locked_cx_for_tracks
+
+        # молчащий слева (0.3), говорящий справа (0.7) → лок на говорящего, не на центр/молчащего
+        tracks = [self._track(0, 30, 0.3, 0.12, -0.5), self._track(0, 30, 0.7, 0.12, 0.9)]
+        cx = locked_cx_for_tracks(tracks, 1280, 720, speak_threshold=0.0, smoothing=1.0)
+        assert cx is not None and abs(cx - 0.7) < 1e-9
+
+
+class TestArgmaxJump:
+    """_argmax_jump: кадр с максимальным скачком контента (снап границы на реальную склейку)."""
+
+    def test_picks_max_diff_frame(self) -> None:
+        from app.pipeline.stage3_reframe import _argmax_jump
+
+        # репро CARDI B: скачок 0.3→48.8 ровно на кадре 322 (истинная контент-склейка)
+        diffs = [(320, 0.4), (321, 0.3), (322, 48.8), (323, 0.2)]
+        assert _argmax_jump(diffs, fallback=999) == 322
+
+    def test_empty_returns_fallback(self) -> None:
+        from app.pipeline.stage3_reframe import _argmax_jump
+
+        # нет данных (ffmpeg не дал кадров) → держим кандидат PySceneDetect, не ломаемся
+        assert _argmax_jump([], fallback=321) == 321
+
+
 class TestSceneCutOffset:
     """fps-зависимый сдвиг кадра склейки детектор→рендер (фикс 1-кадрового флеша на 25fps)."""
 
@@ -961,6 +1116,127 @@ class TestMergeShortRegionsFounderCut:
         assert len(result) == 2
         assert result[0].mode == "fit"
         assert result[0].t0 == 0.0 and result[0].t1 == 3.4
+
+
+class TestRefineCutNativeCap:
+    """_refine_cut_native ОБЯЗАН капить декод ffmpeg окном refine, а НЕ гнать до EOF.
+
+    Без капа `-ss <start> -i <src> -vf select(...)` декодит от start до КОНЦА ИСХОДНИКА на
+    КАЖДЫЙ кандидат склейки, оставляя ~9 PNG (на 86-мин сорсе = минуты на склейку; прод:
+    ранние клипы ждали 491–776с в этой фазе). Кап `-frames:v (hi-lo+1)` — счётчик ВЫХОДНЫХ
+    кадров: select пропускает ровно кадры n∈[lo,hi], значит лимит достигается ТОЛЬКО после
+    кадра hi → декод глохнет сразу за окном, а селекция кадров БАЙТ-В-БАЙТ прежняя
+    (-ss origin и select-выражение не тронуты → нумерация n та же).
+    """
+
+    @staticmethod
+    def _capture_cmd(monkeypatch: "pytest.MonkeyPatch") -> dict:
+        import app.pipeline.stage3_reframe as mod
+
+        captured: dict = {}
+
+        class _Proc:
+            returncode = 0
+            stderr = ""
+
+        def _spy(cmd: list, *_a: object, **_k: object) -> "_Proc":
+            captured["cmd"] = list(cmd)
+            return _Proc()
+
+        monkeypatch.setattr(mod.subprocess, "run", _spy)
+        return captured
+
+    def test_decode_capped_by_frames_flag_not_eof(self, monkeypatch: "pytest.MonkeyPatch") -> None:
+        from pathlib import Path
+
+        from app.pipeline.stage3_reframe import _refine_cut_native
+
+        captured = self._capture_cmd(monkeypatch)
+        got = _refine_cut_native(Path("x.mp4"), 12.0, 300, window=4)
+        cmd = captured["cmd"]
+        assert "-frames:v" in cmd  # декод ограничен окном, не до EOF
+        # окно: lo=296, hi=304 → select отдаёт максимум hi-lo+1=9 кадров. Кап РАВЕН этому
+        # числу: покрывает ВСЁ окно (остановиться раньше кадра hi лимит физически не может)
+        # и конечен. ⚠️ Запас (+margin) счётчику ПРОТИВОПОКАЗАН: лимит стал бы недостижим
+        # (select больше кадров не отдаст) → декод снова ушёл бы в EOF.
+        assert cmd[cmd.index("-frames:v") + 1] == "9"
+        # кап — выходная опция (после -i), иначе ffmpeg трактует её как входную
+        assert cmd.index("-frames:v") > cmd.index("-i")
+        assert got == 300  # мок не дал PNG → fail-safe кандидат (поведение не тронуто)
+
+    def test_ss_and_select_expr_byte_identical(self, monkeypatch: "pytest.MonkeyPatch") -> None:
+        # Нумерация n считается от -ss-origin: seek и select-выражение обязаны остаться
+        # ровно прежними, иначе выбираются ДРУГИЕ кадры (сломан снап границы = флеш).
+        from pathlib import Path
+
+        from app.pipeline.stage3_reframe import _refine_cut_native
+
+        captured = self._capture_cmd(monkeypatch)
+        _refine_cut_native(Path("v.mp4"), 3.5, 100, window=4)
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("-ss") + 1] == "3.5"
+        assert cmd.index("-ss") < cmd.index("-i")  # input-seek: n=0 на seek-точке
+        assert cmd[cmd.index("-vf") + 1] == "select='gte(n\\,96)*lte(n\\,104)'"
+        assert cmd[cmd.index("-start_number") + 1] == "96"
+
+    def test_cap_respects_lo_floor_near_segment_start(
+        self, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        # Кандидат у самого старта: lo = max(1, 2-4) = 1, hi = 6 → окно 6 кадров, кап = 6.
+        from pathlib import Path
+
+        from app.pipeline.stage3_reframe import _refine_cut_native
+
+        captured = self._capture_cmd(monkeypatch)
+        _refine_cut_native(Path("v.mp4"), 0.0, 2, window=4)
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("-vf") + 1] == "select='gte(n\\,1)*lte(n\\,6)'"
+        assert cmd[cmd.index("-frames:v") + 1] == "6"
+
+
+class TestReframeTimingLine:
+    """reframe_segment печатает ОДНУ компактную строку фазовых таймингов на клип.
+
+    Прод-лог между стартом контейнера и финальной clip-строкой иначе ПУСТ — тюнить перф
+    (scene_detect/refine/sample/detect/asd) приходится вслепую. Строка одна, не per-frame.
+    """
+
+    def test_prints_single_timing_line_with_all_phases(
+        self,
+        monkeypatch: "pytest.MonkeyPatch",
+        capsys: "pytest.CaptureFixture[str]",
+        tmp_path: Path,
+    ) -> None:
+        import app.pipeline.asd_reframe as asd_mod
+        import app.pipeline.stage3_reframe as mod
+
+        monkeypatch.setattr(mod, "detect_scene_cuts", lambda *a, **k: [30])
+        monkeypatch.setattr(asd_mod, "score_tracks_in_segment", lambda *a, **k: [])
+        regions, face_found = mod.reframe_segment(
+            tmp_path / "src.mp4",
+            1920,
+            1080,
+            0.0,
+            2.0,
+            clip_id="clip_00",
+            out_dir=tmp_path,
+            fps=30.0,
+        )
+        assert face_found is False and regions  # поведение не тронуто
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[reframe]")]
+        assert len(lines) == 1  # одна строка на клип, не спам
+        for field in (
+            "clip=clip_00",
+            "scene_detect=",
+            "cuts=1",
+            "refine=",
+            "sample=",
+            "detect=",
+            "asd=",
+            "tracks=0",
+            "total=",
+        ):
+            assert field in lines[0], f"missing {field!r} in {lines[0]!r}"
 
 
 class TestResampleTrack:

@@ -5,6 +5,7 @@ from app.editor.ops import (
     add_section,
     apply_extend,
     apply_trim,
+    replace_edit_content,
     set_crop_override,
     set_interval,
 )
@@ -114,3 +115,42 @@ def test_set_crop_override_replaces_overlapping():
     assert len(edit.reframe_overrides) == 1
     edit2 = set_crop_override(edit, CropOverride(source_start=0.5, source_end=1.5, mode="fit"))
     assert len(edit2.reframe_overrides) == 1 and edit2.reframe_overrides[0].mode == "fit"
+
+
+def test_replace_edit_content_replaces_all_fields_and_keeps_version():
+    """replace_edit_content is PURE: all content fields replaced, id+version untouched."""
+    edit = _base()
+    new_intervals = [SourceInterval(source_start=1.0, source_end=2.0)]
+    new_captions = edit.captions.model_copy(update={"burn": False})
+    new_overrides = [CropOverride(source_start=0.0, source_end=1.0, mode="fill", center=0.5)]
+    result = replace_edit_content(
+        edit,
+        source_intervals=new_intervals,
+        captions=new_captions,
+        reframe_overrides=new_overrides,
+        aspect="1:1",
+        lock_per_shot=False,
+    )
+    assert result.source_intervals == new_intervals
+    assert result.captions.burn is False
+    assert result.reframe_overrides == new_overrides
+    assert result.aspect == "1:1"
+    assert result.lock_per_shot is False
+    assert result.version == edit.version  # pure helper never bumps version
+    assert result.id == edit.id  # id preserved
+
+
+def test_replace_edit_content_lock_per_shot_true_to_false():
+    """lock_per_shot toggle is carried through replace_edit_content."""
+    edit = _base()
+    assert edit.lock_per_shot is True  # default
+    result = replace_edit_content(
+        edit,
+        source_intervals=edit.source_intervals,
+        captions=edit.captions,
+        reframe_overrides=edit.reframe_overrides,
+        aspect=edit.aspect,
+        lock_per_shot=False,
+    )
+    assert result.lock_per_shot is False
+    assert result.version == edit.version  # pure: no version bump

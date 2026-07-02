@@ -79,7 +79,13 @@
   Marketing sub-pages (`/pricing /terms /privacy /use-case`) stay on the older `(marketing)` chrome.
   Source: `app/(home)/`, `components/landing/{sections,components}`, `lib/landingContent.ts`. The old
   `components/marketing/*` home components are now orphaned (dead code, safe to prune later).
-- **Worker:** Modal app **`quip-worker`** — `https://akybaevtimur7--quip-worker-web.modal.run`
+- **Worker:** ⚠️ **OUTDATED (2026-07-02): Modal ЗАБАНЕН — воркер переехал на Google Cloud Run.
+  Источник правды по инфре/деплою/рендеру → `docs/CLOUDRUN_AND_RENDER_PERF.md`.** Кратко: Service
+  `quip-api` (`https://quip-api-487498137049.europe-west1.run.app`) + Job-координатор `quip-pipeline`
+  + Job фан-аута рендера `quip-render` (контейнер-на-клип); проект `quip-project-500711`,
+  регион `europe-west1`; деплой `deploy/cloudrun/deploy.ps1` (не `modal deploy`). Строки ниже про
+  Modal (`modal deploy`, `.modal.run`, Modal-cron, Modal-секреты) — ИСТОРИЯ, не текущая правда.
+  <br>_(старое)_ Modal app **`quip-worker`** — `https://akybaevtimur7--quip-worker-web.modal.run`
   (functions `web` / `run_job` / `upload_job` / `render_job` / **`reframe_render_clip`** (per-clip
   fan-out) / **`preview_job`**; `/healthz` → 200). Redeploy = `modal deploy deploy/modal/worker.py`
   (on Windows set `PYTHONIOENCODING=utf-8` first).
@@ -180,6 +186,17 @@
   «Сделать новый клип» из карты — ОТЛОЖЕНО (нет endpoint create-clip; пока только «подвинуть»). Источник
   правды генерации: `app/editor/video_map.py` + `prompts/video_map.v1.txt`.
 - **Auth:** Supabase (Google OAuth + email). The `(app)` route group is gated.
+- **Reframe-качество: lock-per-shot фокус + coverage-gate + flash-фикс + Undo/Ctrl+Z (2026-06-30,
+  LIVE на Modal+Vercel).** Студийный фидбек → 3 реальных бага в auto-reframe исправлены и
+  ПРОВЕРЕНЫ на реальном видео (не синтетике): статичный фокус на шот вместо следящего
+  (`lock_per_shot`), гейт от «ложного лица»/«ног» (`_FILL_MIN_COVERAGE`), реального-контента
+  cut-снап (`_refine_cut_native`, заменил старую fps-эвристику), плюс CSS-баг превью (полу-лицо
+  ТОЛЬКО визуально, рендер был честен). + Follow/Lock тумблер, re-render-гейт перед скачиванием,
+  Undo/Ctrl+Z (с фиксом раскладки клавиатуры). **⚠️ ОБЯЗАТЕЛЬНО читай
+  `docs/REFRAME_FPS_GRID_INVARIANT.md` §«Сессия 2026-06-30» перед ЛЮБОЙ правкой reframe/превью** —
+  там же полный список антипаттернов этой сессии (не повторять). Только НОВЫЕ клипы; старые
+  сохраняют прежнее (baked) кадрирование. Полная история → `docs/JOURNAL.md` "2026-06-30 (качество
+  студийного фидбека)".
 - **Язык интерфейса — RU/EN тумблер ЖИВОЙ в core-фанеле (2026-06-30):** двуязычие ОТГРУЖЕНО для
   основного фанела — **лендинг `/` → auth → дашборд → загрузка**. Стек: **`next-intl`, COOKIE-режим**
   (БЕЗ `[locale]`-URL и БЕЗ `proxy.ts`): локаль из cookie `NEXT_LOCALE` (`i18n/request.ts`), провайдер
@@ -355,8 +372,9 @@ Secrets: worker reads Modal secrets `quip-worker` (Deepgram/Gemini/Supabase/R2) 
 reframe invariant) · `BENCHMARKS` (cost/latency) · `SUPABASE_SETUP` (DB/auth wiring) · `SEO_STRATEGY`
 (SEO) · `EVAL` (clip-quality gate) · `HANDOFF` (run/setup mechanics) · `EXTERNAL_SERVICES`
 (third-party / swap matrix) · `ADMIN_PANEL_RESEARCH` (monitoring) · `PRODUCT_BRIEF` (product/GTM) ·
-`NEXT_SESSION_BOOTSTRAP` (session-start prompt). Plus repo-root `CLAUDE.md` (rules) · `DESIGN.md`
-(design system) · `apps/web/{AGENTS,DEPLOY,PERF}.md`.
+`NEXT_SESSION_BOOTSTRAP` (session-start prompt) · `CLOUDRUN_AND_RENDER_PERF` (🔥 Modal→Cloud Run
+migration + render-perf handoff: service map, how render works now, how to speed it up). Plus repo-root
+`CLAUDE.md` (rules) · `DESIGN.md` (design system) · `apps/web/{AGENTS,DEPLOY,PERF}.md`.
 
 🔒 **Frozen paths** (referenced by code comments — never move/rename): `REFRAME_FPS_GRID_INVARIANT.md`,
 `SUPABASE_SETUP.md`, `SEO_STRATEGY.md`, `BENCHMARKS.md`,

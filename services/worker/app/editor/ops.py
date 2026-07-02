@@ -6,6 +6,7 @@ from app.editor.replies import rebuild_replies
 from app.errors import JobError
 from app.models import (
     CaptionReply,
+    CaptionTrack,
     ClipEdit,
     CropOverride,
     SourceInterval,
@@ -171,3 +172,29 @@ def clear_crop_overrides(edit: ClipEdit, source_start: float, source_end: float)
         if ov.source_end <= source_start or ov.source_start >= source_end
     ]
     return edit.model_copy(update={"reframe_overrides": kept})
+
+
+def replace_edit_content(
+    edit: ClipEdit,
+    *,
+    source_intervals: list[SourceInterval],
+    captions: CaptionTrack,
+    reframe_overrides: list[CropOverride],
+    aspect: str,
+    lock_per_shot: bool,
+) -> ClipEdit:
+    """PURE: return a copy of `edit` with all CONTENT fields replaced (version untouched).
+
+    Used by the undo/redo endpoint to atomically restore a historical ClipEdit snapshot.
+    The version field is intentionally left unchanged here — the optimistic-lock save
+    (``_save_or_409``) is responsible for bumping it on each forward write.
+    """
+    return edit.model_copy(
+        update={
+            "source_intervals": source_intervals,
+            "captions": captions,
+            "reframe_overrides": reframe_overrides,
+            "aspect": aspect,
+            "lock_per_shot": lock_per_shot,
+        }
+    )

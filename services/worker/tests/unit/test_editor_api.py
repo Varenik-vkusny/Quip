@@ -340,6 +340,65 @@ def test_export_captioned_mp4_serves_file(monkeypatch, tmp_path):
     assert seen["out_rel"] == "clips/clip_01_captioned.mp4"  # отдельный файл, не clip_01.mp4
 
 
+def test_restore_edit_200_bumps_version(monkeypatch, tmp_path):
+    """PUT /edit/restore with current version → 200, content replaced, version bumped."""
+    client, job = _client(monkeypatch, tmp_path)
+    edit = client.get(f"/jobs/{job}/clips/clip_01/edit").json()
+    v = edit["version"]
+    body = {
+        "version": v,
+        "source_intervals": edit["source_intervals"],
+        "captions": edit["captions"],
+        "reframe_overrides": edit["reframe_overrides"],
+        "aspect": "1:1",
+        "lock_per_shot": False,
+    }
+    r = client.put(f"/jobs/{job}/clips/clip_01/edit/restore", json=body)
+    assert r.status_code == 200
+    result = r.json()
+    assert result["aspect"] == "1:1"
+    assert result["lock_per_shot"] is False
+    assert result["version"] == v + 1
+
+
+def test_restore_edit_409_on_stale_version(monkeypatch, tmp_path):
+    """PUT /edit/restore with stale version → 409 (optimistic lock)."""
+    client, job = _client(monkeypatch, tmp_path)
+    edit = client.get(f"/jobs/{job}/clips/clip_01/edit").json()
+    v = edit["version"]
+    body = {
+        "version": v,
+        "source_intervals": edit["source_intervals"],
+        "captions": edit["captions"],
+        "reframe_overrides": edit["reframe_overrides"],
+        "aspect": "1:1",
+        "lock_per_shot": True,
+    }
+    # first restore succeeds, bumps version
+    client.put(f"/jobs/{job}/clips/clip_01/edit/restore", json=body)
+    # same stale version → 409
+    stale = client.put(f"/jobs/{job}/clips/clip_01/edit/restore", json=body)
+    assert stale.status_code == 409
+
+
+def test_restore_edit_lock_per_shot_false_reflected(monkeypatch, tmp_path):
+    """PUT /edit/restore carrying lock_per_shot=False is persisted and returned."""
+    client, job = _client(monkeypatch, tmp_path)
+    edit = client.get(f"/jobs/{job}/clips/clip_01/edit").json()
+    v = edit["version"]
+    body = {
+        "version": v,
+        "source_intervals": edit["source_intervals"],
+        "captions": edit["captions"],
+        "reframe_overrides": edit["reframe_overrides"],
+        "aspect": edit["aspect"],
+        "lock_per_shot": False,
+    }
+    r = client.put(f"/jobs/{job}/clips/clip_01/edit/restore", json=body)
+    assert r.status_code == 200
+    assert r.json()["lock_per_shot"] is False
+
+
 def test_render_job_writes_captioned_never_overwrites_clean(monkeypatch, tmp_path):
     # D1-инвариант: фон-рендер редактора НИКОГДА не трогает чистый clips/<id>.mp4.
     client, job = _client(monkeypatch, tmp_path)  # noqa: F841 — поднимает DATA_ROOT/DB

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -271,6 +272,7 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
         speaker_crop_scale=s.reframe_speaker_crop_scale,
         face_fps=s.reframe_face_fps,
         smoothing=s.reframe_smoothing,
+        lock_per_shot=edit.lock_per_shot,
         min_hold_sec=s.reframe_min_hold_sec,
         speak_threshold=s.reframe_speak_threshold,
         scene_threshold=s.reframe_scene_threshold,
@@ -434,6 +436,83 @@ def run_pipeline_job(
         db.set_failed(job_id, str(e))
     except Exception as e:  # noqa: BLE001 — фон-таск: любое падение → статус failed, не молча
         db.set_failed(job_id, f"unexpected: {e}")
+
+
+def run_preview_job(job_id: str) -> None:
+    """Построить preview.mp4 (<=720p H.264 faststart) из R2-source и залить в R2. Вне
+    критического пути джоба (редактор фолбэчит на source, пока прокси не готов). In-process
+    аналог Modal-функции ``preview_job`` для Cloud Run Job / always-on хостинга."""
+    from app import artifacts, storage
+    from app.config import get_settings
+    from app.pipeline.stage0_import import build_preview_proxy
+
+    s = get_settings()
+    src = artifacts.ensure_source(job_id)
+    meta = artifacts.load_meta(job_id)
+    dst = src.parent / "preview.mp4"
+    build_preview_proxy(src, dst, height=min(s.preview_height, meta.height), crf=s.preview_crf)
+    storage.upload_preview(dst, job_id)
+
+
+def run_upload_job_from_r2(
+    job_id: str,
+    filename: str,
+    max_clips: int | None = None,
+    user_id: str | None = None,
+    language: str | None = None,
+) -> None:
+    """Фон-таск для direct-R2-upload: браузер залил исходник в R2 (presigned PUT) → качаем его на
+    этот контейнер → тот же run_upload_job. In-process аналог Modal-функции ``upload_job`` (та же
+    склейка ``download_source`` → ``run_upload_job``) для always-on хостинга без spawn (Railway).
+    """
+    from pathlib import Path
+
+    from app import artifacts, storage
+
+    out = artifacts.job_dir(job_id)
+    out.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix.lower() or ".mp4"
+    upload_path = out / f"upload{suffix}"
+    try:
+        storage.download_source(job_id, upload_path)  # raw upload, залитый в R2 presigned PUT
+    except Exception as e:  # noqa: BLE001 — скачивание исходника из R2 упало → видимый failed
+        db.set_failed(job_id, f"source download failed: {e}")
+        return
+    run_upload_job(job_id, str(upload_path), filename, max_clips, user_id, language)
+
+
+def fanout_render_clip_job(
+    job_id: str,
+    clip_index: int,
+    seg: dict[str, Any],
+    meta: dict[str, Any],
+    user_id: str | None = None,
+) -> None:
+    """Stages 3–5 ОДНОГО клипа в СВОЁМ Cloud Run job-контейнере (контейнерный фан-аут рендера —
+    аналог Modal ``reframe_render_clip``). ``source.mp4`` из R2 (``artifacts.ensure_source``,
+    залит координатором ДО фан-аута). Результат НЕ возвращается по RPC (координатор и клип на РАЗНЫХ
+    контейнерах) → пишется в R2 (``storage.upload_fanout_result``); координатор читает и собирает
+    список (``dispatch.map_render_clips_cloudrun``). Per-clip провал контейнирован
+    ``render_one_clip_contained`` (пустой ``video_url``) → результат ВСЕГДА пишется, джоб не валится
+    (правило №8). Падение ДО записи (напр. source download) → нет объекта → координатор синтезирует
+    failed_clip_result. НЕ трогает stage3/stage5 (инвариант кадровой сетки цел)."""
+    from app import artifacts, storage
+    from app.models import Segment
+    from app.run import render_one_clip_contained
+
+    t0 = time.monotonic()
+    src = artifacts.ensure_source(job_id)  # source из R2 на свежий контейнер (как editor-render)
+    result = render_one_clip_contained(
+        src.parent,
+        src.name,
+        clip_index,
+        Segment.model_validate(seg),
+        SourceMeta.model_validate(meta),
+        user_id,
+    )
+    storage.upload_fanout_result(job_id, clip_index, result)
+    total = time.monotonic() - t0
+    _rlog.info("[fanout] clip_%02d done total=%.1fs", clip_index, total)
 
 
 def run_upload_job(

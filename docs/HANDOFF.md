@@ -641,6 +641,9 @@ Chrome 127+ и Edge сломали DPAPI-расшифровку кук — `--co
 | Коммит из Bash → кириллица `?????` + BOM | Коммитить ТОЛЬКО из PowerShell; сообщение в файл + `-F` |
 | pre-commit ruff-format переформатирует → хук падает | После `reformatted N files` → `git add` + повторный коммит |
 | opencv-python-headless + opencv-contrib-python → битый cv2 | Держать ОДИН opencv-пакет |
+| Удаление `.next\dev`/`.next` кэша ПОКА `pnpm dev` жив (2026-06-30) | Ломает Turbopack persistent cache: `Persisting failed... Compaction failed` → сайт не грузится. СНАЧАЛА `Stop-Process` (найти PID по порту: `Get-NetTCPConnection -LocalPort 3000 -State Listen`), ПОТОМ чистить кэш, ПОТОМ рестарт `pnpm dev` |
+| `e.key` для хоткеев (Ctrl+Z и т.п.) зависит от раскладки клавиатуры | На кириллице (ЙЦУКЕН) физический Z даёт `e.key==="я"`, хоткей молча не сработает. ВСЕГДА матчить ещё и layout-независимый `e.code` (`"KeyZ"`) в дополнение к `e.key` |
+| Численная DoD-метрика (`Δ=0`, покрытие лица %) не ловит 1-кадровые визуальные баги (флеш, полу-лицо) | Для frame-accurate / визуальных claim'ов ОБЯЗАТЕЛЬНО смотреть покадровые PNG на РЕАЛЬНОМ рендере (не только числа) — см. `.scratch/reframe_harness.py` паттерн и `REFRAME_FPS_GRID_INVARIANT.md` |
 
 ### Известные ограничения
 

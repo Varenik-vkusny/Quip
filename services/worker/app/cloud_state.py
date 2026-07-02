@@ -82,6 +82,12 @@ def insert_job(
         },
         timeout=_TIMEOUT,
     )
+    if r.status_code >= 400:  # НЕ молча (правило №8): логируем тело ответа PostgREST
+        import logging
+
+        logging.getLogger("app.cloud_state").error(
+            "insert_job POST /jobs -> %s: %s", r.status_code, r.text[:1000]
+        )
     r.raise_for_status()
 
 

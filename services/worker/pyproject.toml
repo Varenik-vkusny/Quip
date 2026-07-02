@@ -85,6 +85,11 @@ ignore_missing_imports = true
 module = ["modal", "modal.*"]
 ignore_missing_imports = true
 
+# google-cloud-run — импортится лениво в app/dispatch.py (Cloud Run Jobs backend); стоит в образе.
+[[tool.mypy.overrides]]
+module = ["google.cloud", "google.cloud.*", "google.cloud.run_v2", "google.cloud.run_v2.*"]
+ignore_missing_imports = true
+
 # Стороннее ядро ASD — не анализируем (treat as Any), импорты из него = Any.
 [[tool.mypy.overrides]]
 module = ["app.asd._vendor.*"]
