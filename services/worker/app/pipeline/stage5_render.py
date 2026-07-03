@@ -509,6 +509,7 @@ def render_frame_by_frame(
     ]  # fmt: skip
     proc = subprocess.Popen(ffmpeg_cmd, cwd=data_dir, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     pipe = proc.stdin
+    pipe_broke = False  # ffmpeg умер РАНО (write в мёртвый пайп) → ниже поднимем его stderr
     try:
         for frame_idx in range(total_frames):
             ret, frame = cap.read()
@@ -535,15 +536,26 @@ def render_frame_by_frame(
                 cropped = frame[c.y : c.y + c.h, c.x : c.x + c.w]
                 out_frame = cv2.resize(cropped, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
             if pipe is not None:
-                pipe.write(out_frame.tobytes())
+                try:
+                    pipe.write(out_frame.tobytes())
+                except (BrokenPipeError, OSError):
+                    # ffmpeg умер РАНО (битый фильтр/кодек/аргумент) — пишем в мёртвый пайп.
+                    # НЕ маскируем как голый «Broken pipe» (правило №8): прекращаем кормить и ниже
+                    # достаём РЕАЛЬНЫЙ stderr ffmpeg (напр. «No such filter: 'drawtext'» — ровно так
+                    # падал free-план на ffmpeg без libfreetype). На Windows это OSError [Errno 22].
+                    pipe_broke = True
+                    break
     finally:
         cap.release()
         if pipe is not None:
-            pipe.close()
+            try:
+                pipe.close()
+            except OSError:
+                pass  # пайп уже закрыт со стороны мёртвого ffmpeg — не важно
         proc.wait()
-    if proc.returncode != 0:
+    if proc.returncode != 0 or pipe_broke:
         stderr_bytes = proc.stderr.read() if proc.stderr else b""
-        stderr = stderr_bytes.decode("utf-8", errors="replace")[-400:]
+        stderr = stderr_bytes.decode("utf-8", errors="replace")[-600:]
         raise JobError(_STAGE, f"Engine B ffmpeg exit code {proc.returncode}: {stderr}")
 
 

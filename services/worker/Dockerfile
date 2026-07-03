@@ -34,13 +34,21 @@ RUN git clone --depth 1 --single-branch --branch 1.3.1 \
     && rm -rf /opt/bgutil-ytdlp-pot-provider/.git \
     && ls /opt/bgutil-ytdlp-pot-provider/server/src/generate_once.ts
 
-# 4) СТАТИК ffmpeg >=7 (John Van Sickle) в /usr/local/bin — НЕ apt-ffmpeg (apt 5/6 крашит
-#    crop-рендер: «Parsed_crop_4: Failed to configure input pad»). /usr/local/bin в PATH раньше /usr/bin.
-RUN wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -O /tmp/ffmpeg.tar.xz \
+# 4) СТАТИК ffmpeg 7.x (BtbN, GPL) в /usr/local/bin — НЕ apt-ffmpeg (apt 5/6 крашит crop-рендер:
+#    «Parsed_crop_4: Failed to configure input pad»; лечится ЛЮБЫМ ffmpeg >=7). BtbN вместо John Van
+#    Sickle: ⚠️ JVS-static собран БЕЗ libfreetype → фильтра `drawtext` в нём НЕТ → free-план (вотермарка
+#    «Made with Quip» = единственный drawtext) падал «No such filter: drawtext» → Broken pipe на КАЖДОМ
+#    клипе (Engine B: первый pipe.write в мёртвый ffmpeg). BtbN-GPL 7.1 = тот же мажор, что JVS 7.0.2, +
+#    libfreetype/fribidi/harfbuzz (drawtext) + libx264 + ВСЕ фильтры JVS (crop/subtitles/overlay/scale).
+#    Откат при регрессии crop: JVS URL = https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+#    (тогда cp из ffmpeg-*-static/, без bin/). /usr/local/bin в PATH раньше /usr/bin.
+#    ⛔ BUILD-TIME ГАРД: сборка ПАДАЕТ, если в ffmpeg нет drawtext → этот баг больше НЕ уедет молча в прод.
+RUN wget -q "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz" -O /tmp/ffmpeg.tar.xz \
     && cd /tmp && tar xf ffmpeg.tar.xz \
-    && cp /tmp/ffmpeg-*-static/ffmpeg /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/ \
+    && cp /tmp/ffmpeg-*/bin/ffmpeg /tmp/ffmpeg-*/bin/ffprobe /usr/local/bin/ \
     && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
     && rm -rf /tmp/ffmpeg* \
+    && /usr/local/bin/ffmpeg -hide_banner -filters | grep -q ' drawtext ' \
     && /usr/local/bin/ffmpeg -version | head -1
 
 # 5) torch — CPU-колесо (ASD active-speaker). Отдельный индекс, отдельный слой.
