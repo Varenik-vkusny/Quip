@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { IconButton } from "@/components/ui/IconButton";
 import type { StylePreferencePayload, StyleTemplate } from "@/lib/api";
@@ -19,7 +19,7 @@ import type { StylePreferencePayload, StyleTemplate } from "@/lib/api";
 // location + the small UI affordances around those handlers.
 // ────────────────────────────────────────────────────────────────────────────
 
-export function TemplatesPanel({
+export const TemplatesPanel = memo(function TemplatesPanel({
   templates,
   defaultTemplateId,
   busy,
@@ -261,4 +261,4 @@ export function TemplatesPanel({
       </div>
     </section>
   );
-}
+});

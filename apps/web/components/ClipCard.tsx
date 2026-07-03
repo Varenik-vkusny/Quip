@@ -3,12 +3,12 @@
 import { Check, Loader2, Pencil } from "lucide-react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { ExportMenu } from "@/components/ExportMenu";
 import { Card } from "@/components/ui/Card";
 import { Numeral } from "@/components/ui/Numeral";
 import { clipRange } from "@/lib/format";
-import type { ClipOut } from "@/lib/types";
+import type { ClipOut, Word } from "@/lib/types";
 import { ClipPreview } from "./ClipPreview";
 import { PendingThumb } from "./PendingThumb";
 
@@ -99,18 +99,76 @@ function getScoreTier(score100: number): { textClass: string; gradient: string; 
   };
 }
 
-export function ClipCard({
-  jobId,
-  clip,
-  selected,
-  onToggle,
-}: {
+type ClipCardProps = {
   jobId: string;
   clip: ClipOut;
   selected: boolean;
-  onToggle: () => void;
+  onToggle: (id: string) => void;
   topClip?: boolean;
-}) {
+};
+
+function wordsEqual(a: Word[], b: Word[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const wa = a[i];
+    const wb = b[i];
+    if (
+      wa.text !== wb.text ||
+      wa.start !== wb.start ||
+      wa.end !== wb.end ||
+      wa.speaker !== wb.speaker ||
+      wa.confidence !== wb.confidence
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Every field this component (or its children, ClipPreview/PendingThumb) reads off a clip,
+// compared by VALUE. useJob() polls every 2.5s and replaces the whole `Job` object wholesale (a
+// fresh `res.json()` tree — see lib/useJob.ts + lib/api.ts:getJob), so `clip` is a brand-new
+// object reference every poll even when its content is byte-identical to the last one. Reference
+// equality alone (plain shallow memo) can therefore NEVER bail out here — this is why the memo
+// below needs a custom comparator instead. Deliberately exhaustive (every ClipOut field, not just
+// the ones read today) so a future field added to this component's render can't silently go
+// uncompared and get dropped by the memo.
+function clipEqual(a: ClipOut, b: ClipOut): boolean {
+  return (
+    a.id === b.id &&
+    a.video_url === b.video_url &&
+    a.score === b.score &&
+    a.start === b.start &&
+    a.end === b.end &&
+    a.duration === b.duration &&
+    a.hook === b.hook &&
+    a.hook_style === b.hook_style &&
+    a.key_quote === b.key_quote &&
+    a.reason === b.reason &&
+    a.thumbnail_url === b.thumbnail_url &&
+    a.tone === b.tone &&
+    a.transcript === b.transcript &&
+    a.type === b.type &&
+    a.why_works === b.why_works &&
+    wordsEqual(a.words, b.words)
+  );
+}
+
+// `onToggle` is a single stable function reference shared by every card (ClipGrid wraps it in
+// useCallback with no deps and passes the SAME `toggle` to all cards, rather than a fresh
+// `() => toggle(id)` closure per card) — so a plain `!==` here is correct and never flaps.
+function clipCardPropsEqual(prev: ClipCardProps, next: ClipCardProps): boolean {
+  return (
+    prev.jobId === next.jobId &&
+    prev.selected === next.selected &&
+    prev.topClip === next.topClip &&
+    prev.onToggle === next.onToggle &&
+    clipEqual(prev.clip, next.clip)
+  );
+}
+
+function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
   const t = useTranslations("clipCard");
   const pending = !clip.video_url;
   const videoSrc = pending ? "" : resolveUrl(clip.video_url);
@@ -210,7 +268,7 @@ export function ClipCard({
         {!pending && (
           <button
             type="button"
-            onClick={onToggle}
+            onClick={() => onToggle(clip.id)}
             aria-pressed={selected}
             aria-label={selected ? t("deselect") : t("select")}
             className={`absolute right-2 top-2 z-40 inline-flex size-7 items-center justify-center rounded-sm border transition duration-150 ease-snappy active:scale-95 ${
@@ -346,3 +404,7 @@ export function ClipCard({
     </Card>
   );
 }
+
+ClipCardComponent.displayName = "ClipCard";
+
+export const ClipCard = memo(ClipCardComponent, clipCardPropsEqual);

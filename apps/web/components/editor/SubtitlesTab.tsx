@@ -1,7 +1,7 @@
 "use client";
 
 import { RotateCcw, Scissors } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, memo, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/IconButton";
 import { Badge } from "@/components/ui/Badge";
 import { Checkbox } from "@/components/ui/Checkbox";
@@ -52,7 +52,7 @@ function GroupTitle({ children, hint }: { children: ReactNode; hint?: string }) 
   );
 }
 
-export function SubtitlesTab({
+export const SubtitlesTab = memo(function SubtitlesTab({
   words,
   replies,
   activeReplyIndex,
@@ -371,7 +371,7 @@ export function SubtitlesTab({
       </section>
     </div>
   );
-}
+});
 
 function fmtSec(s: number): string {
   const m = Math.floor(s / 60);

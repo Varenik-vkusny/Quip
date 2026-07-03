@@ -7,6 +7,7 @@ import type { Job } from "./types";
 
 const POLL_MS = 2500;
 const MAX_BACKOFF_MS = 10_000; // reconnect backoff ceiling: 2.5s → 5s → 10s, then steady.
+const HIDDEN_POLL_MS = 10_000; // backgrounded-tab cadence — same ceiling as MAX_BACKOFF_MS, so it never polls slower than an already-tolerated worst case.
 
 /**
  * Polling статуса job каждые 2.5с (effect по jobId). Стоп на done/failed.
@@ -17,6 +18,11 @@ const MAX_BACKOFF_MS = 10_000; // reconnect backoff ceiling: 2.5s → 5s → 10s
  * job. Instead we enter a `reconnecting` state, keep retrying with backoff, and re-poll the
  * instant the browser fires "online". Only a REAL HTTP/app error (or a `failed` status from the
  * worker) becomes a terminal `error`. elapsed тикает локально. start/reset/reconnectNow — управление.
+ *
+ * Backgrounded tabs poll at `HIDDEN_POLL_MS` instead of `POLL_MS` — no point hammering the API
+ * every 2.5s for a tab the user isn't looking at (jobs run for minutes). The instant the tab
+ * becomes visible again we fire an immediate poll and resume the full 2.5s cadence, so returning
+ * users see fresh state right away. Mirrors the "online" resilience pattern above.
  */
 export function useJob() {
   const [jobId, setJobId] = useState<string | null>(null);
@@ -63,6 +69,12 @@ export function useJob() {
       pollTimer = setTimeout(() => void loop(), delay);
     }
 
+    // Full cadence while the tab is visible; slowed way down while it's hidden. Only affects the
+    // steady-state success path — the error/reconnect backoff ladder below is untouched.
+    function nextPollMs() {
+      return typeof document !== "undefined" && document.hidden ? HIDDEN_POLL_MS : POLL_MS;
+    }
+
     async function loop() {
       try {
         const j = await getJob(id);
@@ -106,7 +118,7 @@ export function useJob() {
         clearInterval(tick);
         return;
       }
-      schedule(POLL_MS);
+      schedule(nextPollMs());
     }
 
     pollNowRef.current = () => {
@@ -119,6 +131,18 @@ export function useJob() {
     const onOnline = () => pollNowRef.current?.();
     window.addEventListener("online", onOnline);
 
+    // Slow down the instant the tab is backgrounded (reschedule the pending timer onto the slow
+    // cadence right away, rather than waiting out whatever full-speed poll was already queued),
+    // and catch up immediately on return — same "don't miss the moment it changes" idea as online.
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        schedule(HIDDEN_POLL_MS);
+      } else {
+        pollNowRef.current?.();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     void loop();
 
     return () => {
@@ -126,6 +150,7 @@ export function useJob() {
       clearInterval(tick);
       if (pollTimer) clearTimeout(pollTimer);
       window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       pollNowRef.current = null;
     };
   }, [jobId]);

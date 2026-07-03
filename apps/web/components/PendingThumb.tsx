@@ -25,12 +25,36 @@ import { resolveUrl } from "./ClipCard";
 // ────────────────────────────────────────────────────────────────────────────
 
 export function PendingThumb({ jobId, clipStart }: { jobId: string; clipStart: number }) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // The proxy URL that produced the currently-drawn frame. `hasFrame` is derived:
   // a frame counts only if it was grabbed for the CURRENT proxyUrl, so when the URL
   // changes we fall back to the skeleton automatically — no synchronous reset needed
   // (which the React Compiler lint forbids inside an effect body).
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
+
+  // Only decode video once the card is (near) on screen — same pattern as ClipPreview's libass
+  // gate. A results page can have ~30 pending cards at once; without this every one of them opens
+  // a hidden <video> and seeks it immediately on mount, i.e. a dozen+ simultaneous decode contexts
+  // regardless of scroll position. `rootMargin: "200px"` pre-warms just before it's visible.
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            setVisible(true);
+            io.disconnect();
+          }
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   // Media auth: the hidden frame-grab `<video>` can't send an Authorization header → append the
   // worker-accepted `?mt=<ticket>` query param (a scoped, short-lived, opaque media ticket, NOT the
@@ -64,6 +88,7 @@ export function PendingThumb({ jobId, clipStart }: { jobId: string; clipStart: n
   const hasFrame = proxyUrl !== null && frameUrl === proxyUrl;
 
   useEffect(() => {
+    if (!visible) return; // off-screen → no decode work until scrolled (near) into view
     if (!proxyUrl) return; // token not ready → skip the frame-grab; re-runs when proxyUrl resolves
     const video = document.createElement("video");
     // NO crossOrigin: the CDN (cdn.quip.ink) doesn't return CORS headers on video GETs, and the
@@ -149,10 +174,13 @@ export function PendingThumb({ jobId, clipStart }: { jobId: string; clipStart: n
       video.removeAttribute("src");
       video.load();
     };
-  }, [proxyUrl, clipStart]);
+  }, [visible, proxyUrl, clipStart]);
 
   return (
-    <div className="relative aspect-[9/16] w-full overflow-hidden rounded-t-lg bg-surface-2">
+    <div
+      ref={containerRef}
+      className="relative aspect-[9/16] w-full overflow-hidden rounded-t-lg bg-surface-2"
+    >
       {/* Skeleton — visible until a frame is grabbed (and the only thing shown on fallback). */}
       {!hasFrame && (
         <>

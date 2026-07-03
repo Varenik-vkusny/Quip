@@ -1524,12 +1524,26 @@ export default function ClipEditorScreen({
   );
   useEditorShortcuts(dispatchShortcut);
 
+  // Stable rail-select handler: a fresh inline closure here would re-render the memoized EditorRail
+  // on every per-frame nowSec update. setTab/setInspectorOpen are stable state setters.
+  const handleRailSelect = useCallback((t: Tab) => {
+    setTab(t);
+    setInspectorOpen(true);
+  }, []);
+
   // ── активная реплика по текущему времени видео ──
   const replyRanges = useMemo(() => {
     const replies = edit?.captions.replies ?? [];
     if (replies.length === 0 || words.length === 0) return [];
     return buildReplyRanges(replies, words, outerStart);
   }, [edit, words, outerStart]);
+
+  // Stable identity for the memoized SubtitlesTab's `replies` prop. Inline `edit.captions.replies
+  // ?? []` would mint a FRESH [] on every (per-frame) render whenever replies is nullish, which
+  // would defeat SubtitlesTab's React.memo. Recomputes only when `edit` changes REFERENCE (a real
+  // edit) — and since replies is never mutated in place (every edit spreads a new array), the
+  // memoized child never misses an update.
+  const captionReplies = useMemo(() => edit?.captions.replies ?? [], [edit]);
 
   const activeReplyIndex = useMemo(() => {
     if (replyRanges.length === 0) return null;
@@ -1801,7 +1815,7 @@ export default function ClipEditorScreen({
       {tab === "subtitles" && (
         <SubtitlesTab
           words={words}
-          replies={edit.captions.replies ?? []}
+          replies={captionReplies}
           activeReplyIndex={activeReplyIndex}
           busy={busy}
           burn={edit.captions.burn ?? true}
@@ -1952,7 +1966,7 @@ export default function ClipEditorScreen({
           style={{ "--inspector-w": `${inspectorW}px` } as React.CSSProperties}
         >
           {/* ── ЛЕВО: icon-rail (Fixed-Studio shell). Заменяет верхний таб-бар. ── */}
-          <EditorRail active={tab} onSelect={(t) => { setTab(t); setInspectorOpen(true); }} />
+          <EditorRail active={tab} onSelect={handleRailSelect} />
 
           {/* ── ЦЕНТР: стабильный по высоте canvas (Task 1 инвариант — превью не ужимается
               при смене панелей/аспекта). PreviewPlayer-поддерево живёт ЗДЕСЬ (state на месте). */}

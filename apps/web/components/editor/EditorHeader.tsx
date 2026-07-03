@@ -12,7 +12,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { ExportMenu } from "@/components/ExportMenu";
 import { Button } from "@/components/ui/Button";
 import type { StylePreferencePayload, StyleTemplate } from "@/lib/api";
@@ -29,7 +29,7 @@ export type RenderState =
   | { kind: "rendering"; elapsed: number }
   | { kind: "done" };
 
-export function EditorHeader({
+export const EditorHeader = memo(function EditorHeader({
   jobId,
   clipId,
   clipIds,
@@ -301,4 +301,4 @@ export function EditorHeader({
       </div>
     </header>
   );
-}
+});

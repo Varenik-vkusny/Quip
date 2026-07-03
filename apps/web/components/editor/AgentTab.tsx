@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronRight, Loader2, Send, Square, Wand2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelAgentRun,
   getActiveAgentRun,
@@ -105,7 +105,7 @@ function ChatItemRow({ item, live }: { item: ChatItem; live: boolean }) {
   );
 }
 
-export function AgentTab({
+export const AgentTab = memo(function AgentTab({
   jobId,
   clipId,
   busy,
@@ -342,4 +342,4 @@ export function AgentTab({
       </div>
     </div>
   );
-}
+});

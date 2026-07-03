@@ -2,14 +2,13 @@
 
 import { Plus } from "lucide-react";
 import { useTranslations } from "next-intl";
+import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { AppHeader } from "@/components/app/AppHeader";
 import { PromoRedeem } from "@/components/app/PromoRedeem";
 import { RecentProjects } from "@/components/app/RecentProjects";
 import { UsageMeter } from "@/components/app/UsageMeter";
-import { ClipGrid } from "@/components/ClipGrid";
-import { VideoMap } from "@/components/VideoMap";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { JobProgress } from "@/components/JobProgress";
 import { ReconnectBanner } from "@/components/ReconnectBanner";
@@ -23,6 +22,49 @@ import { markReviewed, noteRecentCreated } from "@/lib/recent";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { useJob } from "@/lib/useJob";
+
+// Heavy, phase-gated result views — NOT shown on the idle "New project" first paint (the only
+// thing a returning user sees before they submit). Code-split so their JS (and their transitive
+// deps: ClipCard/ExportMenu, the video-map narrative parser + polling) stays out of the initial
+// dashboard bundle and only loads once a job actually reaches a state that renders them. ssr:false
+// is safe here — the dashboard is an authed client route (no SEO), and both already run client-only.
+// A light skeleton keeps the swap from flashing blank while the chunk streams in.
+
+/** Placeholder for the results grid while its chunk loads (mirrors ClipGrid's 3-col card layout). */
+function ClipGridSkeleton() {
+  return (
+    <div className="w-full" aria-hidden>
+      <div className="mb-5 h-8 w-56 rounded bg-surface-2 motion-safe:animate-pulse" />
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="aspect-[9/16] rounded-lg bg-surface-2 motion-safe:animate-pulse"
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Placeholder for the video-map card while its chunk loads. */
+function VideoMapSkeleton() {
+  return (
+    <div className="mb-6 rounded-lg border border-line bg-surface p-5" aria-hidden>
+      <div className="h-3.5 w-24 rounded bg-surface-2 motion-safe:animate-pulse" />
+      <div className="mt-3 h-6 w-2/3 rounded bg-surface-2 motion-safe:animate-pulse" />
+    </div>
+  );
+}
+
+const ClipGrid = dynamic(() => import("@/components/ClipGrid").then((m) => m.ClipGrid), {
+  ssr: false,
+  loading: () => <ClipGridSkeleton />,
+});
+const VideoMap = dynamic(() => import("@/components/VideoMap").then((m) => m.VideoMap), {
+  ssr: false,
+  loading: () => <VideoMapSkeleton />,
+});
 
 /** Friendly label for the recent-projects list (no PII, just a hint). */
 function labelFromUrl(url: string): string {

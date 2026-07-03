@@ -2,7 +2,7 @@
 
 import { Captions, CheckSquare, ChevronDown, Download, FileText, Film, Square } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { downloadFile } from "@/components/ExportMenu";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Eyebrow } from "@/components/ui/Eyebrow";
@@ -251,6 +251,10 @@ export function ClipGrid({ job }: { job: Job }) {
     [clipIdKey]
   );
   // Map IDs → current clip objects so video_url / thumbnail updates land in-place.
+  // NB: job.clips is a brand-new object tree every 2.5s poll (useJob replaces the whole `Job`),
+  // so every clip object here gets a new reference even when its content is unchanged. ClipCard
+  // is React.memo'd with a custom comparator (see ClipCard.tsx) that compares clip FIELDS by
+  // value instead of relying on reference stability — handled there, not here.
   const clips = useMemo(
     () =>
       sortedIds
@@ -281,6 +285,19 @@ export function ClipGrid({ job }: { job: Job }) {
   const selectedCount = readyClips.filter((c) => !deselected.has(c.id)).length;
   const allSelected = readyClips.length > 0 && selectedCount === readyClips.length;
 
+  // Stable across renders (useCallback, no deps — only reads the updater form of setDeselected)
+  // so every <ClipCard onToggle={toggle}> below shares the SAME function reference every poll,
+  // instead of a fresh `() => toggle(id)` closure per card defeating React.memo. Must be called
+  // unconditionally (hook), so it lives here, above the early return below.
+  const toggle = useCallback((id: string) => {
+    setDeselected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
   if (clips.length === 0)
     return (
       <EmptyState
@@ -296,15 +313,6 @@ export function ClipGrid({ job }: { job: Job }) {
 
   function isSelected(id: string) {
     return !deselected.has(id);
-  }
-
-  function toggle(id: string) {
-    setDeselected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   }
 
   function toggleAll() {
@@ -377,7 +385,7 @@ export function ClipGrid({ job }: { job: Job }) {
             jobId={jobId}
             clip={c}
             selected={isSelected(c.id)}
-            onToggle={() => toggle(c.id)}
+            onToggle={toggle}
             topClip={c.id === topClipId}
           />
         ))}

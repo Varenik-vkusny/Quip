@@ -1,7 +1,7 @@
 "use client";
 
 import { BookOpen } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { getVideoMap } from "@/lib/api";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
@@ -200,7 +200,7 @@ function KindLegend() {
 }
 
 // ─── TopicStrip (main export) ─────────────────────────────────────────────────
-export function TopicStrip({
+export const TopicStrip = memo(function TopicStrip({
   jobId,
   currentStart,
   currentEnd,
@@ -315,4 +315,4 @@ export function TopicStrip({
       </div>
     </details>
   );
-}
+});

@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, memo } from "react";
 import { Captions, Crop, Type, Wand2 } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ export const TABS: { id: Tab; label: string; icon: typeof Captions }[] = [
 
 // keyboard-shortcut digit per tab (1-based, matches dispatchShortcut → TABS[a.tab - 1]).
 
-export function EditorRail({
+export const EditorRail = memo(function EditorRail({
   active,
   onSelect,
   agentActive = false,
@@ -97,4 +97,4 @@ export function EditorRail({
       })}
     </nav>
   );
-}
+});

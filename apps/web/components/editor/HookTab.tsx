@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, Sparkles } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { Eyebrow } from "@/components/ui/Eyebrow";
@@ -38,7 +38,7 @@ const HOOK_DEFAULTS = {
   animation: "none" as NonNullable<HookOverlay["animation"]>,
 };
 
-export function HookTab({
+export const HookTab = memo(function HookTab({
   edit,
   busy,
   onHookChange,
@@ -360,7 +360,7 @@ export function HookTab({
       </section>
     </div>
   );
-}
+});
 
 /** Мини-превью хук-пресета: слово в основном цвете на плашке/с контуром. */
 function HookPresetThumb({ preset }: { preset: Partial<HookOverlay> }) {
