@@ -71,7 +71,8 @@
   },
   "recentProjects": {
     "heading": "Recent",
-    "empty": "Projects created on this device appear here.",
+    "empty": "Your recent projects appear here.",
+    "loading": "Loading your projects…",
     "remove": "Remove from recent",
     "now": "now",
     "ready": "Ready",

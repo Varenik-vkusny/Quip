@@ -45,7 +45,7 @@ def init_db() -> None:
             """CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 status TEXT, stage TEXT, progress INTEGER,
-                source_type TEXT, source_ref TEXT, error TEXT,
+                source_type TEXT, source_ref TEXT, error TEXT, user_id TEXT,
                 clips_json TEXT, cost_usd REAL, duration_sec REAL, elapsed_sec REAL,
                 function_call_id TEXT, cancellable INTEGER NOT NULL DEFAULT 1,
                 created_at REAL, updated_at REAL
@@ -98,6 +98,10 @@ def init_db() -> None:
         # Stop-кнопка (зеркало migrations/0006_job_cancel.sql): id Modal-функции + флаг отмены.
         _ensure_column(c, "jobs", "function_call_id", "TEXT")
         _ensure_column(c, "jobs", "cancellable", "INTEGER NOT NULL DEFAULT 1")
+        # Владелец джобы (ownership-гейт: IDOR-защита by-job/clip эндпоинтов). Cloud-строки уже
+        # несут user_id; в SQLite колонки не было → owner-check вырождался в None (bypass). Теперь
+        # локальный dev + auth тоже энфорсит владельца (defense-in-depth). Зеркало jobs.user_id.
+        _ensure_column(c, "jobs", "user_id", "TEXT")
         # Live-narration счётчики (зеркало migrations/0011_progress_detail.sql).
         _ensure_column(c, "jobs", "source_minutes", "REAL")
         _ensure_column(c, "jobs", "transcript_words", "INTEGER")
@@ -116,9 +120,10 @@ def insert_job(
     with _conn() as c:
         c.execute(
             "INSERT INTO jobs"
-            " (id,status,stage,progress,source_type,source_ref,cancellable,created_at,updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
-            (job_id, "queued", "queued", 0, source_type, source_ref, 1, now, now),
+            " (id,status,stage,progress,source_type,source_ref,user_id,cancellable,"
+            "created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (job_id, "queued", "queued", 0, source_type, source_ref, user_id, 1, now, now),
         )
 
 
@@ -456,6 +461,26 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return None
     row = dict(fetched)
     return _resolve_clip_urls(row_to_wire(row), cache_token=_cache_token(row))
+
+
+def list_jobs_by_user(user_id: str | None, limit: int = 50) -> list[dict[str, Any]]:
+    """СЫРЫЕ строки джоб пользователя (newest-first) для дашборд-списка (замена localStorage-
+    recents на клиенте). Cloud → ``cs.list_jobs_by_user``; иначе SQLite. Лёгкий SELECT (без
+    ре-подписи клип-URL): вызыватель считает ярлык/nclips из строки. ``user_id is None`` (dev,
+    auth off) → самые свежие джобы без фильтра по владельцу (dev-удобство)."""
+    if cs.cloud_enabled():
+        return cs.list_jobs_by_user(user_id, limit)
+    with _conn() as c:
+        if user_id is not None:
+            rows = c.execute(
+                "SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── артефакты пайплайна (meta/segments/transcript) — durable для лёгкого API на Modal ──

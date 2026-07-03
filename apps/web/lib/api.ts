@@ -17,17 +17,98 @@ import type {
 // База воркера: реальный worker через env, иначе встроенный мок (/api/mock).
 const BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "/api/mock";
 
+/** Текущий Supabase access_token (когда auth настроен), иначе null (dev / auth не подключён).
+ *  Единый источник токена: используется и для Authorization-заголовка, и для `?token=` на
+ *  медиа-URL (`<video src>` / нативные скачивания не могут выставить заголовок). */
+export async function getAccessToken(): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const { data } = await createSupabaseBrowserClient().auth.getSession();
+    return data.session?.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Заголовок авторизации для воркера: текущий Supabase access_token (когда auth настроен).
  *  Воркер валидирует JWT (JWKS проекта) и достаёт user_id. Без auth → пустой объект (dev). */
 async function authHeaders(): Promise<Record<string, string>> {
-  if (!isSupabaseConfigured) return {};
-  try {
-    const { data } = await createSupabaseBrowserClient().auth.getSession();
-    const token = data.session?.access_token;
-    return token ? { Authorization: `Bearer ${token}` } : {};
-  } catch {
-    return {};
-  }
+  const token = await getAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/** Append a SCOPED media ticket to a WORKER media URL for surfaces that can't send an
+ *  Authorization header — `<video src>` (editor preview / PendingThumb) and native downloads.
+ *  The ticket is an opaque, short-lived, job-scoped HMAC (see `getMediaToken`) — NOT the session
+ *  JWT — so it's safe to leak into logs/Referer. Query key is `mt` by default. Worker media
+ *  endpoints accept EITHER the Authorization header OR this `?mt=` param. PURE; no-op when the
+ *  token is absent (dev/open mode) or the url is empty. Preserves any existing query string. */
+export function withToken(url: string, token: string | null | undefined, key = "mt"): string {
+  if (!token || !url) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}${key}=${encodeURIComponent(token)}`;
+}
+
+// ── Scoped media tickets (opaque, ~5min TTL, per job) ──
+// A media ticket authorizes ONLY this job's media/export endpoints for a short window — it is not
+// a full-account credential, so putting it in a URL is safe (unlike the session JWT). Cached per
+// jobId with its TTL so N PendingThumbs / the editor preview share ONE fetch; refetched ~30s before
+// expiry. Never throws (non-OK → null → caller falls back to header-only / a 401'd load that retries).
+type MediaTicket = { token: string; expEpochMs: number };
+const mediaTicketCache = new Map<string, MediaTicket>();
+const MEDIA_TOKEN_SKEW_MS = 30_000; // refetch this long BEFORE the ticket actually expires
+
+export async function getMediaToken(jobId: string): Promise<string | null> {
+  const now = Date.now();
+  const cached = mediaTicketCache.get(jobId);
+  if (cached && cached.expEpochMs - MEDIA_TOKEN_SKEW_MS > now) return cached.token;
+  const res = await fetchWithTimeout(`${BASE}/jobs/${jobId}/media-token`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return null; // 403 (not your job) / 401 / 404 (deploy window) → no ticket
+  const data = (await res.json().catch(() => null)) as
+    | { token?: string; expires_in?: number }
+    | null;
+  const token = data?.token;
+  if (!token) return null;
+  const ttlSec = typeof data?.expires_in === "number" && data.expires_in > 0 ? data.expires_in : 300;
+  mediaTicketCache.set(jobId, { token, expEpochMs: now + ttlSec * 1000 });
+  return token;
+}
+
+/** Drop a cached media ticket so the next `getMediaToken(jobId)` refetches — call after a media
+ *  load 401s (ticket rotated/expired) to recover without a full reload. */
+export function invalidateMediaToken(jobId: string): void {
+  mediaTicketCache.delete(jobId);
+}
+
+/** A row in the user's own "recent projects" list (server-authoritative, from GET /jobs).
+ *  Local UI type — the recents list has always been a local shape with no shared-codegen dep. */
+export type MyJob = {
+  id: string;
+  label: string;
+  status: string;
+  nclips: number;
+  created_at: number | string;
+  source_kind: string;
+};
+
+/** The caller's OWN jobs (newest first) — the server-backed recents list that replaces the old
+ *  global-localStorage store (the cross-account leak). Auth via bearer header.
+ *
+ *  Graceful during the worker DEPLOY WINDOW: the route may briefly be missing (old worker → 404)
+ *  or the token may not be accepted yet — ANY non-OK response resolves to `[]` (empty list), never
+ *  throws and never spams the console, so the dashboard can't crash while the route rolls out.
+ *  A genuine network error / timeout still rejects (fetchWithTimeout) so the poller can retry. */
+export async function getMyJobs(): Promise<MyJob[]> {
+  const res = await fetchWithTimeout(`${BASE}/jobs`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return []; // 404 (deploy window) / 401 / 5xx → empty, no crash, no console spam
+  const data = (await res.json().catch(() => null)) as { jobs?: MyJob[] } | null;
+  return data?.jobs ?? [];
 }
 
 export type CreateJobInput = {
@@ -334,7 +415,15 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, ms = 1500
 }
 
 export async function getJob(id: string): Promise<Job> {
-  const res = await fetchWithTimeout(`${BASE}/jobs/${id}`, { cache: "no-store" });
+  const res = await fetchWithTimeout(`${BASE}/jobs/${id}`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  // IDOR surface: the dashboard deep-links jobs by id (?job=). The worker's ownership gate returns
+  // 403 for someone else's job → show a clean message (mirrors applyStyleToAll) instead of a raw
+  // "getJob failed: 403". 401 → not signed in. (useJob surfaces these via the error panel.)
+  if (res.status === 403) throw new Error("This isn’t your project");
+  if (res.status === 401) throw new Error("Sign in to view this project.");
   if (!res.ok) throw new Error(`getJob failed: ${res.status}`);
   return res.json();
 }
@@ -353,7 +442,10 @@ export async function cancelJob(id: string): Promise<{ status: string; cancelled
 }
 
 export async function getTimeline(jobId: string): Promise<TimelineData> {
-  const res = await fetch(`${BASE}/jobs/${jobId}/timeline`, { cache: "no-store" });
+  const res = await fetch(`${BASE}/jobs/${jobId}/timeline`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getTimeline failed: ${res.status}`);
   return res.json();
 }
@@ -362,7 +454,7 @@ export async function getChapters(jobId: string, retry = false): Promise<Chapter
   // AI-карта видео (главы). Первый вызов стартует генерацию (status=pending) → поллить.
   // retry=true перезапускает генерацию, если предыдущая упала (квота Gemini free-tier).
   const url = `${BASE}/jobs/${jobId}/chapters${retry ? "?retry=true" : ""}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", headers: await authHeaders() });
   if (!res.ok) throw new Error(`getChapters failed: ${res.status}`);
   return res.json();
 }
@@ -371,7 +463,7 @@ export async function getVideoMap(jobId: string, retry = false): Promise<VideoMa
   // Карта видео (нарратив + главы + цветные моменты). Первый вызов стартует генерацию
   // (status=pending) → поллить. retry=true перезапускает упавшую генерацию.
   const url = `${BASE}/jobs/${jobId}/video-map${retry ? "?retry=true" : ""}`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", headers: await authHeaders() });
   if (!res.ok) throw new Error(`getVideoMap failed: ${res.status}`);
   return res.json();
 }
@@ -387,7 +479,10 @@ export type PreviewMoment = {
  *  selection — purely the "the AI is reading your video" visual. Empty until the worker has
  *  detected any (and [] on local dev / old jobs). fetchWithTimeout so a hung poll can't stick. */
 export async function getPreviewMoments(jobId: string): Promise<PreviewMoment[]> {
-  const res = await fetchWithTimeout(`${BASE}/jobs/${jobId}/preview-moments`, { cache: "no-store" });
+  const res = await fetchWithTimeout(`${BASE}/jobs/${jobId}/preview-moments`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getPreviewMoments failed: ${res.status}`);
   const data = (await res.json()) as { moments?: PreviewMoment[] };
   return data.moments ?? [];
@@ -407,7 +502,7 @@ export async function setCropOverride(
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/crop`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, ...body }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -426,7 +521,7 @@ export async function setClipAspect(
   // T5: сменить соотношение сторон клипа (выход + reframe-кроп; кадровая сетка не трогается).
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/aspect`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, aspect }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -444,7 +539,7 @@ export async function setClipMotion(
   // Render-required: changes pixels identically to aspect — flush + dirty + reload reframe.
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/motion`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, lock_per_shot: lockPerShot }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -465,7 +560,7 @@ export async function restoreEdit(
   const { source_intervals, captions, reframe_overrides, aspect, lock_per_shot } = content;
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/restore`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({
       version,
       source_intervals,
@@ -489,7 +584,7 @@ export async function setClipInterval(
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/set-interval`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, source_start: sourceStart, source_end: sourceEnd }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -506,7 +601,7 @@ export async function regenerateHook(
   // Меняет только hook.text; стиль/позицию не трогает. Бампает версию → flush до вызова.
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/hook/regenerate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -522,7 +617,7 @@ export async function startAgentRun(
 ): Promise<AgentRun> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/agent/start`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ message }),
   });
   if (!res.ok) throw new Error(`startAgentRun failed: ${res.status}`);
@@ -536,6 +631,7 @@ export async function getAgentRun(
 ): Promise<AgentRun> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/agent/${runId}`, {
     cache: "no-store",
+    headers: await authHeaders(),
   });
   if (!res.ok) throw new Error(`getAgentRun failed: ${res.status}`);
   return res.json();
@@ -547,6 +643,7 @@ export async function getActiveAgentRun(
 ): Promise<AgentRun | null> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/agent/active`, {
     cache: "no-store",
+    headers: await authHeaders(),
   });
   if (!res.ok) throw new Error(`getActiveAgentRun failed: ${res.status}`);
   return res.json();
@@ -559,6 +656,7 @@ export async function cancelAgentRun(
 ): Promise<AgentRun> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/agent/${runId}/cancel`, {
     method: "POST",
+    headers: await authHeaders(),
   });
   if (!res.ok) throw new Error(`cancelAgentRun failed: ${res.status}`);
   return res.json();
@@ -566,7 +664,10 @@ export async function cancelAgentRun(
 
 export async function getClipAss(jobId: string, clipId: string): Promise<string> {
   // ASS субтитров текущего edit-state — для libass.wasm превью (тот же ASS, что жжёт ffmpeg).
-  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/ass`, { cache: "no-store" });
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/ass`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getClipAss failed: ${res.status}`);
   return res.text();
 }
@@ -586,13 +687,19 @@ export async function getClipReframe(
   // D2: reframe-план (fit/fill/split + центры) от ЕДИНОГО frame-accurate пути (как у рендера).
   // Заменяет прямой fetch media/<job>/reframe_<clip>.json — тот 404-ил на облаке (файл только
   // на scratch batch-контейнера) → превью откатывалось в центр-кроп ≠ рендер.
-  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/reframe`, { cache: "no-store" });
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/reframe`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getClipReframe failed: ${res.status}`);
   return res.json();
 }
 
 export async function getClipEdit(jobId: string, clipId: string): Promise<ClipEdit> {
-  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit`, { cache: "no-store" });
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getClipEdit failed: ${res.status}`);
   return res.json();
 }
@@ -601,7 +708,10 @@ export async function getClipAnalysis(
   jobId: string,
   clipId: string,
 ): Promise<{ intervals: { source_start: number; source_end: number }[]; words: Word[] }> {
-  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/analysis`, { cache: "no-store" });
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/analysis`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`getClipAnalysis failed: ${res.status}`);
   return res.json();
 }
@@ -614,7 +724,7 @@ export async function trimClip(
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/trim`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, word_indices: wordIndices }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -631,7 +741,7 @@ export async function extendClip(
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/extend`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, edge, new_value: newValue }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -682,7 +792,7 @@ export function captionedDownloadUrl(
 export async function startRenderClip(jobId: string, clipId: string): Promise<{ status: string }> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/render`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: "{}",
   });
   if (!res.ok) throw new Error(`startRenderClip failed: ${res.status}`);
@@ -697,6 +807,7 @@ export async function getRenderStatus(
   // «Rendering…» вечно (poll-цикл не получал бы ни ok, ни ошибки).
   const res = await fetchWithTimeout(`${BASE}/jobs/${jobId}/clips/${clipId}/render`, {
     cache: "no-store",
+    headers: await authHeaders(),
   });
   if (!res.ok) throw new Error(`getRenderStatus failed: ${res.status}`);
   return res.json();
@@ -710,7 +821,7 @@ export async function patchClipEdit(
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, captions }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
@@ -732,11 +843,20 @@ export function patchClipEditKeepalive(
   captions: CaptionTrack,
 ): void {
   try {
-    void fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version, captions }),
-      keepalive: true,
+    // Kept SYNC (returns void) so the fire-and-forget call site stays a plain statement. The token
+    // is resolved in a `.then` rather than `await` — one microtask later than a purely synchronous
+    // keepalive, but getSession resolves from the CACHED session (no network for a valid token), so
+    // the request is still initiated within the same unload task's microtask checkpoint, before the
+    // page is discarded. Without the header the worker rejects the PATCH (401), so an authed
+    // best-effort save beats an unauthed one that's dropped anyway. (Awkwardness noted: if this ever
+    // proves unreliable on unload, thread a pre-fetched token in from the editor instead.)
+    void authHeaders().then((headers) => {
+      void fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ version, captions }),
+        keepalive: true,
+      });
     });
   } catch {
     /* page is leaving — nothing we can do */
@@ -757,7 +877,7 @@ export async function applyPreset(
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/apply-preset`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ version, preset_id: presetId }),
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");

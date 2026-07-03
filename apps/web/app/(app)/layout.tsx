@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { AuthStateSync } from "@/components/auth/AuthStateSync";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -12,5 +13,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     } = await supabase.auth.getUser();
     if (!user) redirect("/login");
   }
-  return <>{children}</>;
+  return (
+    <>
+      {/* Client sentinel: purges cross-account localStorage caches on sign-out / account switch. */}
+      <AuthStateSync />
+      {children}
+    </>
+  );
 }

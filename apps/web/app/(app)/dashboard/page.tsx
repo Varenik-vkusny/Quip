@@ -19,12 +19,9 @@ import { Numeral } from "@/components/ui/Numeral";
 import { Spinner } from "@/components/ui/Spinner";
 import { Split } from "@/components/ui/Split";
 import { cancelJob, createJob, createUploadJob } from "@/lib/api";
-import {
-  addRecentProject,
-  type JobStatusLite,
-  markReviewed,
-  updateRecentProject,
-} from "@/lib/recent";
+import { markReviewed, noteRecentCreated } from "@/lib/recent";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { useJob } from "@/lib/useJob";
 
 /** Friendly label for the recent-projects list (no PII, just a hint). */
@@ -108,6 +105,24 @@ function DashboardInner() {
   const uploadCtrl = useRef<AbortController | null>(null);
   useEffect(() => () => uploadCtrl.current?.abort(), []); // unmount → отменить загрузку
 
+  // Current user id → per-user "reviewed" badge namespacing (null in dev/no-auth). Resolved once.
+  const [userId, setUserId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    let active = true;
+    createSupabaseBrowserClient()
+      .auth.getUser()
+      .then(({ data }) => {
+        if (active) setUserId(data.user?.id ?? null);
+      })
+      .catch(() => {
+        /* keep null — reviewed flag just won't persist; not fatal */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Deep-link: open an existing job via ?job=<id>. Reactive to the query param so
   // navigating from /dashboard to /dashboard?job=X (e.g. clicking a recent project
   // while already on the dashboard) loads it immediately — no manual refresh. The
@@ -118,18 +133,12 @@ function DashboardInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobParam]);
 
-  // Keep the recent-projects entry in sync with the live job: cache the latest status +
-  // clip count (so the list shows "Processing… / Ready · N clips" instantly), and mark the
-  // job reviewed once its results are on screen (clears the "New" badge). updateRecentProject
-  // is a no-op when nothing changed, so this is cheap.
+  // Mark a job reviewed (per-user) once its results are on screen → clears the "New" badge in the
+  // recents list. The list is server-authoritative now (getMyJobs returns live status/nclips), so
+  // there's no client-side status cache to keep in sync. userId in deps so this fires once it resolves.
   useEffect(() => {
-    if (!job) return;
-    updateRecentProject(job.id, {
-      status: job.status as JobStatusLite,
-      nclips: job.clips?.length || undefined,
-    });
-    if (job.status === "done") markReviewed(job.id);
-  }, [job?.id, job?.status, job?.clips?.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (job?.status === "done") markReviewed(userId, job.id);
+  }, [job?.id, job?.status, userId]);
 
   async function handleSubmit(url: string, maxClips: number) {
     if (submitting) return; // guard: не плодим параллельные джобы двойным сабмитом
@@ -138,7 +147,9 @@ function DashboardInner() {
     setRequestedClips(maxClips);
     try {
       const { id } = await createJob({ source_type: "youtube", source_ref: url, max_clips: maxClips });
-      addRecentProject({ id, label: labelFromUrl(url), at: Date.now() });
+      // Optimistic recents entry + refetch signal → the new project shows instantly in the list
+      // (and RecentProjects refetches getMyJobs) before the server list catches up.
+      noteRecentCreated({ id, label: labelFromUrl(url), at: Date.now() });
       start(id);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : t("errors.create"));
@@ -160,7 +171,7 @@ function DashboardInner() {
       const { id } = await createUploadJob(file, maxClips, setUploadPct, ctrl.signal, language);
       if (ctrl.signal.aborted) return; // отменена/вытеснена — не трогаем стейт
       setUploadPct(null);
-      addRecentProject({ id, label: file.name, at: Date.now() });
+      noteRecentCreated({ id, label: file.name, at: Date.now() });
       start(id);
     } catch (e) {
       // намеренная отмена (reset/unmount/новый сабмит) → НЕ показываем ошибку

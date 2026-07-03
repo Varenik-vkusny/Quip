@@ -3,7 +3,14 @@
 import { Captions, ChevronDown, Download, FileText, Film, Loader2 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { captionedDownloadUrl, clipCleanExportUrl, clipSrtUrl } from "@/lib/api";
+import {
+  captionedDownloadUrl,
+  clipCleanExportUrl,
+  clipSrtUrl,
+  getAccessToken,
+  getMediaToken,
+  withToken,
+} from "@/lib/api";
 import { ConfirmRenderModal } from "@/components/editor/ConfirmRenderModal";
 
 // Меню «Скачать» — экспорт-свобода: юзер уносит клип в любой редактор.
@@ -24,7 +31,10 @@ const WORKER_BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "";
  *  all" reuses the exact same blob-download path (no duplicated logic). Throws on a non-OK
  *  response so callers can fall back to a direct link / surface the failure (no silent swallow). */
 export async function downloadFile(url: string, fallbackName: string): Promise<void> {
-  const res = await fetch(url);
+  // On-demand export endpoints live on the worker and are ownership-gated → send the bearer token
+  // (fetched fresh so it's always current). CDN/baked URLs ignore the header harmlessly.
+  const token = await getAccessToken();
+  const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const blob = await res.blob();
   const cd = res.headers.get("content-disposition");
@@ -138,13 +148,15 @@ export function ExportMenu({
       setBusy(p.key);
       void downloadFile(url, p.fallbackName)
         .then(() => setBusy(null))
-        .catch((e) => {
+        .catch(async (e) => {
           console.warn("[export] post-render blob download failed, falling back:", e);
           setBusy(null);
-          window.location.href = url;
+          // Fallback nav can't set a header → append a scoped media ticket (?mt=). If null, navigate
+          // without it (the primary fetch path already sends the Authorization header in the normal case).
+          window.location.href = withToken(url, await getMediaToken(jobId), "mt");
         });
     }
-  }, [pixelDirty, captionedUrl, cleanUrl, captionedInstant, cleanInstant]);
+  }, [pixelDirty, captionedUrl, cleanUrl, captionedInstant, cleanInstant, jobId]);
 
   const pick = async (key: string, url: string, fallbackName: string, instant: boolean) => {
     if (busy) return;
@@ -173,7 +185,7 @@ export function ExportMenu({
     } catch (e) {
       // CORS/network → fall back to a direct navigation (native download, no progress UI).
       console.warn("[export] blob download failed, falling back to direct link:", e);
-      window.location.href = url;
+      window.location.href = withToken(url, await getMediaToken(jobId), "mt");
     } finally {
       setBusy(null);
     }
@@ -210,10 +222,10 @@ export function ExportMenu({
     setBusy(p.key);
     void downloadFile(url, p.fallbackName)
       .then(() => { setBusy(null); setOpen(false); })
-      .catch((e) => {
+      .catch(async (e) => {
         console.warn("[export] blob download failed, falling back to direct link:", e);
         setBusy(null);
-        window.location.href = url;
+        window.location.href = withToken(url, await getMediaToken(jobId), "mt");
       });
   };
 

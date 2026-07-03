@@ -7,6 +7,7 @@ CORS открыт для web (localhost:3000). Логика пайплайна �
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import uuid
@@ -31,7 +32,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import __version__, auth, billing, db, dispatch, storage
+from app import __version__, auth, billing, db, dispatch, media_token, storage
 from app.config import bootstrap_env, get_settings
 
 # Локально активируем auth/billing-гейты из .env (как env-vars в проде). Под pytest НЕ
@@ -133,6 +134,71 @@ def _resolve_user(authorization: str | None, x_user_id: str | None) -> str | Non
         except auth.AuthError as e:
             raise HTTPException(status_code=401, detail=f"unauthorized: {e}") from e
     return x_user_id
+
+
+def _enforce_owner(job_id: str, user_id: str | None) -> dict[str, Any]:
+    """Общий предикат ownership-гейта (IDOR-защита). Активен ТОЛЬКО при включённом auth
+    (SUPABASE_URL): грузит строку джобы (404, если нет) и рейзит 403, если её владелец — НЕ
+    текущий юзер. Legacy/ничьи джобы (owner=None) не привязаны → bypass (dual-mode, как в
+    cancel_job). Без auth (локалка/тесты) — pass-through: by-job эндпоинты редактора читают
+    артефакты с диска БЕЗ строки джобы, защищать некого → пустой dict (вызыватель на строку
+    не полагается). Так продовый гейт не ломает dev-режим и существующие тесты."""
+    if not auth.supabase_auth_enabled():
+        return {}
+    row = db.get_job_row(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if row.get("user_id") not in (None, user_id):
+        raise HTTPException(status_code=403, detail="not your job")
+    return row
+
+
+def _require_owned_job(
+    job_id: str, authorization: str | None, x_user_id: str | None
+) -> tuple[dict[str, Any], str | None]:
+    """Ownership-гейт для JSON by-job/clip эндпоинтов (Authorization header). Резолвит юзера
+    (401 при отсутствии/невалиде токена, когда auth включён), энфорсит владельца (404/403),
+    возвращает (строка джобы, user_id)."""
+    user_id = _resolve_user(authorization, x_user_id)
+    return _enforce_owner(job_id, user_id), user_id
+
+
+def _require_media_access(
+    job_id: str, authorization: str | None, x_user_id: str | None, mt: str | None
+) -> None:
+    """Ownership-гейт для media/export (грузятся через ``<video src>`` / нативный download).
+
+    Доступ, если выполнено ЛЮБОЕ из:
+      • валидный Authorization-header владельца джобы (fetch с заголовком) — обычный owner-гейт;
+      • валидный SCOPED медиа-тикет ``?mt=`` (HMAC сервера, ``payload.job == job_id``, не истёк).
+    Иначе 401/403. СЕССИОННЫЙ Supabase-JWT в URL БОЛЬШЕ НЕ принимаем — он утекал в access-логи/
+    Referer (полный аккаунт-credential); ``?mt=`` — короткоживущий, привязанный к джобе, opaque.
+    При ВЫКЛЮЧЕННОМ auth — pass-through (dev/локалка: media-эндпоинты и так открыты).
+    """
+    if not auth.supabase_auth_enabled():
+        return
+    # Header-путь: если заголовок прислан — он авторитетен (обычный owner-гейт: 401/403).
+    if authorization is not None:
+        _require_owned_job(job_id, authorization, x_user_id)
+        return
+    # Иначе — только по scoped-тикету (raw-JWT в URL не принимаем).
+    if not mt:
+        raise HTTPException(status_code=401, detail="missing media ticket")
+    secret = media_token.media_token_secret()
+    if secret is None:
+        # Прод с auth, но нет ключа подписи → тикет проверить нечем: 500 (НЕ пропускаем молча).
+        raise HTTPException(status_code=500, detail="media token signing key unavailable")
+    try:
+        media_token.verify(mt, job_id, secret)
+    except media_token.MediaTokenError as e:
+        raise HTTPException(status_code=403, detail=f"invalid media ticket: {e}") from e
+
+
+def _no_referrer(resp: Response) -> Response:
+    """``Referrer-Policy: no-referrer`` на media/export-ответ: URL с ``?mt=`` не утекает в Referer
+    к третьим сторонам (redirect на R2 / встроенные ресурсы)."""
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 
 def _enforce_free_identity(authorization: str | None, user_id: str | None) -> None:
@@ -470,8 +536,16 @@ def abort_upload(
 
     Best-effort: чистка не должна ронять и без того ошибочный флоу — сбой самой abort возвращаем
     как ``{"ok": false}`` (а не 500). Auth обязателен (чужой upload не отменить).
+
+    Ownership: строка джобы создаётся в upload-complete (ПОСЛЕ заливки) — при аборте её обычно
+    ещё НЕТ, поэтому гейтим ТОЛЬКО если строка уже есть (иначе нечего защищать — пропускаем без
+    404). owner=None (legacy) — bypass, как в остальных гейтах.
     """
-    _resolve_user(authorization, x_user_id)
+    user_id = _resolve_user(authorization, x_user_id)
+    if auth.supabase_auth_enabled():
+        row = db.get_job_row(job_id)
+        if row is not None and row.get("user_id") not in (None, user_id):
+            raise HTTPException(status_code=403, detail="not your job")
     try:
         storage.abort_multipart_upload(job_id, body.upload_id)
     except Exception:  # noqa: BLE001 — cleanup best-effort; незавершённые части подберёт lifecycle R2
@@ -531,9 +605,49 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
     return {"ok": True, "applied": False}
 
 
+def _job_list_item(row: dict[str, Any]) -> dict[str, Any]:
+    """СЫРАЯ строка джобы → лёгкий элемент дашборд-списка (без ре-подписи клип-URL). ``clips``
+    приходят jsonb-списком (Postgres) ИЛИ строкой ``clips_json`` (SQLite); ярлык = сохранённый
+    ``source_ref`` (youtube-url / имя загруженного файла). НЕ выдумываем новых колонок БД."""
+    clips = row.get("clips")
+    if clips is None:
+        raw = row.get("clips_json")
+        clips = json.loads(raw) if raw else []
+    source_kind = "upload" if row.get("source_type") == "upload" else "youtube"
+    return {
+        "id": row["id"],
+        "label": str(row.get("source_ref") or ""),
+        "status": row.get("status") or "",
+        "nclips": len(clips or []),
+        "created_at": row.get("created_at"),
+        "source_kind": source_kind,
+    }
+
+
+@app.get("/jobs")
+def list_jobs(
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Список джоб текущего пользователя (newest-first) — замена клиентских localStorage-recents.
+
+    Auth включён → 401 без валидного токена, скоуп строго по user_id из JWT (чужие джобы не
+    видны). Auth выключен (dev) → скоуп по X-User-Id (если задан), иначе самые свежие джобы.
+    Лёгкий (поллится дашбордом): без ре-подписи клип-URL, nclips считается из строки.
+    """
+    user_id = _resolve_user(authorization, x_user_id)
+    rows = db.list_jobs_by_user(user_id)
+    return {"jobs": [_job_list_item(r) for r in rows]}
+
+
 @app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> dict[str, Any]:
-    """Статус задачи (wire-Job) из SQLite. 404, если задачи нет."""
+def get_job(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Статус задачи (wire-Job) из SQLite. 404, если задачи нет. Owner-only (IDOR-гейт)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     job = db.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -553,14 +667,15 @@ def cancel_job(
     её ``function_call_id`` (``terminate_containers=False`` → внутри неё рейзится
     ``InputCancellation``, она выходит ДО set_done/_meter → ничего не списывается).
     """
-    user_id = _resolve_user(authorization, x_user_id)
-    row = db.get_job_row(job_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    # Ownership: при включённом auth джоб может отменить только его владелец. Старые джобы без
-    # user_id (None) не привязаны → не блокируем (dual-mode/legacy).
-    if auth.supabase_auth_enabled() and row.get("user_id") not in (None, user_id):
-        raise HTTPException(status_code=403, detail="not your job")
+    # Ownership-гейт (IDOR): при включённом auth отменить может только владелец (403), legacy/
+    # ничьи джобы (owner=None) не блокируем. При выключенном auth гейт — pass-through ({} строка);
+    # cancel'у нужны РЕАЛЬНЫЕ поля строки (status/cancellable/function_call_id) → дозагружаем её.
+    row, _user_id = _require_owned_job(job_id, authorization, x_user_id)
+    if not row:
+        fetched = db.get_job_row(job_id)
+        if fetched is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        row = fetched
     status = row.get("status")
     if status in ("done", "failed", "cancelled"):
         # Уже в терминале → отменять нечего (идемпотентно, не ошибка).
@@ -583,51 +698,100 @@ def cancel_job(
     return {"id": job_id, "status": "cancelled", "cancelled": True}
 
 
+@app.get("/jobs/{job_id}/media-token")
+def get_media_token(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Выдать SCOPED короткоживущий opaque медиа-тикет для ``<video src>`` / download (замена
+    raw-JWT ``?token=``). Owner-only (401/403/404 через ``_require_owned_job``). Тикет привязан к
+    ЭТОЙ джобе и живёт ~5 мин → в access-логи/Referer уходит бесполезный-на-чужой-джобе тикет, а
+    НЕ сессионный аккаунт-JWT.
+
+    Ключ подписи: ``MEDIA_TOKEN_SECRET`` или дериват из server-only секрета (см. media_token).
+    Нет ключа при включённом auth → 500 (НЕ выдаём неподписанный/угадываемый тикет). При
+    выключенном auth (dev) media-эндпоинты и так открыты → тикет-плейсхолдер (не проверяется).
+    """
+    _require_owned_job(job_id, authorization, x_user_id)
+    secret = media_token.media_token_secret()
+    if secret is None:
+        if auth.supabase_auth_enabled():
+            raise HTTPException(
+                status_code=500,
+                detail="media token signing key unavailable (set MEDIA_TOKEN_SECRET)",
+            )
+        secret = b"dev-unsigned"  # auth off: тикет косметический, media-путь не верифицирует
+    return {"token": media_token.mint(job_id, secret), "expires_in": media_token.DEFAULT_TTL}
+
+
 @app.get("/jobs/{job_id}/source.mp4")
-def get_source(job_id: str) -> Response:
+def get_source(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
     """Полный исходник (редактор-рендер / фолбэк превью). local → диск; r2 → 302 на CDN (или
-    presigned). Раньше всегда presigned-origin без кэша = медленно; теперь CDN при R2_PUBLIC_URL."""
+    presigned). Раньше всегда presigned-origin без кэша = медленно; теперь CDN при R2_PUBLIC_URL.
+
+    Owner-only (IDOR): грузится через ``<video src>`` → Authorization-header часто нельзя, поэтому
+    принимаем ЛИБО header владельца, ЛИБО scoped-тикет ``?mt=`` (см. ``_require_media_access``)."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
     s = get_settings()
     if s.storage_backend == "r2":
         from fastapi.responses import RedirectResponse
 
         from app.storage import source_read_url
 
-        return RedirectResponse(source_read_url(job_id))
+        return _no_referrer(RedirectResponse(source_read_url(job_id)))
     path = DATA_ROOT / job_id / "source.mp4"
     if not path.exists():
         raise HTTPException(status_code=404, detail="source not found")
-    return FileResponse(str(path), media_type="video/mp4")
+    return _no_referrer(FileResponse(str(path), media_type="video/mp4"))
 
 
 @app.get("/jobs/{job_id}/preview.mp4")
-def get_preview(job_id: str) -> Response:
+def get_preview(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
     """Лёгкий preview-прокси для БЫСТРОЙ загрузки видео в редакторе (≤720p H.264 faststart, пара МБ
     вместо 50-100МБ source; H.264 = hw-декод, не софт-AV1). Нет прокси (старый джоб до фичи) →
-    прозрачный фолбэк на полный source. local → диск; r2 → 302 на CDN/presigned."""
+    прозрачный фолбэк на полный source. local → диск; r2 → 302 на CDN/presigned.
+
+    Owner-only (IDOR): header ЛИБО scoped-тикет ``?mt=`` (грузится через ``<video src>``)."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
     s = get_settings()
     if s.storage_backend == "r2":
         from fastapi.responses import RedirectResponse
 
         from app.storage import preview_read_url
 
-        return RedirectResponse(preview_read_url(job_id))
+        return _no_referrer(RedirectResponse(preview_read_url(job_id)))
     prev = DATA_ROOT / job_id / "preview.mp4"
     if prev.exists():
-        return FileResponse(str(prev), media_type="video/mp4")
+        return _no_referrer(FileResponse(str(prev), media_type="video/mp4"))
     src = DATA_ROOT / job_id / "source.mp4"
     if src.exists():
-        return FileResponse(str(src), media_type="video/mp4")
+        return _no_referrer(FileResponse(str(src), media_type="video/mp4"))
     raise HTTPException(status_code=404, detail="preview/source not found")
 
 
 @app.get("/jobs/{job_id}/timeline")
-def get_timeline(job_id: str) -> dict[str, Any]:
+def get_timeline(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """TimelineData: длительность источника + ВСЕ кандидаты ИИ + слова (для таймлайн-редактора).
 
     Собирается из готовых meta/segments/transcript (диск локально, Postgres на Modal).
-    Дорогих ИИ-вызовов НЕТ. 404, если артефактов нет (как /analysis).
+    Дорогих ИИ-вызовов НЕТ. 404, если артефактов нет (как /analysis). Owner-only (IDOR).
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     from app import artifacts
 
     try:
@@ -640,8 +804,14 @@ def get_timeline(job_id: str) -> dict[str, Any]:
 
 
 @app.get("/jobs/{job_id}/chapters")
-def get_chapters(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict[str, Any]:
-    """AI-карта видео (главы с описаниями). Кэш data/<job>/chapters.json.
+def get_chapters(
+    job_id: str,
+    bg: BackgroundTasks,
+    retry: bool = False,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """AI-карта видео (главы с описаниями). Кэш data/<job>/chapters.json. Owner-only (IDOR).
 
     Файла нет → пишем pending + стартуем фон-генерацию (Gemini, ~$0.01-0.03,
     платится один раз); фронт поллит до done/failed. 404 — нет транскрипта.
@@ -650,6 +820,7 @@ def get_chapters(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict[
     retry=true (T4 #9): если кэш — failed (квота Gemini free-tier 20/день), перезапускаем
     генерацию (перетираем failed → pending). На done/pending retry игнорируется (не дёргаем).
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     from app import artifacts
     from app import tasks as tasks_mod
     from app.editor.chapters import load_chapters, save_chapters
@@ -673,7 +844,13 @@ def get_chapters(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict[
 
 
 @app.get("/jobs/{job_id}/video-map")
-def get_video_map(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict[str, Any]:
+def get_video_map(
+    job_id: str,
+    bg: BackgroundTasks,
+    retry: bool = False,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Нарративная VideoMap (главы+моменты+связный разбор). Durable в Postgres (cross-container).
 
     Нет карты → пишем pending + триггерим генерацию (Gemini, платится один раз); фронт поллит до
@@ -685,6 +862,7 @@ def get_video_map(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict
 
     retry=true: кэш failed → перезапуск (перетираем failed → pending). На done/pending игнор.
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     from app import artifacts
     from app import tasks as tasks_mod
     from app.editor.video_map import load_video_map, save_video_map
@@ -707,12 +885,18 @@ def get_video_map(job_id: str, bg: BackgroundTasks, retry: bool = False) -> dict
 
 
 @app.get("/jobs/{job_id}/preview-moments")
-def get_preview_moments(job_id: str) -> dict[str, Any]:
+def get_preview_moments(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Косметические co-watch-маркеры (Part 4): список {t,kind,intensity} из job_artifacts.
 
     ⚠️ ЧИСТО ВИЗУАЛЬНО — НЕ влияет на отбор клипов (LLM-отбор от них не зависит). Пусто, пока
     transcribe не закончил, на старых джобах, или в локальном dev (артефакты — только в облаке).
+    Owner-only (IDOR).
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     moments = db.get_job_artifact(job_id, "preview_moments")
     return {"moments": moments or []}
 
@@ -793,8 +977,14 @@ def _op_or_400(fn: Callable[[], Any]) -> Any:
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/edit")
-def get_clip_edit(job_id: str, clip_id: str) -> dict[str, Any]:
-    """ClipEdit клипа (создаёт дефолт из сегмента при первом обращении)."""
+def get_clip_edit(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """ClipEdit клипа (создаёт дефолт из сегмента при первом обращении). Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     try:
         return store.ensure_edit(job_id, clip_id).model_dump()
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -802,12 +992,19 @@ def get_clip_edit(job_id: str, clip_id: str) -> dict[str, Any]:
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/ass")
-def get_clip_ass(job_id: str, clip_id: str) -> Response:
+def get_clip_ass(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> Response:
     """ASS субтитров текущего edit-state (для libass-превью в браузере).
 
     Тот же компилятор, что и финальный экспорт (captions_v2.compile_ass) → превью
     субтитров через libass.wasm = экспорт пиксель-в-пиксель. Тайминги в КЛИП-времени.
+    Owner-only (IDOR).
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     try:
         edit = store.ensure_edit(job_id, clip_id)
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -820,12 +1017,20 @@ def get_clip_ass(job_id: str, clip_id: str) -> Response:
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/export.srt")
-def export_clip_srt(job_id: str, clip_id: str) -> Response:
+def export_clip_srt(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
     """SRT субтитров текущего edit-state (экспорт-свобода: унести в любой редактор).
 
     compile_srt зеркалит compile_ass (те же реплики/тайминги) → скачанный SRT
     совпадает с прожжённым видео. Content-Disposition: attachment → браузер скачивает.
+    Owner-only (IDOR): header ЛИБО scoped-тикет ``?mt=`` (нативный download).
     """
+    _require_media_access(job_id, authorization, x_user_id, mt)
     try:
         edit = store.ensure_edit(job_id, clip_id)
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -833,21 +1038,31 @@ def export_clip_srt(job_id: str, clip_id: str) -> Response:
     words = store.load_transcript_words(job_id)
     cmap = ClipTimeMap(edit.source_intervals)
     srt = compile_srt(edit.captions, words, cmap)
-    return Response(
-        content=srt,
-        media_type="application/x-subrip; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{clip_id}.srt"'},
+    return _no_referrer(
+        Response(
+            content=srt,
+            media_type="application/x-subrip; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{clip_id}.srt"'},
+        )
     )
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/export/clean.mp4")
-def export_clip_clean_mp4(job_id: str, clip_id: str) -> FileResponse:
+def export_clip_clean_mp4(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
     """Чистый mp4 БЕЗ прожжённых субтитров (экспорт-свобода: пере-монтаж где угодно).
 
     Рендерит текущий edit-state с ass_name=None в clips/{clip}_clean.mp4 и отдаёт файл.
     Синхронно: рендер ~секунды (FastAPI крутит sync-эндпоинт в threadpool). Очередь/статус —
     на этапе масштаба (infra-план §2.3). Сбой рендера → HTTP 500 (правило №8, не тихо).
+    Owner-only (IDOR): header ЛИБО scoped-тикет ``?mt=`` (нативный download).
     """
+    _require_media_access(job_id, authorization, x_user_id, mt)
     try:
         store.ensure_edit(job_id, clip_id)  # из грида (без открытия редактора) тоже работает
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -860,18 +1075,28 @@ def export_clip_clean_mp4(job_id: str, clip_id: str) -> FileResponse:
     path = store.data_root() / job_id / out_rel
     if not path.exists():
         raise HTTPException(status_code=500, detail="render produced no clean mp4")
-    return FileResponse(str(path), media_type="video/mp4", filename=f"{clip_id}_clean.mp4")
+    return _no_referrer(
+        FileResponse(str(path), media_type="video/mp4", filename=f"{clip_id}_clean.mp4")
+    )
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/export/captioned.mp4")
-def export_clip_captioned_mp4(job_id: str, clip_id: str) -> FileResponse:
+def export_clip_captioned_mp4(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
     """Прожжённый mp4 С субтитрами текущего edit-state (download «С субтитрами»).
 
     D1-унификация: рендерит ТЕКУЩИЕ правки (тот же ASS, что в libass-превью) → скачанный
     файл всегда совпадает с превью (WYSIWYG), доступен без отдельного «Рендер» и НЕ трогает
     чистый ``clips/{clip}.mp4``. Синхронно (FastAPI threadpool). Сбой рендера → HTTP 500
     (правило №8). Один путь и для грида, и для редактора — нет расхождения «с субтитрами».
+    Owner-only (IDOR): header ЛИБО scoped-тикет ``?mt=`` (нативный download).
     """
+    _require_media_access(job_id, authorization, x_user_id, mt)
     try:
         store.ensure_edit(job_id, clip_id)
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -884,12 +1109,19 @@ def export_clip_captioned_mp4(job_id: str, clip_id: str) -> FileResponse:
     path = store.data_root() / job_id / out_rel
     if not path.exists():
         raise HTTPException(status_code=500, detail="render produced no captioned mp4")
-    return FileResponse(str(path), media_type="video/mp4", filename=f"{clip_id}.mp4")
+    return _no_referrer(FileResponse(str(path), media_type="video/mp4", filename=f"{clip_id}.mp4"))
 
 
 @app.patch("/jobs/{job_id}/clips/{clip_id}/edit")
-def patch_clip_edit(job_id: str, clip_id: str, body: PatchEditBody) -> dict[str, Any]:
-    """Прямая правка субтитров (стиль/текст/highlight). Интервалы не трогает."""
+def patch_clip_edit(
+    job_id: str,
+    clip_id: str,
+    body: PatchEditBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Прямая правка субтитров (стиль/текст/highlight). Интервалы не трогает. Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     return _save_or_409(
         job_id, clip_id, edit.model_copy(update={"captions": body.captions}), body.version
@@ -897,7 +1129,14 @@ def patch_clip_edit(job_id: str, clip_id: str, body: PatchEditBody) -> dict[str,
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/trim")
-def op_trim(job_id: str, clip_id: str, body: TrimBody) -> dict[str, Any]:
+def op_trim(
+    job_id: str,
+    clip_id: str,
+    body: TrimBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     words = store.load_transcript_words(job_id)
     new = _op_or_400(lambda: apply_trim(edit, body.word_indices, words))
@@ -905,7 +1144,14 @@ def op_trim(job_id: str, clip_id: str, body: TrimBody) -> dict[str, Any]:
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/add-section")
-def op_add_section(job_id: str, clip_id: str, body: AddSectionBody) -> dict[str, Any]:
+def op_add_section(
+    job_id: str,
+    clip_id: str,
+    body: AddSectionBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     words = store.load_transcript_words(job_id)
     new = _op_or_400(
@@ -915,7 +1161,14 @@ def op_add_section(job_id: str, clip_id: str, body: AddSectionBody) -> dict[str,
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/extend")
-def op_extend(job_id: str, clip_id: str, body: ExtendBody) -> dict[str, Any]:
+def op_extend(
+    job_id: str,
+    clip_id: str,
+    body: ExtendBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     words = store.load_transcript_words(job_id)
     new = _op_or_400(
@@ -950,7 +1203,14 @@ def _tight_lock_cx(job_id: str, start: float, end: float) -> float | None:
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/crop")
-def op_crop(job_id: str, clip_id: str, body: CropBody) -> dict[str, Any]:
+def op_crop(
+    job_id: str,
+    clip_id: str,
+    body: CropBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     if body.mode == "auto":
         new = clear_crop_overrides(edit, body.source_start, body.source_end)
@@ -976,9 +1236,16 @@ class AspectBody(BaseModel):
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/aspect")
-def op_set_aspect(job_id: str, clip_id: str, body: AspectBody) -> dict[str, Any]:
+def op_set_aspect(
+    job_id: str,
+    clip_id: str,
+    body: AspectBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Сменить соотношение сторон клипа (T5). Меняет только выход — reframe-регионы (cx)
-    переносятся, временная кадровая сетка не трогается (Δ=0 инвариант цел)."""
+    переносятся, временная кадровая сетка не трогается (Δ=0 инвариант цел). Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     return _save_or_409(
         job_id, clip_id, edit.model_copy(update={"aspect": body.aspect}), body.version
@@ -995,10 +1262,17 @@ class RestoreEditBody(BaseModel):
 
 
 @app.put("/jobs/{job_id}/clips/{clip_id}/edit/restore")
-def op_restore_edit(job_id: str, clip_id: str, body: RestoreEditBody) -> dict[str, Any]:
+def op_restore_edit(
+    job_id: str,
+    clip_id: str,
+    body: RestoreEditBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Atomically replace the whole edit CONTENT (undo/redo). Optimistic-lock on version
     (409 on mismatch). Does NOT restore the old version NUMBER — version keeps climbing;
-    undo/redo are forward writes carrying historical content."""
+    undo/redo are forward writes carrying historical content. Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     new = replace_edit_content(
         edit,
@@ -1017,10 +1291,18 @@ class MotionBody(BaseModel):
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/motion")
-def op_set_motion(job_id: str, clip_id: str, body: MotionBody) -> dict[str, Any]:
+def op_set_motion(
+    job_id: str,
+    clip_id: str,
+    body: MotionBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Наведение клипа: lock_per_shot=True (статичный кроп на шот) / False (слежение, follower).
     RENDER-REQUIRED — меняет ПИКСЕЛИ (пан vs статика) → клип нужно пере-рендерить (фронт ставит
-    pixelDirty + предлагает Render). Превью /reframe пересчитывается (follow обходит fast-path)."""
+    pixelDirty + предлагает Render). Превью /reframe пересчитывается (follow обходит fast-path).
+    Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
     return _save_or_409(
         job_id, clip_id, edit.model_copy(update={"lock_per_shot": body.lock_per_shot}), body.version
@@ -1028,12 +1310,19 @@ def op_set_motion(job_id: str, clip_id: str, body: MotionBody) -> dict[str, Any]
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/set-interval")
-def op_set_interval(job_id: str, clip_id: str, body: SetIntervalBody) -> dict[str, Any]:
+def op_set_interval(
+    job_id: str,
+    clip_id: str,
+    body: SetIntervalBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Заменить первичный интервал клипа окном [start,end] (двигать/resize на таймлайне).
 
     Границы клампятся в [0,duration] и в [clip_min_sec, clip_max_sec] (set_interval, PURE).
-    Optimistic-lock (409 при version mismatch).
+    Optimistic-lock (409 при version mismatch). Owner-only (IDOR).
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     from app import artifacts
 
     edit = _load_or_404(job_id, clip_id)
@@ -1055,7 +1344,13 @@ def op_set_interval(job_id: str, clip_id: str, body: SetIntervalBody) -> dict[st
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/hook/regenerate")
-def op_regenerate_hook(job_id: str, clip_id: str, body: RegenerateHookBody) -> dict[str, Any]:
+def op_regenerate_hook(
+    job_id: str,
+    clip_id: str,
+    body: RegenerateHookBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """W4: перегенерировать ТЕКСТ хука под текущий интервал клипа (узкий Gemini-вызов, НЕ чат).
 
     Хук — хранимый текст; сдвиг клипа на таймлайне его не меняет → устаревает. Эта ручка
@@ -1064,6 +1359,7 @@ def op_regenerate_hook(job_id: str, clip_id: str, body: RegenerateHookBody) -> d
     стиль/позицию/плашку (W5) НЕ трогаем. Цена sub-cent → НЕ метрим (как прочие правки редактора).
     Optimistic-lock (409 при version mismatch).
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     from app.editor.hook_ops import regenerate_hook_for_clip
 
     edit = _load_or_404(job_id, clip_id)
@@ -1117,12 +1413,17 @@ def agent_start(
     clip_id: str,
     body: AgentStartBody,
     bg: BackgroundTasks,
+    authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """W3: запустить агента на клипе. Один активный run на клип (идемпотентно). Спавн как у джоба;
-    отмена — `function_call_id`. Биллинг не трогаем. Сбой диспатча → failed."""
+    отмена — `function_call_id`. Биллинг не трогаем. Сбой диспатча → failed.
+
+    Owner-only (IDOR): раньше читался ТОЛЬКО X-User-Id и JWT НЕ валидировался — теперь идём
+    через _require_owned_job (реальная проверка токена + владельца при включённом auth)."""
     from app.agent import runs_store
 
+    _row, user_id = _require_owned_job(job_id, authorization, x_user_id)
     try:
         store.ensure_edit(job_id, clip_id)  # создаём дефолт из сегмента, если ещё нет
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -1139,7 +1440,7 @@ def agent_start(
     # берёт prior из ленты). Берём ДО create_run.
     prior = runs_store.latest_run(job_id, clip_id)
     run_id = runs_store.new_run_id()
-    runs_store.create_run(run_id, job_id, clip_id, x_user_id)
+    runs_store.create_run(run_id, job_id, clip_id, user_id)
     for ev in _seed_events(prior):
         runs_store.append_event(run_id, ev)
     runs_store.append_event(run_id, AgentEvent(role="user", text=msg).model_dump())
@@ -1159,8 +1460,14 @@ def agent_start(
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/agent/active")
-def agent_active(job_id: str, clip_id: str) -> dict[str, Any] | None:
-    """Активный (running) прогон для клипа — реконнект после перезагрузки вкладки."""
+def agent_active(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any] | None:
+    """Активный (running) прогон для клипа — реконнект после перезагрузки вкладки. Owner-only."""
+    _require_owned_job(job_id, authorization, x_user_id)
     from app.agent import runs_store
 
     run = runs_store.running_run(job_id, clip_id)
@@ -1168,8 +1475,15 @@ def agent_active(job_id: str, clip_id: str) -> dict[str, Any] | None:
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/agent/{run_id}")
-def agent_get(job_id: str, clip_id: str, run_id: str) -> dict[str, Any]:
-    """Статус+лента прогона (поллинг фронтом)."""
+def agent_get(
+    job_id: str,
+    clip_id: str,
+    run_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Статус+лента прогона (поллинг фронтом). Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     from app.agent import runs_store
 
     run = runs_store.get_run(run_id)
@@ -1179,8 +1493,16 @@ def agent_get(job_id: str, clip_id: str, run_id: str) -> dict[str, Any]:
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/agent/{run_id}/cancel")
-def agent_cancel(job_id: str, clip_id: str, run_id: str) -> dict[str, Any]:
-    """Stop: отменить прогон агента. Идемпотентно на терминале. $0 (агент минут не списывает)."""
+def agent_cancel(
+    job_id: str,
+    clip_id: str,
+    run_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Stop: отменить прогон агента. Идемпотентно на терминале. $0 (агент минут не списывает).
+    Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     from app.agent import runs_store
 
     run = runs_store.get_run(run_id)
@@ -1202,11 +1524,18 @@ def agent_cancel(job_id: str, clip_id: str, run_id: str) -> dict[str, Any]:
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/render", status_code=202)
-def post_render(job_id: str, clip_id: str, bg: BackgroundTasks) -> dict[str, Any]:
-    """Async-рендер mp4 из edit-state. Статус — GET …/render.
+def post_render(
+    job_id: str,
+    clip_id: str,
+    bg: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Async-рендер mp4 из edit-state. Статус — GET …/render. Owner-only (IDOR).
 
     На Modal — spawn отдельной CPU-функции (web scale-to-zero убил бы фон-рендер); локально — bg.
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     _load_or_404(job_id, clip_id)
     db.set_render_status(job_id, clip_id, "rendering", None, None)
     if dispatch.spawn_enabled():
@@ -1223,7 +1552,13 @@ def post_render(job_id: str, clip_id: str, bg: BackgroundTasks) -> dict[str, Any
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/render")
-def get_render(job_id: str, clip_id: str) -> dict[str, Any]:
+def get_render(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_owned_job(job_id, authorization, x_user_id)
     from app import storage
 
     row = db.get_clip_edit_row(job_id, clip_id)
@@ -1250,7 +1585,12 @@ def get_render(job_id: str, clip_id: str) -> dict[str, Any]:
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/reframe")
-def get_clip_reframe(job_id: str, clip_id: str) -> dict[str, Any]:
+def get_clip_reframe(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
     """Reframe-план клипа (fit/fill/split + центры) для честного превью кадра в редакторе.
 
     D2: раньше фронт тянул ``media/<job>/reframe_<clip>.json`` напрямую со StaticFiles —
@@ -1260,6 +1600,7 @@ def get_clip_reframe(job_id: str, clip_id: str) -> dict[str, Any]:
     источник из R2 через artifacts.ensure_source) для ТЕКУЩИХ интервалов edit-state →
     превью-план == рендер-план, и в обоих средах, и после сдвига/трима интервала.
     """
+    _require_owned_job(job_id, authorization, x_user_id)
     from app import artifacts
     from app.editor.reframe_cache import (
         build_persist_payload,
@@ -1362,8 +1703,14 @@ def get_clip_reframe(job_id: str, clip_id: str) -> dict[str, Any]:
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/analysis")
-def get_analysis(job_id: str, clip_id: str) -> dict[str, Any]:
-    """Интервалы + слова клипа (для клиент-превью субтитров/таймлайна)."""
+def get_analysis(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Интервалы + слова клипа (для клиент-превью субтитров/таймлайна). Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
     try:
         edit = store.ensure_edit(job_id, clip_id)
     except (FileNotFoundError, KeyError, JobError) as e:
@@ -1391,7 +1738,7 @@ def refresh_clip_analysis(
     from app.pipeline.stage2_select import select_segments
     from app.run import build_clip_out
 
-    _resolve_user(authorization, x_user_id)
+    _require_owned_job(job_id, authorization, x_user_id)  # 401/403/404 (owner-only, IDOR)
 
     job = db.get_job(job_id)
     if job is None:
@@ -1474,7 +1821,14 @@ def create_preset(body: SavePresetBody) -> dict[str, Any]:
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/apply-preset")
-def apply_preset_to_clip(job_id: str, clip_id: str, body: ApplyPresetBody) -> dict[str, Any]:
+def apply_preset_to_clip(
+    job_id: str,
+    clip_id: str,
+    body: ApplyPresetBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_owned_job(job_id, authorization, x_user_id)
     preset = presets_mod.get_preset(body.preset_id)
     if preset is None:
         raise HTTPException(status_code=404, detail="preset not found")
@@ -1505,16 +1859,17 @@ def apply_style_all(
     Per-clip content & position are preserved (replies, intervals, reframe, margins, hook text).
     Owner-only. Returns how many clips were updated.
     """
-    user_id = _resolve_user(authorization, x_user_id)
-    row = db.get_job_row(job_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    # Owner-only массовая мутация — fail-CLOSED: при включённом auth правим ВСЕ клипы джобы
-    # ТОЛЬКО владельцу. _resolve_user уже бросает 401 без валидного токена; здесь deny, если
-    # владелец джобы не совпадает с юзером — ВКЛЮЧАЯ owner=None (ничья/legacy-джоба не
-    # принадлежит никому → массово править нельзя, иначе IDOR). В dev (auth off) — пропускаем.
-    owner = row.get("user_id") or None
-    if auth.supabase_auth_enabled() and owner != user_id:
+    # Общий гейт: резолв юзера (401), загрузка строки (404) + 403 на ЧУЖОГО владельца. Массовая
+    # мутация, однако, СТРОЖЕ обычного read/single-clip гейта: fail-CLOSED и на owner=None (ничья/
+    # legacy-джоба никому не принадлежит → править ВСЕ её клипы нельзя, иначе IDOR). Обычный гейт
+    # делает None-owner BYPASS → добиваем None отдельной проверкой ниже (поведение сохранено).
+    row, user_id = _require_owned_job(job_id, authorization, x_user_id)
+    if not row:  # auth off → гейт pass-through; грузим строку для списка клипов (+ 404 в dev)
+        fetched = db.get_job_row(job_id)
+        if fetched is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        row = fetched
+    if auth.supabase_auth_enabled() and (row.get("user_id") or None) != user_id:
         raise HTTPException(status_code=403, detail="not your job")
     job = db.get_job(job_id) or {}
     clip_ids = [c["id"] for c in (job.get("clips") or []) if c.get("id")]

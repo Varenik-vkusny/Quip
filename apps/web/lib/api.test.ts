@@ -4,6 +4,7 @@ import {
   clipCaptionedExportUrl,
   clipCleanExportUrl,
   clipSrtUrl,
+  withToken,
 } from "./api";
 
 const BASE = "https://worker.example";
@@ -51,5 +52,32 @@ describe("captionedDownloadUrl", () => {
     expect(captionedDownloadUrl(BASE, JOB, CLIP, null, false)).toBe(
       clipCaptionedExportUrl(BASE, JOB, CLIP),
     );
+  });
+});
+
+describe("withToken", () => {
+  const URL_NO_QUERY = "https://worker.example/jobs/job_123/preview.mp4";
+
+  it("appends the scoped media ticket under the `mt` key by default (NOT `token`, NOT a JWT)", () => {
+    expect(withToken(URL_NO_QUERY, "opaque_ticket")).toBe(`${URL_NO_QUERY}?mt=opaque_ticket`);
+  });
+
+  it("joins with `&` when the url already has a query string", () => {
+    expect(withToken(`${URL_NO_QUERY}?v=2`, "tkt")).toBe(`${URL_NO_QUERY}?v=2&mt=tkt`);
+  });
+
+  it("url-encodes the ticket value", () => {
+    expect(withToken(URL_NO_QUERY, "a b/c+d")).toBe(`${URL_NO_QUERY}?mt=a%20b%2Fc%2Bd`);
+  });
+
+  it("is a pure no-op without a token (dev / no-auth) or an empty url", () => {
+    expect(withToken(URL_NO_QUERY, null)).toBe(URL_NO_QUERY);
+    expect(withToken(URL_NO_QUERY, undefined)).toBe(URL_NO_QUERY);
+    expect(withToken(URL_NO_QUERY, "")).toBe(URL_NO_QUERY);
+    expect(withToken("", "tkt")).toBe("");
+  });
+
+  it("honors a custom query key when asked", () => {
+    expect(withToken(URL_NO_QUERY, "tkt", "token")).toBe(`${URL_NO_QUERY}?token=tkt`);
   });
 });

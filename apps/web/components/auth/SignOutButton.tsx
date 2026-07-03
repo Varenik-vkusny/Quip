@@ -3,6 +3,7 @@
 import { LogOut } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { purgeClientCaches } from "@/lib/recent";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/cn";
 
@@ -14,6 +15,10 @@ export function SignOutButton({ className }: { className?: string }) {
     setBusy(true);
     try {
       await createSupabaseBrowserClient().auth.signOut();
+      // Purge residual client caches so the next account on this device can't read the last one's
+      // leftovers: legacy global recents, editor inspector width, every user's reviewed set, and
+      // the last-user marker. AuthStateSync also handles SIGNED_OUT — this is belt-and-suspenders.
+      purgeClientCaches();
       router.replace("/");
       router.refresh();
     } catch {

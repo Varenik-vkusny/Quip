@@ -2,6 +2,8 @@
 
 import { Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { getMediaToken, withToken } from "@/lib/api";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { resolveUrl } from "./ClipCard";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -30,10 +32,39 @@ export function PendingThumb({ jobId, clipStart }: { jobId: string; clipStart: n
   // (which the React Compiler lint forbids inside an effect body).
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
 
-  const proxyUrl = resolveUrl(`jobs/${jobId}/preview.mp4`);
-  const hasFrame = frameUrl === proxyUrl;
+  // Media auth: the hidden frame-grab `<video>` can't send an Authorization header → append the
+  // worker-accepted `?mt=<ticket>` query param (a scoped, short-lived, opaque media ticket, NOT the
+  // session JWT). Fetch the job-scoped ticket once; until it resolves (when auth is configured)
+  // proxyUrl is null and the frame-grab is skipped (retries next poll). The ticket is cached per
+  // jobId, so the many PendingThumbs of one job share a SINGLE fetch. In dev / no-auth it isn't
+  // needed → resolved immediately, plain URL.
+  const [mediaToken, setMediaToken] = useState<string | null>(null);
+  const [tokenResolved, setTokenResolved] = useState(!isSupabaseConfigured);
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    let active = true;
+    getMediaToken(jobId)
+      .then((tok) => {
+        if (active) {
+          setMediaToken(tok);
+          setTokenResolved(true);
+        }
+      })
+      .catch(() => {
+        if (active) setTokenResolved(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [jobId]);
+
+  const proxyUrl = tokenResolved
+    ? withToken(resolveUrl(`jobs/${jobId}/preview.mp4`), mediaToken)
+    : null;
+  const hasFrame = proxyUrl !== null && frameUrl === proxyUrl;
 
   useEffect(() => {
+    if (!proxyUrl) return; // token not ready → skip the frame-grab; re-runs when proxyUrl resolves
     const video = document.createElement("video");
     // NO crossOrigin: the CDN (cdn.quip.ink) doesn't return CORS headers on video GETs, and the
     // preview/source URL 302-redirects there — with crossOrigin="anonymous" the video load is

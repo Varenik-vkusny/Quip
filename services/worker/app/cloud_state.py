@@ -292,6 +292,22 @@ def get_job_row(job_id: str) -> dict[str, Any] | None:
     return first_row(r.json())
 
 
+def list_jobs_by_user(user_id: str | None, limit: int = 50) -> list[dict[str, Any]]:
+    """Джобы пользователя (newest-first) для дашборд-списка. Тянем только нужные колонки
+    (лёгкий poll): id/status/source_type/source_ref/created_at + clips (для nclips). ``user_id
+    is None`` (dev/auth off) → самые свежие джобы без фильтра владельца."""
+    params: dict[str, Any] = {
+        "select": "id,status,source_type,source_ref,created_at,clips",
+        "order": "created_at.desc",
+        "limit": str(limit),
+    }
+    if user_id is not None:
+        params["user_id"] = f"eq.{user_id}"
+    r = httpx.get(f"{_base()}/jobs", params=params, headers=_headers(), timeout=_TIMEOUT)
+    r.raise_for_status()
+    return list(r.json())
+
+
 # ─────────────────────────── job_artifacts (meta/segments/transcript) ───────────────────────────
 
 

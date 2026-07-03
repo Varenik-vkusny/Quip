@@ -1,134 +1,111 @@
-/** Client-side "recent projects" history backed by localStorage, exposed as an
- *  external store for useSyncExternalStore (lint-clean, hydration-safe, reactive
- *  across tabs and on create). A no-backend stand-in until jobs are user-scoped
- *  in Supabase, where this swaps to a server list.
+/**
+ * Client-side helpers for the "recent projects" list.
  *
- *  `status`/`nclips`/`reviewed` (optional, added later — old entries without them
- *  stay valid): let the dashboard show live per-project state (processing / done /
- *  failed) and a "done but not opened yet" indicator without a server jobs list. */
-export type RecentProject = {
-  id: string;
-  label: string;
-  at: number;
-  /** Last-known job status (cached so a returning user sees it before the poll resolves). */
-  status?: JobStatusLite;
-  /** Clip count once known (for "Ready · N clips"). */
-  nclips?: number;
-  /** True once the user has opened this job's done results → drops the "New" badge. */
-  reviewed?: boolean;
-};
+ * The list itself is now SERVER-authoritative (GET /jobs via `getMyJobs`) — the old global
+ * localStorage store (`quip:recent-projects`) was NOT per-user and never cleared, so account B on
+ * a shared device saw account A's projects (the cross-account leak). That store is gone.
+ *
+ * What stays client-side here:
+ *   1. The "New / reviewed" badge — a PER-USER-NAMESPACED set of job ids the user has opened
+ *      (`quip:reviewed:<userId>`). Booleans only, not a leak.
+ *   2. An OPTIMISTIC-entry + refetch-signal bus so a just-created job shows instantly (and the
+ *      list refetches) before the server list catches up.
+ *   3. `purgeClientCaches` — the sign-out / account-switch localStorage sweep (decision lives in
+ *      the pure `authReset` module).
+ */
 
-/** Mirror of the worker JobStatus (kept local so recent.ts has no type-contract dep). */
-export type JobStatusLite =
-  | "queued"
-  | "downloading"
-  | "transcribing"
-  | "selecting"
-  | "rendering"
-  | "done"
-  | "failed"
-  | "cancelled";
+import { keysToPurge, LAST_USER_ID_KEY, REVIEWED_KEY_PREFIX } from "./authReset";
 
-const TERMINAL: ReadonlySet<JobStatusLite> = new Set(["done", "failed", "cancelled"]);
-export function isTerminalStatus(s: JobStatusLite | undefined): boolean {
-  return s !== undefined && TERMINAL.has(s);
+// ── Per-user "reviewed" set (drops the "New" badge once results are opened) ──
+
+const REVIEWED_MAX = 300; // cap the id list so it can't grow unbounded
+
+function reviewedKey(userId: string): string {
+  return `${REVIEWED_KEY_PREFIX}${userId}`;
 }
 
-const KEY = "quip:recent-projects";
-const MAX = 12;
-
-const listeners = new Set<() => void>();
-let snapshot: RecentProject[] = [];
-let loaded = false;
-// Stable reference for SSR/hydration (useSyncExternalStore caches by identity).
-const EMPTY_SNAPSHOT: readonly RecentProject[] = [];
-
-function readStorage(): RecentProject[] {
-  if (typeof window === "undefined") return [];
+/** Has this user already opened this job's results? False in dev / no-auth (userId null). */
+export function isReviewed(userId: string | null, jobId: string): boolean {
+  if (!userId || typeof window === "undefined") return false;
   try {
-    const raw = window.localStorage.getItem(KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as RecentProject[]) : [];
+    const raw = window.localStorage.getItem(reviewedKey(userId));
+    if (!raw) return false;
+    const arr: unknown = JSON.parse(raw);
+    return Array.isArray(arr) && arr.includes(jobId);
   } catch {
-    // Corrupt localStorage shouldn't crash the dashboard — start fresh.
-    return [];
+    // Corrupt storage — the badge is cosmetic, treat as not-reviewed.
+    return false;
   }
 }
 
-function refresh(): void {
-  snapshot = readStorage();
-  loaded = true;
+/** Mark a job's results as seen for THIS user → clears the "New" badge. No-op without a userId. */
+export function markReviewed(userId: string | null, jobId: string): void {
+  if (!userId || typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(reviewedKey(userId));
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    const arr: string[] = Array.isArray(parsed) ? (parsed as string[]) : [];
+    if (arr.includes(jobId)) return; // already recorded → skip the write
+    const next = [...arr, jobId].slice(-REVIEWED_MAX);
+    window.localStorage.setItem(reviewedKey(userId), JSON.stringify(next));
+  } catch {
+    /* full/corrupt storage — the New badge is cosmetic, don't crash */
+  }
 }
 
-function emit(): void {
-  refresh();
-  for (const l of listeners) l();
-}
+// ── Optimistic entries + refetch signal (dashboard → RecentProjects) ──
 
-/** Stable snapshot for useSyncExternalStore (same ref until a mutation). */
-export function getRecentSnapshot(): RecentProject[] {
-  if (!loaded) refresh();
-  return snapshot;
-}
+/** A transient, in-memory recents entry shown the instant a job is created, before GET /jobs
+ *  includes it. Pruned once the server list returns the id. */
+export type OptimisticRecent = { id: string; label: string; at: number };
 
-export function getRecentServerSnapshot(): RecentProject[] {
-  return EMPTY_SNAPSHOT as RecentProject[];
-}
+const OPTIMISTIC_MAX = 12;
+let optimistic: OptimisticRecent[] = [];
+const refetchListeners = new Set<() => void>();
 
-export function subscribeRecent(cb: () => void): () => void {
-  listeners.add(cb);
-  const onStorage = (e: StorageEvent) => {
-    if (e.key === KEY) emit();
-  };
-  window.addEventListener("storage", onStorage);
+/** Subscribe to "recents changed" pings (a new job was created). Returns an unsubscribe fn. */
+export function subscribeRecentsRefetch(cb: () => void): () => void {
+  refetchListeners.add(cb);
   return () => {
-    listeners.delete(cb);
-    window.removeEventListener("storage", onStorage);
+    refetchListeners.delete(cb);
   };
 }
 
-export function addRecentProject(p: RecentProject): void {
-  if (typeof window === "undefined") return;
-  const list = [p, ...readStorage().filter((x) => x.id !== p.id)].slice(0, MAX);
-  window.localStorage.setItem(KEY, JSON.stringify(list));
-  emit();
+/** Dashboard calls this right after createJob/createUploadJob so the new project shows instantly
+ *  (optimistic row) and any mounted RecentProjects refetches the server list. */
+export function noteRecentCreated(entry: OptimisticRecent): void {
+  optimistic = [entry, ...optimistic.filter((o) => o.id !== entry.id)].slice(0, OPTIMISTIC_MAX);
+  for (const cb of refetchListeners) cb();
 }
 
-export function removeRecentProject(id: string): void {
-  if (typeof window === "undefined") return;
-  const list = readStorage().filter((x) => x.id !== id);
-  window.localStorage.setItem(KEY, JSON.stringify(list));
-  emit();
+/** Current optimistic entries (module-level so they survive a RecentProjects unmount/remount). */
+export function getOptimisticRecents(): OptimisticRecent[] {
+  return optimistic;
 }
 
-/** Merge fields into an existing recent entry (no-op if it isn't tracked). Used to cache
- *  live status/nclips and the reviewed flag. Skips the write (and the re-render) when
- *  nothing actually changed, so polling that returns the same status is free. */
-export function updateRecentProject(
-  id: string,
-  patch: Partial<Omit<RecentProject, "id">>,
-): void {
+/** Drop optimistic entries the server list now includes; returns the surviving entries. */
+export function pruneOptimistic(knownIds: Set<string>): OptimisticRecent[] {
+  const next = optimistic.filter((o) => !knownIds.has(o.id));
+  if (next.length !== optimistic.length) optimistic = next;
+  return optimistic;
+}
+
+// ── Sign-out / account-switch cache purge (defense in depth) ──
+
+/** Impure: wipe cross-account client caches from localStorage — the legacy global recents blob,
+ *  the editor inspector width, EVERY user's reviewed set, and the last-user marker. Used by
+ *  SignOutButton and AuthStateSync. The pure decision of WHICH keys lives in `authReset.keysToPurge`. */
+export function purgeClientCaches(): void {
   if (typeof window === "undefined") return;
-  const list = readStorage();
-  const i = list.findIndex((x) => x.id === id);
-  if (i < 0) return;
-  const cur = list[i];
-  const next = { ...cur, ...patch };
-  if (
-    next.status === cur.status &&
-    next.nclips === cur.nclips &&
-    next.reviewed === cur.reviewed &&
-    next.label === cur.label
-  ) {
-    return; // nothing changed → don't churn storage/listeners
+  try {
+    const all: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k) all.push(k);
+    }
+    for (const k of keysToPurge(all)) window.localStorage.removeItem(k);
+    window.localStorage.removeItem(LAST_USER_ID_KEY);
+  } catch {
+    /* storage unavailable — nothing to purge */
   }
-  list[i] = next;
-  window.localStorage.setItem(KEY, JSON.stringify(list));
-  emit();
-}
-
-/** Mark a job's results as seen → removes the "New" badge from the recent list. */
-export function markReviewed(id: string): void {
-  updateRecentProject(id, { reviewed: true });
 }

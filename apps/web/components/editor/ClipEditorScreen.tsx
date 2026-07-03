@@ -17,6 +17,7 @@ import {
   getClipEdit,
   getClipReframe,
   getJob,
+  getMediaToken,
   getRenderStatus,
   getTimeline,
   patchClipEdit,
@@ -29,7 +30,9 @@ import {
   setCropOverride,
   startRenderClip,
   trimClip,
+  withToken,
 } from "@/lib/api";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { patchAssStyles } from "@/lib/assStyle";
 import { pickActiveOverride } from "@/lib/reframeFrame";
 import { type ClipCache, createClipCache } from "@/lib/clipCache";
@@ -275,10 +278,38 @@ export default function ClipEditorScreen({
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Media auth: the preview `<video>` can't send an Authorization header, so the worker accepts a
+  // SCOPED, short-lived, opaque media ticket as `?mt=` instead (NOT the session JWT — that would
+  // leak a full-account credential into logs/Referer). Fetch the job-scoped ticket once on mount;
+  // hold the src empty until it resolves (when auth is configured) so we never flash a 401'd load.
+  // In dev / no-auth the ticket isn't needed → resolved immediately, plain URL.
+  const [mediaToken, setMediaToken] = useState<string | null>(null);
+  const [tokenResolved, setTokenResolved] = useState(!isSupabaseConfigured);
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    let active = true;
+    getMediaToken(jobId)
+      .then((tok) => {
+        if (active) {
+          setMediaToken(tok);
+          setTokenResolved(true);
+        }
+      })
+      .catch(() => {
+        if (active) setTokenResolved(true); // let the plain URL through rather than hang forever
+      });
+    return () => {
+      active = false;
+    };
+  }, [jobId]);
+
   // Воркер-эндпоинт: лёгкий preview-прокси (≤720p H.264 faststart, пара МБ) для БЫСТРОЙ загрузки.
   // Бэкенд прозрачно фолбэчит на полный source.mp4 для старых джоб без прокси. На Modal — 302 на
   // CDN (cdn.quip.ink). Превью-кроп — по долям (res-независим), субтитры — libass-оверлей → 720p ок.
-  const sourceSrc = useMemo(() => resolveUrl(`jobs/${jobId}/preview.mp4`), [jobId]);
+  const sourceSrc = useMemo(
+    () => (tokenResolved ? withToken(resolveUrl(`jobs/${jobId}/preview.mp4`), mediaToken) : ""),
+    [jobId, tokenResolved, mediaToken],
+  );
   const outerStart = edit?.source_intervals[0]?.source_start ?? 0;
   const outerEnd =
     edit?.source_intervals[edit.source_intervals.length - 1]?.source_end ?? 0;
