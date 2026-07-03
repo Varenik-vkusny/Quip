@@ -114,7 +114,7 @@ class TestResolveRenderPolicy:
 
     def test_paid_encode_is_higher_quality(self) -> None:
         # Платные планы рендерят НАИВЫСШИМ практичным качеством: ниже CRF + медленнее preset.
-        for plan_id in ("starter", "pro"):
+        for plan_id in ("starter", "pro", "studio"):
             p = resolve_render_policy(plan_id, local_dev=False)
             assert p.video_crf == 18
             assert p.video_preset == "medium"
@@ -225,14 +225,20 @@ class TestPaygCreditsForSplit:
 
 
 class TestPlansShape:
-    def test_three_tiers_ordered_by_price(self) -> None:
-        assert set(PLANS) == {"free", "starter", "pro"}
-        assert PLANS["free"].price_usd < PLANS["starter"].price_usd < PLANS["pro"].price_usd
+    def test_tiers_ordered_by_price(self) -> None:
+        assert set(PLANS) == {"free", "starter", "pro", "studio"}
+        assert (
+            PLANS["free"].price_usd
+            < PLANS["starter"].price_usd
+            < PLANS["pro"].price_usd
+            < PLANS["studio"].price_usd
+        )
 
     def test_monthly_videos(self) -> None:
         assert PLANS["free"].monthly_videos == 2
         assert PLANS["starter"].monthly_videos == 10
         assert PLANS["pro"].monthly_videos == 30
+        assert PLANS["studio"].monthly_videos == 42
 
 
 def test_current_month_format() -> None:

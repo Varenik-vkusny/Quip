@@ -19,7 +19,7 @@ export function PricingCards() {
   return (
     <>
       <Reveal>
-        <div className="mx-auto grid max-w-5xl items-stretch gap-5 lg:grid-cols-3">
+        <div className="mx-auto grid max-w-6xl items-stretch gap-5 sm:grid-cols-2 lg:grid-cols-4">
           {PLANS.map((plan) => {
             const recommended = plan.recommended ?? false;
             return (
@@ -92,7 +92,7 @@ export function PricingCards() {
 
       {/* Pay-as-you-go — no subscription, credits never expire. A slim inline action. */}
       <Reveal>
-        <div className="mx-auto mt-5 flex max-w-5xl flex-col items-start gap-5 rounded-lg border border-line bg-surface p-7 transition duration-200 ease-snappy hover:border-line-strong sm:flex-row sm:items-center sm:justify-between">
+        <div className="mx-auto mt-5 flex max-w-6xl flex-col items-start gap-5 rounded-lg border border-line bg-surface p-7 transition duration-200 ease-snappy hover:border-line-strong sm:flex-row sm:items-center sm:justify-between">
           <div>
             <Eyebrow tone="faint">Pay as you go</Eyebrow>
             <p className="mt-2 font-display text-h3 text-ink">{PAYG.title}</p>

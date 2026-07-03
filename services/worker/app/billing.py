@@ -91,6 +91,18 @@ PLANS: dict[str, PlanLimits] = {
         video_preset="medium",  # платные: лучше компрессия/качество (vs free veryfast)
         priority=True,
     ),  # fmt: skip
+    "studio": PlanLimits(
+        id="studio",
+        name="Studio",
+        price_usd=49.0,
+        monthly_videos=42,  # 42 видео = 2520 мин/мес (студии/агентства, ежедневный лонг-форм)
+        max_video_minutes=None,
+        watermark=False,
+        max_resolution=1080,
+        video_crf=18,  # платные: чётче (vs free 20)
+        video_preset="medium",  # платные: лучше компрессия/качество (vs free veryfast)
+        priority=True,
+    ),  # fmt: skip
 }
 
 _DEFAULT_PLAN = "free"

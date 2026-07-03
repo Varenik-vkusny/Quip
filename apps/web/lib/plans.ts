@@ -7,7 +7,7 @@
  * videos), so the balance is shown as both videos and minutes. No token casino, no surprise
  * paywalls. A single video can be up to 3 hours; length is limited only by your remaining minutes.
  */
-export type PlanId = "free" | "starter" | "pro";
+export type PlanId = "free" | "starter" | "pro" | "studio";
 
 export interface PlanDisplay {
   id: PlanId;
@@ -68,6 +68,21 @@ export const PLANS: PlanDisplay[] = [
       "Everything in Starter",
       "Priority processing in the queue",
       "Early access to new features",
+      "Pay-as-you-go videos when you need more",
+    ],
+  },
+  {
+    id: "studio",
+    name: "Studio",
+    price: 49,
+    tagline: "For studios & agencies shipping daily.",
+    limit: "42 videos / month",
+    limitNote: "2520 min total. Longer videos use minutes proportionally.",
+    cta: "Choose Studio",
+    features: [
+      "Everything in Pro",
+      "42 videos every month for high-volume teams",
+      "Priority processing in the queue",
       "Pay-as-you-go videos when you need more",
     ],
   },

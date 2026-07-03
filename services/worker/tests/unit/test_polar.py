@@ -169,6 +169,24 @@ def test_parse_plan_change_via_metadata_plan_fallback() -> None:
     )
 
 
+def test_parse_plan_change_studio_via_metadata_plan() -> None:
+    # Studio-тариф НЕ имеет env product_id (POLAR_PRODUCT_STUDIO) → маппится ТОЛЬКО по
+    # metadata.plan="studio" продукта (продукт в Polar его несёт). Продукт не наш по env →
+    # product_to_plan=None → фолбэк _metadata_plan должен принять "studio".
+    payload = {
+        "type": "subscription.created",
+        "data": {
+            "product_id": "708186c8-...",
+            "customer": {"external_id": "user_studio"},
+            "product": {"metadata": {"plan": "studio"}},
+        },
+    }
+    assert polar.parse_plan_change(payload, product_starter="p_s", product_pro="p_p") == (
+        "user_studio",
+        "studio",
+    )
+
+
 # ─────────────────────────── parse_payg_order (разовая оплата) ───────────────────────────
 
 

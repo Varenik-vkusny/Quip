@@ -96,15 +96,22 @@ def product_to_plan(product_id: str, *, starter: str, pro: str) -> str | None:
     return None
 
 
+# Платные планы, назначаемые подпиской через metadata.plan продукта в Polar
+# (зеркалит платные ключи billing.PLANS). Новый платный тариф → добавь и СЮДА,
+# и в billing.PLANS, и на фронт lib/plans.ts. "free" подпиской не назначается.
+_SUBSCRIPTION_PLANS = frozenset({"starter", "pro", "studio"})
+
+
 def _metadata_plan(data: dict[str, Any]) -> str | None:
     """Фолбэк-маппинг плана через ``metadata.plan`` продукта/заказа (forward-compat:
-    фаундер может выставить metadata.plan=starter|pro на продукте в Polar). PURE."""
+    фаундер выставляет metadata.plan=starter|pro|studio на продукте в Polar → маппим по нему
+    БЕЗ env product_id). PURE."""
     for src in (data.get("product"), data):
         if isinstance(src, dict):
             meta = src.get("metadata")
             if isinstance(meta, dict):
                 plan = str(meta.get("plan", "")).lower()
-                if plan in ("starter", "pro"):
+                if plan in _SUBSCRIPTION_PLANS:
                     return plan
     return None
 
