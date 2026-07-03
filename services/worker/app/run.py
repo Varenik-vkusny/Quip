@@ -383,6 +383,7 @@ def run_pipeline(
     user_id: str | None = None,
     language: str | None = None,
     normalize_source: Callable[[], None] | None = None,
+    on_ready: Callable[[Job], None] | None = None,
 ) -> Job:
     """Прогнать весь конвейер для job_id. Возвращает Job (также пишет job.json/runs.jsonl).
 
@@ -400,6 +401,13 @@ def run_pipeline(
     (транскрипция стартует без ожидания ре-энкода), а source.mp4 материализуется ЗДЕСЬ — ПОСЛЕ
     select, ПЕРЕД заливкой в R2/фан-аутом (где впервые нужен seekable mp4). YouTube/кэш: source.mp4
     уже есть → None (no-op). Параметры _ensure_mp4 не меняются — двигается только момент запуска.
+    on_ready(job) (опц.) — done-early шов для tasks.py (владелец set_done/_meter): вызывается
+    СРАЗУ по готовности клипов (Job собран, job.json записан), ДО join'а preview/video_map-потока
+    → done не ждёт энкод прокси (на длинных источниках хвост стоил минуты wall-clock). Ошибка
+    хвоста ПОСЛЕ on_ready НЕ валит джоб — громкий лог «[preview] FAILED after done» (это
+    документированная деградация storage.preview_read_url: редактор фолбэчит на source URL,
+    пока preview.mp4 не появится в R2; video_map retry-able через /video-map?retry=true).
+    Без on_ready (CLI/main) — старая семантика: join ДО финализации, ошибка потока валит джоб.
     """
     s = get_settings()  # fail-fast на отсутствии ключей; также берём reframe_mode
     out = DATA_ROOT / job_id
@@ -725,11 +733,10 @@ def run_pipeline(
     stages["reframe"] = round(sum(r["reframe_lat"] for r in results), 2)
     stages["render"] = round(sum(r["render_lat"] for r in results), 2)
 
-    # Join preview/VideoMap-потока ПЕРЕД финализацией (set_done у вызывателя): к done прокси уже
-    # в R2, карта в Postgres — идентично прежнему inline-хвосту, только раньше по wall-clock
-    # (поток работал, пока рендер блокировал). Исключение потока ре-рейзим ЗДЕСЬ (до job.json) →
-    # семантика ошибок 1:1 с inline-вариантом: провал preview/map = failed-джоб, НЕ тихо.
-    if preview_thread is not None:
+    # БЕЗ on_ready (CLI/main): join preview/VideoMap-потока ПЕРЕД финализацией — прежняя
+    # семантика 1:1 с inline-хвостом: исключение потока ре-рейзим ЗДЕСЬ (до job.json) →
+    # провал preview/map = failed-джоб, НЕ тихо. (С on_ready join уезжает НИЖЕ, ПОСЛЕ done.)
+    if on_ready is None and preview_thread is not None:
         preview_thread.join()
         if preview_errors:
             raise preview_errors[0]
@@ -747,6 +754,23 @@ def run_pipeline(
         metrics=Metrics(cost_usd=total_usd, duration_sec=meta.duration, elapsed_sec=total_sec),
     )
     (out / "job.json").write_text(job.model_dump_json(indent=2), encoding="utf-8")
+
+    # ── done-early (хвост-киллер Cloud Run): on_ready = set_done+_meter у вызывателя (tasks.py)
+    #    — джоб виден done СРАЗУ по готовности клипов, а preview/video_map-поток джойнится
+    #    ПОСЛЕ, но строго ДО возврата (Cloud Run Job убивает контейнер на выходе процесса —
+    #    вернуться с живым потоком = оборванная заливка preview). Ошибка хвоста ПОСЛЕ done
+    #    СОЗНАТЕЛЬНО не валит джоб (клипы валидны и уже отданы) — это ДОКУМЕНТИРОВАННАЯ
+    #    деградация storage.preview_read_url (редактор фолбэчит на source URL, пока preview.mp4
+    #    нет в R2; video_map retry-able через /video-map?retry=true). НЕ тихий фолбэк
+    #    (правило №8): громкий лог ниже. set_done ничего из preview-стейта не читает, а
+    #    video_map пишется независимым upsert'ом job_artifacts (db.put_job_artifact) —
+    #    порядок done → артефакт хвоста безопасен. ──
+    if on_ready is not None:
+        on_ready(job)
+        if preview_thread is not None:
+            preview_thread.join()
+            if preview_errors:
+                print(f"[preview] FAILED after done: {preview_errors[0]}")
 
     # ── runs.jsonl (телеметрия экономики) ──
     run_line = {

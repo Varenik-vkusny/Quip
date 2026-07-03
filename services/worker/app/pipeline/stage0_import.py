@@ -438,11 +438,16 @@ def build_preview_cmd(src: Path, dst: Path, *, height: int = 720, crf: int = 30)
     софт-AV1), low-bitrate ``crf``, ``+faststart`` (moov вперёд → мгновенный старт/seek). Рендер
     финального клипа идёт из ПОЛНОГО source → качество не падает. ``height`` вызывающий клампит
     высотой источника (без апскейла).
+
+    Скорость > качество: это СКРАБ-прокси (не продукт) → ``-preset superfast`` (в разы быстрее
+    veryfast — энкод прокси был хвостом джоба на длинных источниках, см. done-early в run.py)
+    и ``-tune fastdecode`` (упрощает битстрим → легче браузерный декод при скрабе).
+    ``+faststart`` обязателен: прокси должен оставаться прогрессивно-стримабельным.
     """
     return [
         "ffmpeg", "-y", "-i", str(src),
         "-vf", f"scale=-2:{height}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        "-c:v", "libx264", "-preset", "superfast", "-tune", "fastdecode", "-crf", str(crf),
         "-c:a", "aac", "-b:a", "96k",
         "-movflags", "+faststart",
         str(dst),

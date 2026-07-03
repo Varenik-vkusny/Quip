@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from app.models import Segment, Transcript, Word
 
 class _S:  # минимальный stub настроек (что читает run_pipeline на этом пути)
     transcript_cache_enabled = False
-    preview_height = 720
+    preview_height = 540  # скраб-прокси (новый дефолт config.py; рендер идёт из source)
     preview_crf = 30
     transcription_provider = "deepgram"
     deepgram_model = "nova-3"
@@ -92,7 +93,7 @@ def test_preview_and_video_map_run_concurrently_with_render(
 
     def fake_preview(src: Path, dst: Path, *, height: int, crf: int) -> None:
         assert Path(src).exists(), "локальный source.mp4 обязан существовать на старте потока"
-        assert (height, crf) == (720, 30)  # min(preview_height, meta.height)=720, crf как был
+        assert (height, crf) == (540, 30)  # min(preview_height, meta.height)=540, crf как был
         Path(dst).write_bytes(b"proxy")
         order.append("preview")
         preview_done.set()
@@ -125,7 +126,10 @@ def test_preview_thread_error_reraised_on_join_fails_job(
 ) -> None:
     """Правило №8 (никаких тихих фолбэков): ошибка в потоке preview НЕ глотается — ре-рейзится
     на join ТЕМ ЖЕ объектом исключения → джоб падает так же, как при прежнем inline-запуске.
-    Рендер при этом успел завершиться (ошибка догоняет на join, не раньше)."""
+    Рендер при этом успел завершиться (ошибка догоняет на join, не раньше).
+
+    Действует ТОЛЬКО для пути БЕЗ on_ready (CLI/main): done ещё не сигналился → старая
+    семантика. С on_ready (tasks.py) ошибка ловится ПОСЛЕ done → см. done-early тесты ниже."""
     import app.run as run_mod
 
     _setup_job(run_mod, monkeypatch, tmp_path, "job_e")
@@ -227,4 +231,121 @@ def test_modal_spawn_branch_untouched_no_thread(
     job = run_mod.run_pipeline("job_m", source_url=None)
 
     assert spawns == ["preview_job", "generate_video_map_job"]
+    assert job.status.value == "done"
+
+
+# ─────────────────────────── done-early: preview НЕ держит set_done ───────────────────────────
+# Хвост-киллер (Cloud Run): на длинном источнике клипы готовы на минуте ~5, а done приходил на
+# ~11.6 — join preview-потока стоял ПЕРЕД возвратом run_pipeline (set_done у вызывателя). Новый
+# шов: run_pipeline(on_ready=...) зовёт on_ready(job) СРАЗУ по готовности клипов (tasks.py внутри
+# него делает set_done+_meter), а preview/video_map-поток джойнится ПОСЛЕ — но ДО возврата
+# (Cloud Run Job убивает контейнер на выходе процесса — недожатый поток = недокачанный preview).
+# Ошибка хвоста ПОСЛЕ done НЕ валит джоб: это документированная деградация
+# storage.preview_read_url (редактор фолбэчит на source URL, пока preview.mp4 нет в R2).
+
+
+def test_on_ready_fires_without_waiting_for_preview_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ГЛАВНЫЙ контракт done-early: on_ready (=set_done) НЕ ждёт работающий preview-поток.
+
+    Фейковый preview БЛОКИРУЕТСЯ, пока on_ready не отработал (release-event ставится ТОЛЬКО
+    в on_ready). Старый порядок (join ПЕРЕД финализацией) здесь дедлочится до таймаута —
+    done не мог случиться раньше конца превью."""
+    import app.run as run_mod
+
+    _setup_job(run_mod, monkeypatch, tmp_path, "job_de")
+    release = threading.Event()
+    order: list[str] = []
+
+    def fake_preview(src: Path, dst: Path, *, height: int, crf: int) -> None:
+        assert release.wait(timeout=10), "on_ready не вызван — done снова ждёт preview (хвост!)"
+        Path(dst).write_bytes(b"proxy")
+        order.append("preview_end")
+
+    def on_ready(job: Any) -> None:
+        assert job.status.value == "done"  # клипы готовы, Job целиком собран
+        order.append("on_ready")
+        release.set()
+
+    monkeypatch.setattr(run_mod, "build_preview_proxy", fake_preview)
+    monkeypatch.setattr(run_mod, "_render_all_clips", lambda *a, **k: [_ok_result(1)])
+
+    job = run_mod.run_pipeline("job_de", source_url=None, on_ready=on_ready)
+
+    # done СТРОГО раньше конца превью; превью при этом ДОЖАТО до возврата (join после done).
+    assert order == ["on_ready", "preview_end"]
+    assert job.status.value == "done"
+
+
+def test_preview_failure_after_done_keeps_job_done_and_logs_loud(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ошибка preview ПОСЛЕ done: джоб НЕ падает (клипы валидны, редактор живёт на
+    source-фолбэке storage.preview_read_url), но лог — ГРОМКИЙ (не тихий фолбэк)."""
+    import app.run as run_mod
+
+    out = _setup_job(run_mod, monkeypatch, tmp_path, "job_pf")
+    ready_jobs: list[Any] = []
+
+    def fake_preview(*a: Any, **k: Any) -> None:
+        raise JobError("preview", "ffmpeg exit 1: proxy build failed")
+
+    monkeypatch.setattr(run_mod, "build_preview_proxy", fake_preview)
+    monkeypatch.setattr(run_mod, "_render_all_clips", lambda *a, **k: [_ok_result(1)])
+
+    job = run_mod.run_pipeline("job_pf", source_url=None, on_ready=ready_jobs.append)  # НЕ рейзит
+
+    assert ready_jobs and ready_jobs[0].status.value == "done"  # done сигнализирован
+    assert job.status.value == "done"
+    assert (out / "job.json").exists()  # финализация состоялась, джоб цел
+    assert "[preview] FAILED after done: " in capsys.readouterr().out  # громко, не молча
+
+
+def test_video_map_failure_after_done_keeps_job_done_and_logs_loud(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Второй участник хвоста (video_map: save упал → исключение из потока) — та же деградация:
+    # джоб done, /video-map retry-able, лог громкий.
+    import app.run as run_mod
+
+    _setup_job(run_mod, monkeypatch, tmp_path, "job_vf")
+
+    def fake_map(jid: str) -> None:
+        raise RuntimeError("save_video_map: postgres down")
+
+    monkeypatch.setattr("app.tasks.generate_video_map_job", fake_map)
+    monkeypatch.setattr(run_mod, "_render_all_clips", lambda *a, **k: [_ok_result(1)])
+
+    job = run_mod.run_pipeline("job_vf", source_url=None, on_ready=lambda j: None)
+
+    assert job.status.value == "done"
+    assert "[preview] FAILED after done: " in capsys.readouterr().out
+
+
+def test_preview_thread_joined_before_run_pipeline_returns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Поток ВСЕГДА дожат до возврата run_pipeline (Cloud Run Job умирает с процессом:
+    вернуться с живым потоком = оборванная заливка preview в R2)."""
+    import app.run as run_mod
+
+    _setup_job(run_mod, monkeypatch, tmp_path, "job_j")
+    finished = threading.Event()
+
+    def fake_preview(src: Path, dst: Path, *, height: int, crf: int) -> None:
+        time.sleep(0.2)  # медленный энкод — вернуться раньше него нельзя
+        Path(dst).write_bytes(b"proxy")
+        finished.set()
+
+    monkeypatch.setattr(run_mod, "build_preview_proxy", fake_preview)
+    monkeypatch.setattr(run_mod, "_render_all_clips", lambda *a, **k: [_ok_result(1)])
+
+    job = run_mod.run_pipeline("job_j", source_url=None, on_ready=lambda j: None)
+
+    assert finished.is_set(), "run_pipeline вернулся, не дожав preview-поток (join потерян)"
     assert job.status.value == "done"

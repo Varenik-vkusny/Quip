@@ -34,10 +34,33 @@ class TestBuildPreviewCmd:
         assert cmd[-1] == str(dst)  # str(Path) → OS-разделители (Windows \ vs POSIX /)
         assert str(src) in cmd
 
+    def test_fast_scrub_proxy_preset(self) -> None:
+        # Прокси — ТОЛЬКО для скраба в редакторе (рендер идёт из полного source): качество
+        # не критично → superfast (в разы быстрее veryfast на длинных исходниках — это был
+        # хвост джоба) + -tune fastdecode (легче браузерный декод при скрабе).
+        cmd = build_preview_cmd(Path("s.mp4"), Path("p.mp4"), height=540, crf=30)
+        assert cmd[cmd.index("-preset") + 1] == "superfast"
+        assert cmd[cmd.index("-tune") + 1] == "fastdecode"
+        # быстрый пресет НЕ должен потерять прогрессивную стримабельность прокси
+        assert cmd[cmd.index("-movflags") + 1] == "+faststart"
+
     def test_height_and_crf_parametrized(self) -> None:
         cmd = build_preview_cmd(Path("s.mp4"), Path("p.mp4"), height=540, crf=28)
         assert cmd[cmd.index("-vf") + 1] == "scale=-2:540"  # -2 = чётная ширина по аспекту
         assert cmd[cmd.index("-crf") + 1] == "28"
+
+
+class TestPreviewProxyDefaults:
+    """Дефолты прокси в Settings: 540p/crf30 — скраб-прокси, не продуктовое качество."""
+
+    def test_preview_height_default_is_540(self) -> None:
+        # 720→540: прокси только для скраба; 540p = ~0.56x пикселей 720p → заметно быстрее
+        # энкод хвоста (см. done-early в run.py). Поля читаем с КЛАССА (инстанс Settings
+        # требует реальные API-ключи из env).
+        from app.config import Settings
+
+        assert Settings.model_fields["preview_height"].default == 540
+        assert Settings.model_fields["preview_crf"].default == 30  # crf не трогали (уже ≥30)
 
 
 class TestParseFps:

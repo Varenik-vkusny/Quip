@@ -187,7 +187,9 @@ class Settings(BaseSettings):
     # Полный source.mp4 (1080p, 50-100МБ, иногда AV1 = софт-декод) грузился в редакторе долго.
     # preview.mp4 = ≤preview_height H.264 crf preview_crf → пара МБ, hw-декод. Рендер — из source
     # (качество не падает). preview_height клампится сверху высотой источника (без апскейла).
-    preview_height: int = 720
+    # 540 (было 720): прокси только для скраба в редакторе → 540p = ~0.56x пикселей 720p, энкод
+    # заметно быстрее (прокси был хвостом джоба на длинных источниках; см. done-early в run.py).
+    preview_height: int = 540
     preview_crf: int = 30
     # job-стейт через psycopg-пулер (опц.). Воркер по умолчанию пишет стейт через PostgREST
     # (см. app/cloud_state.py) — этот URL НЕ обязателен. Оставлен для будущего psycopg-пути.

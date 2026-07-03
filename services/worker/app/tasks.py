@@ -92,6 +92,24 @@ def _meter(user_id: str | None, job_id: str, job: Job, holder: dict[str, Any]) -
         _log.exception("usage record failed: job=%s user=%s", job_id, user_id)
 
 
+def _finalize_done(
+    job_id: str, user_id: str | None, quota: dict[str, Any]
+) -> Callable[[Job], None]:
+    """on_ready-хук для run_pipeline (done-early): set_done + метеринг СРАЗУ по готовности клипов.
+
+    run_pipeline вызывает его ДО join'а preview/video_map-потока → джоб виден done, пока хвост
+    ещё энкодит прокси (storage.preview_read_url фолбэчит на source URL, пока preview.mp4 нет в
+    R2 — документированная деградация, не поломка). Владение set_done/_meter остаётся ЗДЕСЬ
+    (склейка статусов — только в tasks.py); run.py лишь дёргает хук в правильный момент.
+    """
+
+    def ready(job: Job) -> None:
+        db.set_done(job_id, job)
+        _meter(user_id, job_id, job, quota)
+
+    return ready
+
+
 def _segment_bounds(job_id: str, clip_id: str) -> tuple[float, float] | None:
     """(start, end) сегмента клипа из артефактов (диск/cloud). None если индекс вне диапазона/нет.
 
@@ -420,7 +438,9 @@ def run_pipeline_job(
     # один источник истины списания (нет дрейфа гейт↔метеринг).
     quota: dict[str, Any] = {}
     try:
-        job = run_pipeline(
+        # done-early: set_done+_meter уходят on_ready-хуком — run_pipeline зовёт их СРАЗУ по
+        # готовности клипов и лишь ПОТОМ дожимает preview/video_map-хвост (см. run.py).
+        run_pipeline(
             job_id,
             source_url=source_ref,
             on_status=on_status,
@@ -429,9 +449,8 @@ def run_pipeline_job(
             on_cancellable=on_cancellable,
             user_id=user_id,
             language=language,
+            on_ready=_finalize_done(job_id, user_id, quota),
         )
-        db.set_done(job_id, job)
-        _meter(user_id, job_id, job, quota)
     except JobError as e:
         db.set_failed(job_id, str(e))
     except Exception as e:  # noqa: BLE001 — фон-таск: любое падение → статус failed, не молча
@@ -551,7 +570,8 @@ def run_upload_job(
         # БЫСТРЫЙ Stage 0: аудио+meta из СЫРОГО файла (транскрипция стартует почти сразу). Видео-
         # нормализация (_ensure_mp4: remux/ре-энкод) ОТЛОЖЕНА — run_pipeline выполнит её перед R2.
         prepare_upload_audio(src, out_dir, job_id=job_id, title=title)
-        job = run_pipeline(
+        # done-early: set_done+_meter уходят on_ready-хуком (тот же шов, что run_pipeline_job).
+        run_pipeline(
             job_id,
             source_url=None,
             on_status=on_status,
@@ -561,9 +581,8 @@ def run_upload_job(
             user_id=user_id,
             language=language,
             normalize_source=lambda: normalize_upload_source(src, out_dir),
+            on_ready=_finalize_done(job_id, user_id, quota),
         )
-        db.set_done(job_id, job)
-        _meter(user_id, job_id, job, quota)
     except JobError as e:
         db.set_failed(job_id, str(e))
     except Exception as e:  # noqa: BLE001 — фон-таск: любое падение → статус failed, не молча

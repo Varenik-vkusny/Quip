@@ -252,6 +252,55 @@ def test_cancel_baseexception_skips_meter_and_set_done(monkeypatch):
     assert done == []  # set_done НЕ вызван → джоб не помечен done
 
 
+# ─────────────────────────── done-early: set_done через on_ready-шов ───────────────────────────
+# tasks.py ВЛАДЕЕТ set_done/_meter, но теперь передаёт их в run_pipeline как on_ready-хук:
+# run_pipeline зовёт его СРАЗУ по готовности клипов, а preview/video_map-хвост джойнит ПОСЛЕ
+# (см. run.py). Контракт здесь: set_done+_meter случаются ДО возврата run_pipeline (до дожатия
+# хвоста) и РОВНО один раз (после возврата tasks.py их НЕ дублирует).
+
+
+def _fake_pipeline_with_tail(events: list):
+    """Фейковый run_pipeline: зовёт on_ready (клипы готовы) → 'дожимает хвост' → возвращает."""
+
+    def fake(job_id, **kwargs):
+        job = _job_with_minutes(1.0)
+        kwargs["on_ready"](job)  # done-early: шов срабатывает ДО хвоста
+        events.append("tail_joined")  # preview/video_map джойнится ПОСЛЕ done
+        return job
+
+    return fake
+
+
+def test_run_pipeline_job_sets_done_and_meters_before_tail(monkeypatch):
+    events: list = []
+    monkeypatch.setattr(tasks, "run_pipeline", _fake_pipeline_with_tail(events))
+    monkeypatch.setattr(tasks, "_meter", lambda *a, **k: events.append("meter"))
+    monkeypatch.setattr(db, "set_done", lambda *a, **k: events.append("set_done"))
+    monkeypatch.setattr(db, "set_failed", lambda *a, **k: events.append("set_failed"))
+    monkeypatch.setattr(db, "update_status", lambda *a, **k: None)
+    monkeypatch.setattr(db, "set_cancellable", lambda *a, **k: None)
+
+    tasks.run_pipeline_job("job_de", "youtube", "url", None, "user_1")
+
+    # done+метеринг ДО дожатия хвоста; ровно по одному разу; failed не трогался.
+    assert events == ["set_done", "meter", "tail_joined"]
+
+
+def test_run_upload_job_sets_done_and_meters_before_tail(monkeypatch, tmp_path):
+    events: list = []
+    monkeypatch.setattr(tasks, "run_pipeline", _fake_pipeline_with_tail(events))
+    monkeypatch.setattr(tasks, "_meter", lambda *a, **k: events.append("meter"))
+    monkeypatch.setattr(db, "set_done", lambda *a, **k: events.append("set_done"))
+    monkeypatch.setattr(db, "set_failed", lambda *a, **k: events.append("set_failed"))
+    monkeypatch.setattr(db, "update_status", lambda *a, **k: None)
+    monkeypatch.setattr(db, "set_cancellable", lambda *a, **k: None)
+    monkeypatch.setattr("app.pipeline.stage0_import.prepare_upload_audio", lambda *a, **k: None)
+
+    tasks.run_upload_job("job_up", str(tmp_path / "u.mp4"), "t", None, "user_1")
+
+    assert events == ["set_done", "meter", "tail_joined"]
+
+
 def test_chapters_job_joberror_is_failed_with_reason(monkeypatch, tmp_path):
     job = "job_err"
     out = _stub_artifacts(monkeypatch, tmp_path, job)

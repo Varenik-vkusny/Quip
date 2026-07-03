@@ -228,7 +228,7 @@ def test_run_pipeline_normalizes_source_before_r2_upload_and_fanout(
 
     class _S:  # минимальный stub настроек (что читает run_pipeline на этом пути)
         transcript_cache_enabled = False
-        preview_height = 720
+        preview_height = 540
         preview_crf = 30
         transcription_provider = "deepgram"
         deepgram_model = "nova-3"
@@ -278,7 +278,7 @@ def test_run_pipeline_raises_if_source_mp4_missing_after_normalize(
 
     class _S:
         transcript_cache_enabled = False
-        preview_height = 720
+        preview_height = 540
         preview_crf = 30
         transcription_provider = "deepgram"
         deepgram_model = "nova-3"
