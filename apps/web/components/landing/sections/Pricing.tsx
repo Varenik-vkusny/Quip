@@ -20,7 +20,7 @@ export async function Pricing() {
           <p className="mt-5 text-[1.0625rem] leading-relaxed text-muted">{sub}</p>
         </Reveal>
 
-        <div className="mt-14 grid gap-4 md:grid-cols-3">
+        <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {plans.map((plan, i) => {
             const pro = plan.recommended;
             return (
