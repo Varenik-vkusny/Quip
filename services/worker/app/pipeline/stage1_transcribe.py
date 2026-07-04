@@ -166,12 +166,23 @@ def call_deepgram(
 # ─────────────────────────── провайдер Groq/Whisper (REST через httpx) ───────────────────────────
 
 
-def _prepare_audio_for_groq(wav: Path) -> tuple[bytes, str, str]:
-    """WAV → (bytes, filename, mime). Компрессирует в MP3 если WAV > 90 МБ (лимит Groq 100 МБ)."""
-    if wav.stat().st_size <= 90 * 1024 * 1024:
+def _needs_groq_compression(size_bytes: int, max_mb: int) -> bool:
+    """True if raw audio exceeds the Groq upload cap and must be re-encoded smaller.
+
+    PURE (no I/O) → unit-tested. Groq Whisper 413s oversize uploads (free tier 25 MB /
+    dev 100 MB); ``max_mb`` (config.groq_max_upload_mb) keeps a margin under the tier cap."""
+    return size_bytes > max_mb * 1024 * 1024
+
+
+def _prepare_audio_for_groq(wav: Path, *, max_mb: int) -> tuple[bytes, str, str]:
+    """WAV → (bytes, filename, mime). Сжимает в 32 kbps MP3, когда СЫРОЙ WAV превышает лимит
+    загрузки Groq (``max_mb``, зависит от тарифа). Whisper всё равно даунсемплит в 16 kHz →
+    точность не страдает. Если сжатый MP3 ВСЁ РАВНО больше лимита (очень длинное аудио) —
+    поднимаем понятный JobError, а НЕ отдаём Groq'у на 413 (правило №8: без тихих фолбэков)."""
+    if not _needs_groq_compression(wav.stat().st_size, max_mb):
         return wav.read_bytes(), "audio.wav", "audio/wav"
 
-    # WAV > 90 МБ (> ~47 мин при 16kHz mono) → сжать в MP3 32kbps через ffmpeg.
+    # Сырой WAV > лимита → сжать в MP3 32kbps mono через ffmpeg (~14 МБ/час → до ~1ч45м < 25 МБ).
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
         mp3_path = Path(tf.name)
     try:
@@ -192,19 +203,31 @@ def _prepare_audio_for_groq(wav: Path) -> tuple[bytes, str, str]:
             capture_output=True,
             check=True,
         )
-        return mp3_path.read_bytes(), "audio.mp3", "audio/mpeg"
+        mp3_bytes = mp3_path.read_bytes()
     except subprocess.CalledProcessError as e:
         raise JobError(_STAGE, f"ffmpeg compress for Groq failed: {e.stderr.decode()[:200]}") from e
     finally:
         mp3_path.unlink(missing_ok=True)
 
+    if _needs_groq_compression(len(mp3_bytes), max_mb):
+        raise JobError(
+            _STAGE,
+            f"audio too long for the current Groq tier (compressed "
+            f"{len(mp3_bytes) // (1024 * 1024)} MB > {max_mb} MB cap). Enable Groq billing for the "
+            "100 MB dev tier (then set GROQ_MAX_UPLOAD_MB=95), or use a shorter video.",
+        )
+    return mp3_bytes, "audio.mp3", "audio/mpeg"
 
-def call_groq(wav: Path, *, api_key: str, model: str, language: str) -> dict[str, Any]:
+
+def call_groq(
+    wav: Path, *, api_key: str, model: str, language: str, max_upload_mb: int
+) -> dict[str, Any]:
     """POST audio в Groq Whisper (OpenAI-совместимый REST). Возвращает verbose_json.
 
     language: ISO-код (kk, ru, en…) — всегда явный (Groq-путь = у нас всегда есть хинт).
+    max_upload_mb: порог сжатия под лимит тарифа Groq (см. _prepare_audio_for_groq).
     """
-    audio_bytes, filename, mime = _prepare_audio_for_groq(wav)
+    audio_bytes, filename, mime = _prepare_audio_for_groq(wav, max_mb=max_upload_mb)
     try:
         r = httpx.post(
             _GROQ_URL,
@@ -256,7 +279,13 @@ def transcribe(wav: Path, *, language: str | None = None) -> Transcript:
         key = s.groq_api_key
         if key is None:
             raise JobError(_STAGE, "GROQ_API_KEY is not set")
-        resp = call_groq(wav, api_key=key, model=s.groq_model, language=language or "kk")
+        resp = call_groq(
+            wav,
+            api_key=key,
+            model=s.groq_model,
+            language=language or "kk",
+            max_upload_mb=s.groq_max_upload_mb,
+        )
         return groq_to_transcript(resp, default_language=language or "kk")
 
     if provider == "deepgram":

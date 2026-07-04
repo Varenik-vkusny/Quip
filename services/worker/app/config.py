@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     assemblyai_api_key: str | None = None
     groq_api_key: str | None = None
     groq_model: str = "whisper-large-v3-turbo"  # $0.04/hr; upgrade to whisper-large-v3 for +quality
+    # Max raw-audio MB before we re-encode to 32 kbps MP3 for Groq. Groq Whisper 413s oversize
+    # uploads: FREE tier caps at 25 MB, DEV tier at 100 MB. Default 24 keeps a safety margin under
+    # the free cap (a 20-min WAV is ~38 MB → compressed to ~5 MB). Set GROQ_MAX_UPLOAD_MB=95 once
+    # Groq billing (dev tier) is enabled to send larger raw audio without re-encoding.
+    groq_max_upload_mb: int = 24
 
     # llm (этап D, выбор моментов). Провайдер swappable; сейчас Gemini (нет Anthropic-ключа).
     llm_provider: str = "gemini"
