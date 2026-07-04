@@ -102,7 +102,8 @@
     "min": "min",
     "purchased": "Purchased · never expires",
     "upgrade": "Upgrade limits →",
-    "opening": "Opening…"
+    "opening": "Opening…",
+    "resetNote": "Monthly minutes reset on the 1st of each month."
   },
   "status": {
     "queued": "Queued",
