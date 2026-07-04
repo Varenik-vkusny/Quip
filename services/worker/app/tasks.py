@@ -261,6 +261,13 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
 
     # ── FULL PATH: source + frame-accurate reframe (CV) + полный энкод ──
     artifacts.ensure_source(job_id)  # web-контейнер: скачать source.mp4 из R2 (тяжело)
+    # Старые джобы записали ОКРУГЛЁННЫЙ meta.fps (прежний parse_fps: round(fps,3) → 29.970,
+    # не 30000/1001). На длинном видео это сдвигает reframe-сетку на кадр при большом t → −1
+    # fill/fit флеш на РЕ-РЕНДЕРЕ (fix parse_fps ловит только НОВЫЕ импорты). Пере-деривим
+    # ТОЧНЫЙ fps из источника (тот же probe→parse_fps) — reframe И render согласованы на нём.
+    from app.pipeline.stage0_import import _video_stream, parse_fps, probe_video  # noqa: PLC0415
+
+    src_fps = parse_fps(str(_video_stream(probe_video(out / "source.mp4")).get("r_frame_rate", "")))
     ass_rel: str | None = None
     if with_subtitles:
         # Субтитры выбранного пресета (edit.captions.style/highlight) → ASS-прожиг.
@@ -282,7 +289,7 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
         edit.reframe_overrides,
         src_w=meta.width,
         src_h=meta.height,
-        fps=meta.fps,
+        fps=src_fps,  # ТОЧНЫЙ fps из источника (не округлённый stored meta.fps) — см. выше
         clip_id=clip_id,
         out_dir=out,
         cache_dir=out / "analysis",
@@ -307,7 +314,7 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
         ass_name=ass_rel,
         src_w=meta.width,
         src_h=meta.height,
-        fps=meta.fps,
+        fps=src_fps,  # ТОЧНЫЙ fps (согласован с reframe выше) — старый stored meta.fps округлён
         engine=s.reframe_engine,
         out_w=out_w,
         out_h=out_h,
