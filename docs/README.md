@@ -167,6 +167,9 @@
 - **Billing is ON** (`BILLING_ENABLED`). Payments via **Polar** (NOT Lemon Squeezy). Webhook live
   and verified. Pricing = **credit model** (Free $0 / 2 · Starter $15 / 10 · Pro $35 / 30 · PAYG $3);
   source of truth = `services/worker/app/billing.py`, mirrored by `apps/web/lib/plans.ts`.
+  ⏳ **Studio $49 / 42 videos** — код проведён (billing/polar/plans.ts, Polar-продукт `708186c8-…`), но
+  НЕ live: нужна миграция **0016** (`profiles.plan` CHECK += 'studio') + редеплой воркера + push фронта.
+  Детали → `docs/JOURNAL.md` «2026-07-03 (биллинг)».
 - **AI-модели:** транскрипция — Deepgram **`nova-3`**; отбор/хуки/агент — **Gemini**, запинено на
   **`gemini-2.5-flash`** (⚠️ 2026-06-22: `gemini-flash-latest` уехал на `gemini-3.5-flash` = ~×10 цена;
   `config.pin_llm_model` коэрсит любой `*-latest`/`gemini-3*` → `gemini-2.5-flash` с логом, поэтому даже
@@ -185,7 +188,15 @@
   ≥20с). Агент знает контекст всего видео (тул `get_video_map`). **Мин. длина клипа = 20с** (везде).
   «Сделать новый клип» из карты — ОТЛОЖЕНО (нет endpoint create-clip; пока только «подвинуть»). Источник
   правды генерации: `app/editor/video_map.py` + `prompts/video_map.v1.txt`.
-- **Auth:** Supabase (Google OAuth + email). The `(app)` route group is gated.
+- **Auth:** Supabase (Google OAuth + email). The `(app)` route group is gated. **Per-endpoint
+  ownership ENFORCED (2026-07-04, IDOR fix, LIVE):** every by-job/clip worker endpoint runs
+  `_require_owned_job` (401 no-token / 403 wrong-owner; legacy owner=None still bypassed). Media/export
+  (`source/preview.mp4`, `export/*.mp4`) require a **scoped short-lived HMAC media ticket** `?mt=`
+  (`GET /jobs/{id}/media-token`), NOT the session JWT in a URL. The dashboard "recent projects" list is
+  now **server-backed** (`GET /jobs` → `list_jobs_by_user`), NOT the old global `quip:recent-projects`
+  localStorage (that was a cross-account leak — removed). Client purges caches on sign-out/account-switch
+  (`AuthStateSync`). Branch `fix/idor-cross-account-recents` (not yet in `main`); worker image
+  `sha256:dc280454…` (rev `quip-api-00012-4bd`). Detail → `JOURNAL.md` «2026-07-04 (безопасность)».
 - **Reframe-качество: lock-per-shot фокус + coverage-gate + flash-фикс + Undo/Ctrl+Z (2026-06-30,
   LIVE на Modal+Vercel).** Студийный фидбек → 3 реальных бага в auto-reframe исправлены и
   ПРОВЕРЕНЫ на реальном видео (не синтетике): статичный фокус на шот вместо следящего
@@ -373,7 +384,9 @@ reframe invariant) · `BENCHMARKS` (cost/latency) · `SUPABASE_SETUP` (DB/auth w
 (SEO) · `EVAL` (clip-quality gate) · `HANDOFF` (run/setup mechanics) · `EXTERNAL_SERVICES`
 (third-party / swap matrix) · `ADMIN_PANEL_RESEARCH` (monitoring) · `PRODUCT_BRIEF` (product/GTM) ·
 `NEXT_SESSION_BOOTSTRAP` (session-start prompt) · `CLOUDRUN_AND_RENDER_PERF` (🔥 Modal→Cloud Run
-migration + render-perf handoff: service map, how render works now, how to speed it up). Plus repo-root
+migration + render-perf handoff: service map, how render works now, how to speed it up) ·
+`PRODUCT_CAPABILITIES` (📣 external-facing fact sheet: what the product does + live benchmarks +
+content angles — feed this to a chat for marketing/content brainstorming). Plus repo-root
 `CLAUDE.md` (rules) · `DESIGN.md` (design system) · `apps/web/{AGENTS,DEPLOY,PERF}.md`.
 
 🔒 **Frozen paths** (referenced by code comments — never move/rename): `REFRAME_FPS_GRID_INVARIANT.md`,

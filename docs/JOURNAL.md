@@ -4,6 +4,68 @@
 > «как и почему так сделано». Актуальное состояние проекта = docs/README.md. Правила = CLAUDE.md.
 > Новые заметные решения дописывай СЮДА (не в CLAUDE.md).
 
+### 2026-07-04 (безопасность) — кросс-аккаунт утечка видео: закрыта на ОБОИХ слоях (клиент + серверный IDOR) + перф-пасс. ЗАДЕПЛОЕНО, гейт проверен
+**Симптом (репорт фаундера):** «перезашёл на другую почту — вижу видео с прошлого аккаунта». Оказалось **ДВА дефекта**, наложенных друг на друга (root-cause через параллельных read-only агентов + systematic-debugging):
+1. **Клиентская утечка (видимый симптом):** список «recent projects» на дашборде хранился в ЕДИНОМ глобальном ключе localStorage `quip:recent-projects` — БЕЗ привязки к user_id и без чистки при logout/login (не было ни `onAuthStateChange`, ни `removeItem`). Аккаунт B открывал дашборд и видел записи A (включая имена файлов / YouTube-id A).
+2. **Серверный IDOR (несущая дыра):** ~32 by-job/clip-ручки воркера (`get_job`, `source/preview.mp4`, timeline, clip edit/render/agent…) НЕ проверяли владельца — по знанию `job_id` любой качал/правил чужую джобу и видео; `getJob` даже не слал токен. Владельца проверяли только `cancel_job`/`apply_style_all`.
+
+**Фикс (SHIPPED, ветка `fix/idor-cross-account-recents`, коммиты `5fc9ce3` + `b10d5bf`, НЕ в main):**
+- **Воркер:** единый хелпер `_require_owned_job` (401 без токена / 403 чужому / legacy owner=None пропускаем, как раньше в cancel_job) на ВСЕ by-job/clip-ручки. Медиа/export (грузятся как `<video src>`/download — заголовок не навесить) берут **scoped short-lived HMAC media-тикет** `?mt=` (`GET /jobs/{id}/media-token`, ключ деривится из `SUPABASE_SERVICE_ROLE_KEY`) — НЕ сессионный JWT в URL (это флагнул авто-security-review: JWT в URL утекает в логи/Referer). `Referrer-Policy: no-referrer` на медиа. Починен JWT-байпас в `agent/start`. Новая `GET /jobs` (список джоб юзера) + `list_jobs_by_user` (db + cloud_state); в SQLite добавлена колонка `user_id` (её не было вообще). TDD: `services/worker/tests/unit/test_job_ownership.py` (403/scope/expiry), полная сюита 1139 passed.
+- **Фронт:** `Authorization` на КАЖДЫЙ protected-вызов `api.ts`; `getMyJobs()` (graceful `[]` на 404 → окно деплоя не роняет дашборд); `RecentProjects` теперь СЕРВЕРНЫЙ (не localStorage — источник утечки удалён); per-user reviewed-set (`quip:reviewed:<uid>`); `AuthStateSync` + чистая `authReset` чистят кэши при выходе/смене аккаунта; `<video>`/скачивания используют `?mt=`-тикет с **no-mt фолбэком** (видео грузится и против ещё-старого воркера в окне деплоя).
+- **Перф-пасс round 1 (та же ветка):** в проекте не было НИ ОДНОГО `React.memo`. Добавлено: memo на панели редактора (`nowSec` тикает 30–60Hz и перетряхивал всё дерево) + `ClipCard` (поллинг 2.5с ре-рендерил каждую карточку); IntersectionObserver-гейт на `PendingThumb` (до ~30 скрытых видео-декодов); пауза поллинга `useJob` до 10с на скрытой вкладке; `next.config` optimizePackageImports + `next/dynamic` VideoMap/ClipGrid на дашборде. `just check` зелёный (1139 py + 143 web, anti-drift ОК).
+
+**Деплой (frontend-first — безопасный порядок, gate 401-нёт старый фронт):**
+- Фронт: `vercel deploy --prod --scope timurkas-projects` → LIVE на quip.ink (баг-фикс + перф round 1). Проект `quip-app`, аккаунт CLI `varenik-vkusny` имеет доступ.
+- Воркер: Cloud Build образ `sha256:dc280454…` → `gcloud run deploy quip-api` (ревизия `quip-api-00012-4bd`, 100% трафика) + `run jobs update quip-pipeline/quip-render`. Медиа-секрет деривится из уже смонтированного `SUPABASE_SERVICE_ROLE_KEY` — нового env не нужно.
+- **Гейт проверен на проде (без логина):** `GET /jobs`→401, `GET /jobs/{id}`→401, `source.mp4` без `mt`→401, `/presets`→200. `healthz`→404 (было и до фикса — не регрессия).
+- ⚠️ **Ещё НЕ проверен браузером авторизованный happy-path** (видео грузится / recents наполняются / кросс-аккаунт изоляция) — нужна логин-E2E на проде.
+- **Перф round 2 — ОТЛОЖЕН** (2026-07-04 упёрся в session limit + недоступность opus-классификатора): главный оставшийся рычаг — `next/dynamic` табов редактора в `ClipEditorScreen.tsx` (тяжелейший роут); плюс landing below-fold motion, прочие app-роуты.
+
+### 2026-07-03 (биллинг) — новый тариф Studio ($49/42 видео): КОД готов, ждёт миграцию 0016 + деплой
+Добавлен 4-й тариф **Studio $49/мес = 42 видео (2520 мин)** — студии/агентства, ежедневный лонг-форм.
+Polar-продукт «Quip Studio» УЖЕ создан фаундером (id `708186c8-…`, price `df85360f-…`, metadata
+`{plan:studio,monthly_videos:42}`). Провод в коде: (1) `billing.PLANS["studio"]` (crf18/medium,
+priority, watermark=False — как платные); (2) `polar._SUBSCRIPTION_PLANS` += studio → webhook маппит
+подписку по `metadata.plan=studio` БЕЗ env product_id (product_to_plan даёт None → фолбэк `_metadata_plan`,
+покрыто тестом); (3) фронт `lib/plans.ts` (тип PlanId + карточка), `lib/polar.ts` (PRODUCT.studio →
+checkout), `PricingCards` grid 3→4 колонки. Тесты обновлены (test_billing shape/videos, test_polar studio).
+**⚠️ БЛОКЕР до продакшена:** `profiles.plan` имеет CHECK `in ('free','starter','pro')` (migration 0001) →
+`set_user_plan(user,'studio')` от вебхука будет ОТВЕРГНУТ Postgres'ом (оплата пройдёт, план не встанет).
+Нужна **миграция 0016** (фаундер выполняет в Supabase SQL Editor):
+`alter table public.profiles drop constraint if exists profiles_plan_check; alter table public.profiles
+add constraint profiles_plan_check check (plan in ('free','starter','pro','studio'));`. ПОСЛЕ миграции —
+редеплой воркера (backend studio-лимиты не в образе `10b15372`, он собран до этих правок) + push фронта в
+main (Vercel автодеплой карточки). НЕ задеплоено этой сессией (по фиксу рендера).
+
+### 2026-07-03 (hotfix) — free-план не рендерил ВООБЩЕ: ffmpeg John Van Sickle без `drawtext` (вотермарка) → Broken pipe. Фикс: ffmpeg BtbN. ЗАДЕПЛОЕНО + E2E
+**Симптом:** любой free-джоб падал `all N clips failed to render: unexpected: [Errno 32] Broken pipe`
+(на ВСЕХ клипах), платные — ОК. **Корень (доказан):** статичный ffmpeg **John Van Sickle** (Dockerfile)
+собран БЕЗ `libfreetype` → фильтра **`drawtext` в нём НЕТ**. Free-план прожигает вотермарку «Made with
+Quip» через `drawtext` (единственный `drawtext` в пайплайне) → ffmpeg отвергает filtergraph («No such
+filter: drawtext») и мгновенно умирает → первый `pipe.write` в Engine B (`stage5_render.render_frame_by_frame`)
+пишет в мёртвый пайп → `BrokenPipeError`. Платные без вотермарки → без `drawtext` → рендерились (потому
+«works here / breaks there»: платный Cardi B-джоб в 12:51 прошёл на ТОМ ЖЕ образе, что уронил турецкий
+free 640×360 в 13:21 — сравнил digest executions, идентичны → не код/образ, а данные=watermark-путь).
+Диагностика через systematic-debugging: реальный source из R2 рендерился ЛОКАЛЬНО (мой ffmpeg 8.1.1 имеет
+drawtext) → значит бинарник образа; `strings` JVS-бинарника: `drawtext=False`. **Фикс:** Dockerfile ffmpeg
+John Van Sickle → **BtbN GPL 7.1** (тот же мажор 7.x — сохраняет причину выбора «≥7 чинит apt-5/6 crop-краш»
+— + libfreetype/fribidi/harfbuzz=drawtext, libx264, ВСЕ прежние фильтры). **+ BUILD-TIME ГАРД**
+`ffmpeg -filters | grep drawtext` в Dockerfile → сборка ПАДАЕТ, если drawtext исчезнет (этот класс бага
+больше не уедет молча). **+ Харденинг Engine B** (правило №8): `pipe.write` в try/except → на смерти ffmpeg
+поднимаем РЕАЛЬНЫЙ stderr (`JobError ... exit code N: <stderr>`), а не голый Broken pipe. Кадровую сетку НЕ
+трогали (только бинарник + error-path). Задеплоено: образ `10b15372…` на quip-render/quip-pipeline/quip-api.
+**E2E-подтверждение:** прогнал упавший `job_2685163b97af` (free `ed317138`, 640×360) на новом образе —
+`clip_01 render=35.06s`, клип 14.5MB залит в R2 (было 0/fail). Файлы: `services/worker/Dockerfile`,
+`app/pipeline/stage5_render.py`.
+
+### 2026-07-03 (доки) — новый фактшит продукта для брейншторма контента
+Создан `docs/PRODUCT_CAPABILITIES.md` — самодостаточная витрина продукта (что умеет простым языком +
+свежие боевые бенчмарки скорости/денег + углы для контента), чтобы целиком скармливать во внешний чат
+для маркетинга/сценариев роликов. НЕ трогали frozen `BENCHMARKS.md` (он про сравнение моделей, на него
+ссылается код). Собран из billing.py (цены), useCases.ts/landingContent (позиционирование), E2E-замеров
+(86-мин видео → 5,2 мин), README (реальность). Честно помечено «в разработке» (автопостинг/удаление пауз/
+RU-редактор). Добавлен в индекс доков README §Documentation system.
+
 ### 2026-07-03 (perf, день) — превью-хвост убит: done-early + прокси 540p/superfast — ЗАДЕПЛОЕНО, E2E: 5,2 мин
 **Боевой E2E после деплоя (образ `1f83ef7c…`, коммит 249adb3): 86,5-мин видео = `done` за 5,2 мин**
 (вчера in-process 60,5 → фан-аут 31 → утром 11,6 → сейчас 5,2). Разбивка: аплоад 21,8с → spawn+cold
