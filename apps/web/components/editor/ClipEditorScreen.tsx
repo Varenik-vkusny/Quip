@@ -1757,42 +1757,46 @@ export default function ClipEditorScreen({
   // object reference on every ~250ms timeupdate tick when the crop hasn't changed,
   // preventing needless PreviewPlayer re-renders. Writing a ref inside useMemo is safe
   // here because it only stabilises identity and never triggers a re-render.
+  // Pure per-frame crop resolver: playhead source-time `t` → FrameState (mode/cx/cxB) or null.
+  // Extracted from the memo below so PreviewPlayer can call it IMPERATIVELY inside its
+  // requestVideoFrameCallback (per presented frame) and apply the crop on the SAME frame as the
+  // pixels. The React `frame` memo still drives structural render (split mount / initial paint) but
+  // lands ~1-2 frames late through the state→render→commit cycle — that residual lag is exactly the
+  // "cut happens, then the crop re-aims" the founder reported; the imperative path removes it.
+  const frameAt = useCallback(
+    (t: number): FrameState | null => {
+      // Pick the override that actually CONTAINS the playhead — a PER-SHOT override must NOT colour
+      // the whole clip (it only covers its own [source_start, source_end)); a whole-clip override
+      // naturally contains every t. If none contains t, fall through to the AI per-shot plan so the
+      // non-overridden shots preview their real mode. (Mirrors the render, which recolours only the
+      // covered shots.)
+      const ov = pickActiveOverride(edit?.reframe_overrides ?? [], t);
+      if (ov) {
+        const m = ov.mode === "fit" ? "fit" : ov.mode === "split" ? "split" : "fill";
+        return { mode: m, cx: ov.center ?? (m === "split" ? 0.3 : 0.5), cxB: ov.center_b ?? 0.7 };
+      }
+      if (rawRegions) {
+        const clipT = Math.max(0, t - outerStart);
+        const reg =
+          rawRegions.find((r) => clipT >= r.t0 && clipT < r.t1) ?? rawRegions.at(-1) ?? null;
+        if (reg && (reg.mode === "fit" || reg.mode === "split" || reg.mode === "fill")) {
+          return { mode: reg.mode, cx: cxAt(reg.points, clipT), cxB: cxAt(reg.points_b, clipT) };
+        }
+      }
+      return null;
+    },
+    [edit, rawRegions, outerStart],
+  );
+
   const prevFrameRef = useRef<FrameState | null>(null);
   const frame = useMemo<FrameState | null>(() => {
-    const t = nowSec ?? outerStart; // source-time of the playhead
-    // Pick the override that actually CONTAINS the playhead — a PER-SHOT override must NOT colour
-    // the whole clip (it only covers its own [source_start, source_end)); a whole-clip override
-    // naturally contains every t. If none contains t, fall through to the AI per-shot plan so the
-    // non-overridden shots preview their real mode. (Mirrors the render, which recolours only the
-    // covered shots — previously this took ovs.at(-1) unconditionally → a one-shot override made
-    // the whole preview wide while the render was correct.)
-    const ov = pickActiveOverride(edit?.reframe_overrides ?? [], t);
-    let next: FrameState | null = null;
-    if (ov) {
-      const m = ov.mode === "fit" ? "fit" : ov.mode === "split" ? "split" : "fill";
-      next = {
-        mode: m,
-        cx: ov.center ?? (m === "split" ? 0.3 : 0.5),
-        cxB: ov.center_b ?? 0.7,
-      };
-    } else if (rawRegions) {
-      const clipT = Math.max(0, t - outerStart);
-      const reg =
-        rawRegions.find((r) => clipT >= r.t0 && clipT < r.t1) ?? rawRegions.at(-1) ?? null;
-      if (reg && (reg.mode === "fit" || reg.mode === "split" || reg.mode === "fill")) {
-        next = {
-          mode: reg.mode,
-          cx: cxAt(reg.points, clipT),
-          cxB: cxAt(reg.points_b, clipT),
-        };
-      }
-    }
+    const next = frameAt(nowSec ?? outerStart);
     // eslint-disable-next-line react-hooks/refs -- identity-only memo: ref read/write stabilises object reference, never triggers render
     const stable = stableFrame(prevFrameRef.current, next);
     // eslint-disable-next-line react-hooks/refs -- same: writing ref to cache stable identity, no state setter involved
     prevFrameRef.current = stable;
     return stable;
-  }, [edit, outerStart, rawRegions, nowSec]);
+  }, [frameAt, nowSec, outerStart]);
 
   // ── Shots-таб: что рисуем в полосе пошотового кадрирования ──
   // Нормально берём AI-шоты (rawRegions от /reframe). НО /reframe гоняет тяжёлый CV на лету
@@ -2008,6 +2012,7 @@ export default function ClipEditorScreen({
                 outerEnd={outerEnd}
                 videoRef={videoRef}
                 frame={frame}
+                frameAt={frameAt}
                 onTimeChange={setNowSec}
                 aspectClass={aspectClass}
               >

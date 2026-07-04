@@ -29,6 +29,7 @@ export function PreviewPlayer({
   outerEnd,
   videoRef,
   frame,
+  frameAt,
   onTimeChange,
   aspectClass = "aspect-[9/16]",
   children,
@@ -38,6 +39,10 @@ export function PreviewPlayer({
   outerEnd: number;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   frame?: FrameState | null;
+  /** Pure per-frame crop resolver (playhead source-time → FrameState). When provided, the crop is
+   *  applied IMPERATIVELY inside requestVideoFrameCallback — on the same presented frame as the
+   *  pixels — instead of via the lagged React `frame` prop (removes the "cut, then re-aim" lag). */
+  frameAt?: (t: number) => FrameState | null;
   onTimeChange?: (sec: number) => void;
   /** T5: класс соотношения сторон (aspect-[9/16] | aspect-[1/1] | aspect-[4/5] | aspect-[16/9]).
    *  Рендер-бокс HEIGHT-driven и ограничен обе стороны (h-full + max-h-full + max-w-full +
@@ -57,6 +62,32 @@ export function PreviewPlayer({
   const mode = frame?.mode ?? "fill";
   const cx = frame?.cx ?? 0.5;
   const cxB = frame?.cxB ?? 0.7;
+
+  // Latest React-derived frame, in a ref so the rVFC loop reads the current value without
+  // re-subscribing every render (and as the imperative source when no frameAt is passed).
+  const frameRef = useRef<FrameState | null>(frame ?? null);
+  useEffect(() => {
+    frameRef.current = frame ?? null;
+  }, [frame]);
+
+  // Apply the crop to the DOM imperatively (no React state) so it lands on the SAME presented frame
+  // as the pixels. React no longer controls objectFit/objectPosition/opacity on the master (nor the
+  // aux opacity) — this owns them — so a lagged re-render can't repaint the new shot in the old
+  // crop. fill → cover + objectPosition(cx); fit → contain (+ show blur bg); split → hide master
+  // (the two SplitHalf windows, still mounted via the `frame` prop, take over).
+  const applyCrop = useCallback(
+    (f: FrameState | null) => {
+      const v = videoRef.current;
+      if (!v) return;
+      const m = f?.mode ?? "fill";
+      v.style.objectFit = m === "fit" ? "contain" : "cover";
+      v.style.objectPosition = m === "fill" ? `${(f?.cx ?? 0.5) * 100}% 50%` : "";
+      v.style.opacity = m === "split" ? "0" : "";
+      const aux = auxARef.current;
+      if (aux) aux.style.opacity = m === "fit" ? "1" : "0";
+    },
+    [videoRef],
+  );
 
   // Превью переключает кроп МГНОВЕННО на склейке: cx внутри лок-шота — КОНСТАНТА, на границе шота —
   // жёсткий скачок (ровно как режет рендер). НЕТ CSS-анимации object-position: раньше висел
@@ -183,10 +214,16 @@ export function PreviewPlayer({
       setClipNow(Math.max(0, Math.min(clipDur, t - outerStart)));
       onTimeChange?.(t);
     };
+    // Frame-accurate crop: resolve + apply the crop for THIS presented frame synchronously, before
+    // the browser paints it. Routing the crop through React state (push→parent nowSec→frame prop→
+    // re-render→paint) lands it ~1-2 frames late = "cut happens, then the crop re-aims"; writing the
+    // DOM here (applyCrop) lands it on the exact frame. push() still updates the scrubber/parent time.
+    const applyAt = (t: number) => applyCrop(frameAt ? frameAt(t) : frameRef.current);
     const rvfc = video.requestVideoFrameCallback;
     if (typeof rvfc === "function") {
       const onFrame = (_now: number, meta: { mediaTime: number }) => {
         if (stopped) return;
+        applyAt(meta.mediaTime);
         push(meta.mediaTime);
         vfcId = rvfc.call(video, onFrame);
       };
@@ -194,7 +231,10 @@ export function PreviewPlayer({
     } else {
       const tick = () => {
         if (stopped) return;
-        if (!video.paused) push(video.currentTime);
+        if (!video.paused) {
+          applyAt(video.currentTime);
+          push(video.currentTime);
+        }
         rafId = requestAnimationFrame(tick);
       };
       rafId = requestAnimationFrame(tick);
@@ -205,7 +245,17 @@ export function PreviewPlayer({
       const cancel = video.cancelVideoFrameCallback;
       if (vfcId && typeof cancel === "function") cancel.call(video, vfcId);
     };
-  }, [videoRef, clipDur, outerStart, onTimeChange]);
+  }, [videoRef, clipDur, outerStart, onTimeChange, applyCrop, frameAt]);
+
+  // Initial paint + paused/scrub resting states: apply the crop from the settled React `frame`.
+  // During playback the rVFC loop above owns the crop (frame-accurate), so skip then — otherwise a
+  // lagged `frame` would overwrite the loop's correct value. rVFC also fires on seek-while-paused,
+  // so scrubbing stays covered; this effect handles the first paint and the resting state.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !v.paused) return;
+    applyCrop(frame ?? null);
+  }, [frame, applyCrop, videoRef]);
 
   // ── fullscreen на контейнере ──
   useEffect(() => {
@@ -287,14 +337,16 @@ export function PreviewPlayer({
             muted
             playsInline
             preload="auto"
-            className={`absolute inset-0 size-full scale-110 object-cover blur-xl brightness-50 ${
-              mode === "fit" ? "" : "opacity-0"
-            }`}
+            className="absolute inset-0 size-full scale-110 object-cover blur-xl brightness-50 opacity-0"
           />
         )}
 
         {/* мастер-видео: время+звук. fill=кроп с реальным центром; fit=весь кадр;
             split=прячем картинку (звук/часы живут), показываем две половины ниже */}
+        {/* Crop (object-fit / object-position / split-hide) is applied IMPERATIVELY per presented
+            frame by applyCrop (see the rVFC effect) — NOT bound here — so a lagged React re-render
+            can't repaint the new shot in the old crop. Base object-cover (fill); applyCrop switches
+            to contain (fit) / hides (split). */}
         <video
           ref={videoRef}
           key={src}
@@ -302,10 +354,7 @@ export function PreviewPlayer({
           playsInline
           preload="auto"
           onClick={togglePlay}
-          className={`absolute inset-0 size-full cursor-pointer ${
-            mode === "fit" ? "object-contain" : "object-cover"
-          } ${mode === "split" ? "opacity-0" : ""}`}
-          style={mode === "fill" ? { objectPosition: `${cx * 100}% 50%` } : undefined}
+          className="absolute inset-0 size-full cursor-pointer object-cover"
         />
 
         {/* split: два синхронных окна (верх/низ), каждое кропится вокруг своего центра */}
