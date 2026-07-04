@@ -64,11 +64,18 @@ class TestPreviewProxyDefaults:
 
 
 class TestParseFps:
-    def test_ntsc_30(self) -> None:
-        assert parse_fps("30000/1001") == 29.97
+    def test_ntsc_30_exact_not_rounded(self) -> None:
+        # EXACT fps, NOT round(fps, 3): 29.970 loses 30000/1001 precision; at large timestamps
+        # round(t*29.970) diverges from round(t*29.97002997) by a frame → detect_scene_cuts
+        # -r fps resamples + grid shifts → -1 fill→fit reframe flash (clip_09 @ t≈5114s).
+        assert parse_fps("30000/1001") == 30000 / 1001
 
-    def test_ntsc_24(self) -> None:
-        assert parse_fps("24000/1001") == 23.976
+    def test_ntsc_24_exact_not_rounded(self) -> None:
+        assert parse_fps("24000/1001") == 24000 / 1001
+
+    def test_not_rounded_to_3dp(self) -> None:
+        # Regression guard: the old round(fps, 3) is exactly what caused the -1 reframe flash.
+        assert parse_fps("30000/1001") != 29.97
 
     def test_integer_ratio(self) -> None:
         assert parse_fps("30/1") == 30.0
@@ -119,7 +126,7 @@ class TestBuildSourceMeta:
             probe, job_id="job_1", source=SourceKind.youtube, url="http://x", title="Test"
         )
         assert (m.width, m.height) == (1920, 1080)
-        assert m.fps == 29.97
+        assert m.fps == 30000 / 1001  # exact, not rounded — see TestParseFps
         assert m.duration == 754.32
         assert m.job_id == "job_1"
         assert m.source is SourceKind.youtube

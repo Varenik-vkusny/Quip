@@ -57,7 +57,7 @@ def test_prepare_upload_audio_extracts_from_raw_and_defers_mp4(monkeypatch, tmp_
     # meta написан, probe'нут из СЫРОГО исходника (длина/размеры/fps → совпадут с будущим mp4).
     assert (out / "meta.json").exists()
     assert meta.source is SourceKind.upload
-    assert (meta.width, meta.height, meta.fps) == (1920, 1080, 29.97)
+    assert (meta.width, meta.height, meta.fps) == (1920, 1080, 30000 / 1001)
     assert meta.duration == pytest.approx(498.26)
 
 
