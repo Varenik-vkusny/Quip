@@ -103,7 +103,11 @@
   Раньше был курс «только английский»; теперь основатель ОДОБРИЛ двуязычие и оно ОТГРУЖЕНО для основного
   фанела: **лендинг `/` → auth → дашборд → загрузка** двуязычны. Стек: **`next-intl` в COOKIE-режиме**
   (БЕЗ `[locale]`-сегмента и БЕЗ `proxy.ts`): локаль читается из cookie `NEXT_LOCALE` в `i18n/request.ts`
-  (`getRequestConfig`); провайдер монтируется один раз в `app/layout.tsx` (+ динамический `<html lang>`).
+  (`getRequestConfig`). **(2026-07-04 перф:** корневой `app/layout.tsx` cookie БОЛЬШЕ НЕ читает — иначе весь
+  сайт становится динамическим и marketing/SEO-страницы теряют edge-статику. `NextIntlClientProvider`
+  смонтирован во ВЛОЖЕННЫХ `(app)/(auth)/(home)` layout'ах, сообщения замкнуты по группам; `<html lang>`
+  теперь статически `"en"`. Новые user-facing строки на marketing-страницах, что должны стать
+  cookie-двуязычными, тянут её в динамику — держи их в клиентском островке или в `landingContent.ts`.)
   Каталоги auth/app — `apps/web/messages/{en,ru}.json` (через `t()` / `useTranslations` / `getTranslations`).
   Копия лендинга — двуязычный `Record<Locale,…>` в `apps/web/lib/landingContent.ts` (как `lib/useCases.ts`),
   резолв через `getLandingContent(locale)`. Тумблер `EN / RU` — `components/i18n/LocaleSwitcher.tsx` (пишет
