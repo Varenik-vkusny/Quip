@@ -4,9 +4,9 @@ import { buttonVariants } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { Reveal } from "@/components/ui/Reveal";
 import { Section } from "@/components/ui/Section";
+import { UseCaseCta, UseCaseNoCard } from "@/components/marketing/UseCaseAuthCta";
 import { buildUseCaseJsonLd } from "@/lib/jsonld";
 import { siteConfig } from "@/lib/site";
-import { getOptionalUser } from "@/lib/supabase/server";
 import {
   getUseCase,
   getUseCaseContent,
@@ -109,7 +109,7 @@ export async function buildUseCaseMetadata(
 
 /** Shared page body for a use-case in the given locale. Caller (route) resolves
  *  params + handles notFound; this renders the resolved use-case. */
-export async function UseCasePageBody({
+export function UseCasePageBody({
   slug,
   locale,
 }: {
@@ -123,9 +123,9 @@ export async function UseCasePageBody({
   const content = getUseCaseContent(uc, locale);
   const t = CHROME[locale];
 
-  const authed = Boolean(await getOptionalUser());
-  const ctaHref = authed ? "/dashboard" : "/signup";
-  const ctaLabel = authed ? t.ctaOpen : t.ctaTry;
+  // Auth-dependent CTA (label/href) + the "no card" line are resolved on the CLIENT
+  // (<UseCaseCta> / <UseCaseNoCard>) so this SEO page stays statically generated —
+  // reading the session cookie here would force per-request dynamic rendering.
   // Sibling pages for internal linking (crawl depth + link equity). Links stay
   // within the current locale so the crawl graph doesn't cross languages.
   const related = USE_CASES.filter((u) => u.slug !== uc.slug).slice(0, 3);
@@ -153,19 +153,12 @@ export async function UseCasePageBody({
             </h1>
             <p className="mt-5 max-w-2xl text-lead text-muted">{content.intro}</p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link href={ctaHref} className={buttonVariants({ variant: "primary", size: "lg" })}>
-                {ctaLabel}
-                <span aria-hidden>→</span>
-              </Link>
+              <UseCaseCta dashLabel={t.ctaOpen} tryLabel={t.ctaTry} />
               <Link href={pricingHref} className={buttonVariants({ variant: "secondary", size: "lg" })}>
                 {t.pricing}
               </Link>
             </div>
-            {!authed && (
-              <p className="mt-6 text-sm text-faint">
-                <span className="font-medium text-muted">{t.noCardEmphasis}</span> {t.noCard}
-              </p>
-            )}
+            <UseCaseNoCard emphasis={t.noCardEmphasis} rest={t.noCard} />
           </Reveal>
         </Container>
       </Section>
@@ -244,10 +237,7 @@ export async function UseCasePageBody({
           <Reveal className="mx-auto max-w-2xl text-center">
             <h2 className="font-display text-h2 text-ink sm:text-display-lg">{content.ctaTitle}</h2>
             <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-              <Link href={ctaHref} className={buttonVariants({ variant: "primary", size: "lg" })}>
-                {ctaLabel}
-                <span aria-hidden>→</span>
-              </Link>
+              <UseCaseCta dashLabel={t.ctaOpen} tryLabel={t.ctaTry} />
             </div>
           </Reveal>
 

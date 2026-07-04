@@ -47,7 +47,7 @@ export async function Demo() {
             <div className="relative aspect-[1600/822] w-full overflow-hidden rounded-[12px] border border-line bg-bg">
               <InlineClip
                 src="/media/demo.mp4"
-                poster="/media/demo-poster.jpg"
+                poster="/media/demo-poster-1400.jpg"
                 label="A real Quip run: upload, find the moments, cut vertical clips"
                 className="size-full object-cover"
               />

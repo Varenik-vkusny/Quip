@@ -1,9 +1,6 @@
-import Link from "next/link";
-import { MobileMenu } from "@/components/marketing/MobileMenu";
-import { buttonVariants } from "@/components/ui/Button";
+import { MarketingNavAuth } from "@/components/marketing/MarketingNavAuth";
 import { Container } from "@/components/ui/Container";
 import { Logo } from "@/components/ui/Logo";
-import { getOptionalUser } from "@/lib/supabase/server";
 
 const links = [
   { href: "#how-it-works", label: "How it works" },
@@ -12,9 +9,11 @@ const links = [
   { href: "#faq", label: "FAQ" },
 ];
 
-/** Sticky marketing nav. RSC; auth-aware CTAs (logged-in → Dashboard, not Sign in). */
-export async function MarketingNav() {
-  const authed = Boolean(await getOptionalUser());
+/** Sticky marketing nav. Static server shell (Logo + links); the auth-aware CTAs live
+ *  in the <MarketingNavAuth> client island so this shared layout nav does NOT read the
+ *  session cookie server-side — that read previously forced every marketing/SEO page to
+ *  render dynamically instead of being statically generated / edge-cached. */
+export function MarketingNav() {
   return (
     <header className="sticky top-0 z-50 border-b border-line/70 bg-bg/75 backdrop-blur-xl">
       <Container className="flex h-16 items-center justify-between gap-6">
@@ -32,27 +31,7 @@ export async function MarketingNav() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-2">
-          {authed ? (
-            <Link href="/dashboard" className={buttonVariants({ variant: "primary", size: "sm" })}>
-              Dashboard
-            </Link>
-          ) : (
-            <>
-              <Link
-                href="/login"
-                className="hidden rounded-md px-3 py-2 text-sm text-muted transition-colors hover:text-ink sm:inline-flex"
-              >
-                Sign in
-              </Link>
-              <Link href="/signup" className={buttonVariants({ variant: "primary", size: "sm" })}>
-                Try it free
-              </Link>
-            </>
-          )}
-
-          <MobileMenu links={links} authed={authed} />
-        </div>
+        <MarketingNavAuth links={links} />
       </Container>
     </header>
   );

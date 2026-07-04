@@ -2,11 +2,10 @@ import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, Onest } from "next/font/google";
-import { NextIntlClientProvider } from "next-intl";
-import { getLocale, getMessages } from "next-intl/server";
 import { YandexMetrika } from "@/components/analytics/YandexMetrika";
 import { FeedbackWidgetLoader } from "@/components/app/FeedbackWidgetLoader";
 import { NavProgress } from "@/components/ui/NavProgress";
+import { DEFAULT_LOCALE } from "@/i18n/locale";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
 
@@ -69,17 +68,23 @@ export const metadata: Metadata = {
   // Favicon / app icon come from app/icon.png + app/apple-icon.png (Next file convention).
 };
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  // Locale comes from the NEXT_LOCALE cookie (next-intl cookie mode). Crawlers send no
-  // cookie → DEFAULT_LOCALE ("en"), so the SEO marketing pages stay English by default.
-  const locale = await getLocale();
-  const messages = await getMessages();
-
+  // The root layout must NOT read the NEXT_LOCALE cookie: doing so (via getLocale()/
+  // getMessages()) is a Dynamic API in the ROOT, which opts EVERY route out of static
+  // generation — including the hardcoded-English SEO pages (/pricing, /terms, /privacy,
+  // /use-case/*) that have zero t() calls. So the <NextIntlClientProvider> lives in the
+  // NESTED layouts that actually need client translations ((app), (auth), (home)); the
+  // (marketing) group sits under no cookie-reading provider and stays statically rendered.
+  //
+  // Tradeoff: <html lang> is therefore the static default ("en") for all routes. RU
+  // visitors on the bilingual home/app see lang="en" in the document element even though
+  // the copy is Russian. Acceptable: making it dynamic would require the root to read the
+  // cookie again, re-breaking static generation for the whole marketing/SEO surface.
   return (
     <html
-      lang={locale}
+      lang={DEFAULT_LOCALE}
       className={`${onest.variable} ${plexMono.variable} h-full`}
       suppressHydrationWarning
     >
@@ -89,12 +94,11 @@ export default async function RootLayout({
         <script
           dangerouslySetInnerHTML={{ __html: "document.documentElement.classList.add('js')" }}
         />
-        {/* Single i18n provider for the whole client subtree (auth + app shell use t()). */}
-        <NextIntlClientProvider locale={locale} messages={messages}>
-          <NavProgress />
-          {children}
-          <FeedbackWidgetLoader />
-        </NextIntlClientProvider>
+        {/* NavProgress + FeedbackWidgetLoader use no next-intl APIs, so they render fine
+            outside any provider (verified: neither imports next-intl). */}
+        <NavProgress />
+        {children}
+        <FeedbackWidgetLoader />
         {/* Vercel Web Analytics — НИЧЕГО не рисует, только шлёт pageview/событие в Vercel
             (смотреть на дашборде проекта, вкладка Analytics). На Vercel надо один раз включить
             Analytics в настройках проекта; в локальном dev — no-op. */}

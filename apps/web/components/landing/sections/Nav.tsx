@@ -13,8 +13,9 @@ export function Logo() {
   return (
     <a href="#top" className="flex items-center gap-2.5" aria-label="Quip home">
       {/* Brand mark (the Quip "Q"). Plain <img> for a tiny static logo, like ClipCard. */}
+      {/* Pre-shrunk 88x88 (3x DPR headroom for a 28px mark) — /icon.png stays untouched, it's also the favicon. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/icon.png" alt="Quip" width={28} height={28} className="size-7 object-contain" />
+      <img src="/logo-88.png" alt="Quip" width={28} height={28} className="size-7 object-contain" />
       <span className="text-[19px] font-extrabold tracking-[-0.02em] text-ink">Quip</span>
     </a>
   );

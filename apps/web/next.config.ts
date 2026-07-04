@@ -10,6 +10,30 @@ const nextConfig: NextConfig = {
     // already default-optimized, so it doesn't need to be listed.)
     optimizePackageImports: ["@phosphor-icons/react"],
   },
+  async headers() {
+    // Long-lived Cache-Control for the multi-megabyte landing demo videos/posters
+    // served straight from public/ (public/demo, public/media, public/clips,
+    // public/mock). These filenames are NOT content-hashed (unlike Next's
+    // build-hashed static assets, which already get an immutable 1y header the
+    // platform can't override) — so we deliberately do NOT use `immutable` or a
+    // 1-year max-age here. If one of these files is ever swapped in place without
+    // renaming, an immutable/very-long cache would pin returning visitors to the
+    // stale bytes with no way to bust it short of a filename change. 7 days +
+    // stale-while-revalidate gives most of the repeat-visit/back-forward win while
+    // bounding how long a mistaken swap can stay wrong for someone who already
+    // cached it.
+    return [
+      {
+        source: "/:dir(demo|media|clips|mock)/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=604800, stale-while-revalidate=86400",
+          },
+        ],
+      },
+    ];
+  },
 };
 
 // next-intl cookie mode: wires i18n/request.ts (reads the NEXT_LOCALE cookie) into the

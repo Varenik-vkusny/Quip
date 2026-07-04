@@ -21,6 +21,7 @@ import { isSupabaseConfigured } from "@/lib/supabase/config";
 const STAGE_KEYS = ["queued", "downloading", "transcribing", "selecting", "rendering"] as const;
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 const POLL_MS = 2500; // cap cadence at ~2.5s like useJob
+const HIDDEN_POLL_MS = 10_000; // backgrounded-tab cadence — same idea as useJob's HIDDEN_POLL_MS
 
 /** A single ledger row: a server job or a transient optimistic entry (status undefined). */
 type RecentRow = {
@@ -188,11 +189,30 @@ export function RecentProjects() {
 
   // Poll the server list while ANY row is non-terminal so "Processing… → Ready" updates live
   // even if a job finished while the user was away. Stops once every row is terminal.
+  //
+  // Backgrounded tabs poll at HIDDEN_POLL_MS instead of POLL_MS — no point hammering the API
+  // every 2.5s for a tab the user isn't looking at. The instant the tab becomes visible again
+  // we fire an immediate refetch and resume the full cadence. Mirrors useJob's visibility pattern.
   const hasPending = rows.some((r) => !isTerminal(r.status));
   useEffect(() => {
     if (!hasPending) return;
-    const id = setInterval(triggerRefetch, POLL_MS);
-    return () => clearInterval(id);
+    let id = setInterval(triggerRefetch, document.hidden ? HIDDEN_POLL_MS : POLL_MS);
+
+    const onVisibilityChange = () => {
+      clearInterval(id);
+      if (document.hidden) {
+        id = setInterval(triggerRefetch, HIDDEN_POLL_MS);
+      } else {
+        triggerRefetch(); // catch up immediately on return to foreground
+        id = setInterval(triggerRefetch, POLL_MS);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [hasPending, triggerRefetch]);
 
   return (

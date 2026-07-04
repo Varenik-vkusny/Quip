@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { NextIntlClientProvider } from "next-intl";
+import { getLocale, getMessages } from "next-intl/server";
 
 /*
   The marketing home is self-contained: its Nav + Footer live in the page itself
@@ -23,6 +25,18 @@ export const metadata: Metadata = {
   twitter: { title: TITLE, description: DESCRIPTION },
 };
 
-export default function HomeLayout({ children }: { children: React.ReactNode }) {
-  return <div className="grain">{children}</div>;
+export default async function HomeLayout({ children }: { children: React.ReactNode }) {
+  // The root layout no longer mounts a provider (that would force every route dynamic).
+  // The landing is server-rendered bilingual (sections read the NEXT_LOCALE cookie via
+  // getLocale() → getLandingContent(locale)), so this group is inherently cookie-dynamic
+  // regardless. The only CLIENT translation consumer here is ConfidenceGaugeMotion
+  // (useTranslations("confidence")); Nav/Faq/LocaleSwitcher only need useLocale (carried by
+  // the provider's `locale` prop). So we ship just the "confidence" namespace to the client.
+  const locale = await getLocale();
+  const messages = await getMessages();
+  return (
+    <NextIntlClientProvider locale={locale} messages={{ confidence: messages.confidence }}>
+      <div className="grain">{children}</div>
+    </NextIntlClientProvider>
+  );
 }

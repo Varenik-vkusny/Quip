@@ -28,6 +28,8 @@ export function InlineClip({
     const io = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
+          // Warm the metadata fetch (if not already) right before we need to play.
+          if (v.preload !== "metadata" && v.preload !== "auto") v.preload = "metadata";
           v.play().catch(() => {});
         } else {
           v.pause();
@@ -47,7 +49,7 @@ export function InlineClip({
       muted
       loop
       playsInline
-      preload="metadata"
+      preload="none"
       aria-label={label}
     >
       <source src={src} type="video/mp4" />
