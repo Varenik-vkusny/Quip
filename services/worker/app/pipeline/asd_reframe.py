@@ -14,6 +14,7 @@ import glob
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -66,12 +67,16 @@ def score_tracks_in_segment(
     fps: float,
     *,
     crop_scale: float = 0.55,
+    cuts: Sequence[int] = (),
 ) -> list[SpeakerTrack]:
     """Сегмент → дорожки лиц с ASD speak-score (вход plan_regions). [] если лиц нет.
 
     Кадры@fps + аудио → MediaPipe-детект → build_tracks → crop+ASD на дорожку → SpeakerTrack
     (f0/f1 в КЛИП-кадрах @fps, cx per-frame, width средняя доля, speak средний скор).
     crop_scale тюним под MediaPipe-кропы (модель обучена на S3FD).
+
+    cuts — кадры склеек в сетке ЭТОГО fps (== face_fps): дорожки не тянутся через шот-границу,
+    иначе bbox интерполируется старое→новое положение и кроп «доводится» после склейки.
     """
     import cv2  # noqa: PLC0415
     import mediapipe as mp  # noqa: PLC0415
@@ -168,7 +173,7 @@ def score_tracks_in_segment(
                     )
                 frame_faces.append(ff)
 
-        tracks = build_tracks(frame_faces)
+        tracks = build_tracks(frame_faces, cuts=cuts)
         _phase_add("detect", time.monotonic() - t0)
         if not tracks:
             return []

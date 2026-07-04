@@ -8,6 +8,7 @@ build_tracks: per-frame face detections → IOU-треки с интерполя
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,17 @@ def _iou(a: list[float], b: list[float]) -> float:
     return inter / (area_a + area_b - inter + 1e-9)
 
 
+def _spans_cut(f_prev: int, f_cur: int, cuts: Sequence[int]) -> bool:
+    """True, если между кадром f_prev (не включая) и f_cur (включая) лежит склейка. PURE.
+
+    Кадр склейки c — граница шота: кадры < c принадлежат старому шоту, >= c — новому. Дорожку
+    нельзя тянуть/интерполировать через c: иначе bbox на кадрах вокруг стыка линейно
+    интерполируется старое→новое положение, и cx нового шота стартует «между» лицами = кроп
+    открывается не на лице и «доводится» за несколько кадров (флеш на стыке).
+    """
+    return any(f_prev < c <= f_cur for c in cuts)
+
+
 def build_tracks(
     frame_faces: list[list[dict[str, Any]]],
     *,
@@ -43,12 +55,16 @@ def build_tracks(
     min_track: int = 10,
     min_face: int = 1,
     iou_thres: float = 0.5,
+    cuts: Sequence[int] = (),
 ) -> list[dict[str, Any]]:
     """Per-frame детекты лиц → дорожки (жадный IOU-трекинг + интерполяция дыр bbox).
 
     frame_faces: по кадрам, каждый — список {"frame": int, "bbox": [x1,y1,x2,y2]}.
     Возвращает дорожки {"frame": np.ndarray(int), "bbox": np.ndarray(N,4)}. Логика 1:1 как в
     LR-ASD (track_shot), но scipy.interp1d заменён numpy.interp (без scipy в базовом гейте).
+
+    cuts (кадры склеек в ЭТОЙ же сетке, что frame_faces): дорожка НЕ пересекает склейку —
+    трекинг сбрасывается на границе шота (см. _spans_cut). Пусто → прежнее cut-слепое поведение.
     """
     scene = [list(ff) for ff in frame_faces]  # мутируем копию
     tracks: list[dict[str, Any]] = []
@@ -59,7 +75,9 @@ def build_tracks(
                 if not track:
                     track.append(face)
                     frame.remove(face)
-                elif face["frame"] - track[-1]["frame"] <= num_failed_det:
+                elif face["frame"] - track[-1]["frame"] <= num_failed_det and not _spans_cut(
+                    track[-1]["frame"], face["frame"], cuts
+                ):
                     if _iou(face["bbox"], track[-1]["bbox"]) > iou_thres:
                         track.append(face)
                         frame.remove(face)

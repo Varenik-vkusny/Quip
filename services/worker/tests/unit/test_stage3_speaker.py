@@ -53,3 +53,42 @@ class TestBuildTracks:
         tracks = build_tracks(frames, min_track=10, num_failed_det=10)
         assert len(tracks) == 1
         assert len(tracks[0]["frame"]) == 15  # дыры заполнены интерполяцией
+
+    def _cross_cut_frames(self) -> list[list[dict]]:
+        # Лицо у центра ДО склейки (P1, cx=150), пропадает на несколько кадров НА склейке,
+        # затем снова у ДРУГОГО места ПОСЛЕ склейки (P2, cx=180). P1/P2 достаточно близко
+        # (IOU≈0.54 > 0.5, разрыв 24-19=5 < num_failed_det) — cut-слепой трекер СЛИЛ бы их
+        # в одну дорожку и проинтерполировал bbox через склейку.
+        frames: list[list[dict]] = []
+        for i in range(44):
+            if i <= 19:
+                frames.append([_face(i, 100, 0, 200, 100)])  # P1
+            elif i <= 23:
+                frames.append([])  # разрыв детекта ВОКРУГ склейки
+            else:
+                frames.append([_face(i, 130, 0, 230, 100)])  # P2
+        return frames
+
+    def test_no_cuts_arg_preserves_legacy_fusion(self) -> None:
+        # БЕЗ cuts поведение прежнее: близкие лица через разрыв сливаются в одну дорожку,
+        # bbox интерполируется через границу шота (это и есть источник доводки-флеша).
+        tracks = build_tracks(self._cross_cut_frames(), min_track=10)
+        assert len(tracks) == 1
+        fr = tracks[0]["frame"]
+        assert fr.min() < 20 <= fr.max()  # дорожка ПЕРЕСЕКАЕТ склейку (легаси-баг)
+
+    def test_cut_splits_track_no_cross_cut_interpolation(self) -> None:
+        # С передачей cuts дорожка НЕ должна пересекать склейку → нет интерполяции cx
+        # старое↔новое положение → новый шот открывается РОВНО на новом лице (снап, не доводка).
+        cut = 20
+        tracks = build_tracks(self._cross_cut_frames(), min_track=10, cuts=[cut])
+        assert tracks, "ожидались дорожки"
+        for tr in tracks:
+            fr = tr["frame"]
+            assert bool((fr < cut).all()) or bool((fr >= cut).all()), (
+                f"дорожка пересекает склейку {cut}: кадры {int(fr.min())}..{int(fr.max())}"
+            )
+        # у пост-склейкового шота первый bbox = реальный P2 (cx=180), без интерполяции к P1
+        post = min((t for t in tracks if t["frame"][0] >= cut), key=lambda t: int(t["frame"][0]))
+        first_cx = (post["bbox"][0][0] + post["bbox"][0][2]) / 2
+        assert abs(first_cx - 180) < 1e-6, f"новый шот стартует не на P2: cx={first_cx}"

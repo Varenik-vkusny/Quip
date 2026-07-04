@@ -1035,8 +1035,19 @@ def reframe_segment(
     )
     shots = build_shots_frames(cuts, total_frames)
 
+    # Склейки (нативные кадры) → сетка face_fps: трекинг лиц НЕ тянется через шот-границу.
+    # Иначе bbox лица линейно интерполируется старое→новое положение вокруг стыка → cx нового
+    # шота стартует «между» лицами → кроп открывается не на лице и «доводится» за кадры (флеш).
+    cuts_face = [round(c / fps * face_fps) for c in cuts]
     tracks_native = score_tracks_in_segment(
-        video, src_w, src_h, aligned_start, end, face_fps, crop_scale=speaker_crop_scale
+        video,
+        src_w,
+        src_h,
+        aligned_start,
+        end,
+        face_fps,
+        crop_scale=speaker_crop_scale,
+        cuts=cuts_face,
     )
     face_found = bool(tracks_native)
     tracks = [resample_track(t, face_fps, fps) for t in tracks_native]
