@@ -5,7 +5,7 @@ import { IBM_Plex_Mono, Onest } from "next/font/google";
 import { NextIntlClientProvider } from "next-intl";
 import { getLocale, getMessages } from "next-intl/server";
 import { YandexMetrika } from "@/components/analytics/YandexMetrika";
-import { FeedbackWidget } from "@/components/app/FeedbackWidget";
+import { FeedbackWidgetLoader } from "@/components/app/FeedbackWidgetLoader";
 import { NavProgress } from "@/components/ui/NavProgress";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
@@ -93,7 +93,7 @@ export default async function RootLayout({
         <NextIntlClientProvider locale={locale} messages={messages}>
           <NavProgress />
           {children}
-          <FeedbackWidget />
+          <FeedbackWidgetLoader />
         </NextIntlClientProvider>
         {/* Vercel Web Analytics — НИЧЕГО не рисует, только шлёт pageview/событие в Vercel
             (смотреть на дашборде проекта, вкладка Analytics). На Vercel надо один раз включить

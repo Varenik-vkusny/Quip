@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
+import dynamic from "next/dynamic";
 import { Plus } from "@phosphor-icons/react/dist/ssr";
 import { useLocale } from "next-intl";
 import { resolveLocale } from "@/i18n/locale";
@@ -9,10 +9,15 @@ import { getLandingContent } from "@/lib/landingContent";
 import { Container, Section } from "../components/primitives";
 import { Reveal } from "../components/Reveal";
 
+// `motion/react` (AnimatePresence + the open/close height animation) lives in
+// FaqAnswer.tsx and loads as its own code-split chunk — see FaqAnswer.tsx for why
+// `ssr: false` is deliberately NOT used (item 0's answer is open by default and must
+// still SSR).
+const FaqAnswer = dynamic(() => import("./FaqAnswer").then((mod) => mod.FaqAnswer));
+
 export function Faq() {
   const faq = getLandingContent(resolveLocale(useLocale())).faq;
   const [open, setOpen] = useState<number | null>(0);
-  const reduce = useReducedMotion();
 
   return (
     <Section id="faq">
@@ -43,19 +48,7 @@ export function Faq() {
                         }`}
                       />
                     </button>
-                    <AnimatePresence initial={false}>
-                      {isOpen && (
-                        <motion.div
-                          initial={reduce ? false : { height: 0, opacity: 0 }}
-                          animate={{ height: "auto", opacity: 1 }}
-                          exit={reduce ? undefined : { height: 0, opacity: 0 }}
-                          transition={{ duration: 0.3, ease: [0.2, 0.7, 0.2, 1] }}
-                          className="overflow-hidden"
-                        >
-                          <p className="max-w-[64ch] pb-6 pr-10 text-[15px] leading-relaxed text-muted">{item.a}</p>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
+                    <FaqAnswer isOpen={isOpen} answer={item.a} />
                   </div>
                 );
               })}

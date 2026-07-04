@@ -1,32 +1,18 @@
 "use client";
 
-import { motion, useReducedMotion } from "motion/react";
-import type { ReactNode } from "react";
+import dynamic from "next/dynamic";
 
-const EASE = [0.23, 1, 0.32, 1] as const; // strong ease-out (emil)
+/*
+  Public entry point — kept at this path/name so every below-the-fold section that
+  does `import { Reveal } from "../components/Reveal"` needs no changes.
 
-/* Single fade-up on scroll-in. Motivated: draws the eye to each block in reading order. */
-export function Reveal({
-  children,
-  className = "",
-  delay = 0,
-  y = 18,
-}: {
-  children: ReactNode;
-  className?: string;
-  delay?: number;
-  y?: number;
-}) {
-  const reduce = useReducedMotion();
-  return (
-    <motion.div
-      className={className}
-      initial={reduce ? false : { opacity: 0, y }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, amount: 0.25 }}
-      transition={{ duration: 0.6, delay, ease: EASE }}
-    >
-      {children}
-    </motion.div>
-  );
-}
+  The actual fade-up implementation (and the `motion/react` runtime it needs) lives in
+  RevealMotion.tsx and is pulled in lazily via next/dynamic, so that runtime ships as
+  its own code-split chunk instead of bloating the bundle every section using Reveal
+  has to load up front. `ssr: false` is deliberately NOT used: `children` here is real
+  page content (headings, copy, cards) that must still come through in the server-
+  rendered HTML for SEO/no-JS — only the animation's JS chunk is deferred, not the
+  markup. (Next.js still renders this normally on the server with the default
+  `ssr: true`; see node_modules/next/dist/docs/01-app/02-guides/lazy-loading.md.)
+*/
+export const Reveal = dynamic(() => import("./RevealMotion").then((mod) => mod.Reveal));

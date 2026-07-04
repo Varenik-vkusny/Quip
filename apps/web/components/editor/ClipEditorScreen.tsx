@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -52,8 +53,6 @@ import { ReasonChip } from "../ReasonChip";
 import { LibassLayer } from "../LibassLayer";
 import { Spinner } from "@/components/ui/Spinner";
 import { Stat } from "@/components/ui/Stat";
-import { AgentTab } from "./AgentTab";
-import { SubtitlesTab } from "./SubtitlesTab";
 import { EditorCanvas } from "./EditorCanvas";
 import { EditorHeader, type RenderState } from "./EditorHeader";
 import { type Tab, TABS, EditorRail } from "./EditorRail";
@@ -61,8 +60,6 @@ import { type EditorAction } from "@/lib/editorShortcuts";
 import { useEditorShortcuts } from "./useEditorShortcuts";
 import { useEditHistory } from "./useEditHistory";
 import { type FitRegion } from "./FitTimeline";
-import { FrameTab } from "./FrameTab";
-import { HookTab } from "./HookTab";
 import { Inspector } from "./Inspector";
 import { OverlaySelectionBox } from "./OverlaySelectionBox";
 import type { SubRects } from "@/lib/overlayBox";
@@ -72,6 +69,38 @@ import { stableFrame } from "@/lib/frameIdentity";
 import { type FrameState, PreviewPlayer } from "./PreviewPlayer";
 import { buildReplyRanges, clampMargin, originalReplyText } from "./replyUtils";
 import TimelineV2 from "./TimelineV2";
+
+// ── Perf: code-split the right-panel tabs. Only ONE tab renders at a time and most are never
+// opened, yet every tab's JS shipped on first editor open. next/dynamic (ssr:false — this is an
+// authed client route, no SEO, and each panel already runs client-only) pulls each panel into
+// its own chunk that loads on tab-select behind a light in-panel spinner. The Inspector FRAME
+// stays eager (it's always visible on desktop lg) so the panel chrome paints instantly and only
+// the inner tab content streams in → no canvas layout shift (the inspector grid column is a fixed
+// --inspector-w width). Round-1 React.memo wrappers on these panels are preserved — dynamic()
+// around an already-memo'd component is fine.
+function PanelFallback() {
+  return (
+    <div className="flex flex-1 items-center justify-center py-16" aria-hidden>
+      <Spinner size="sm" />
+    </div>
+  );
+}
+const AgentTab = dynamic(() => import("./AgentTab").then((m) => m.AgentTab), {
+  ssr: false,
+  loading: () => <PanelFallback />,
+});
+const SubtitlesTab = dynamic(() => import("./SubtitlesTab").then((m) => m.SubtitlesTab), {
+  ssr: false,
+  loading: () => <PanelFallback />,
+});
+const HookTab = dynamic(() => import("./HookTab").then((m) => m.HookTab), {
+  ssr: false,
+  loading: () => <PanelFallback />,
+});
+const FrameTab = dynamic(() => import("./FrameTab").then((m) => m.FrameTab), {
+  ssr: false,
+  loading: () => <PanelFallback />,
+});
 
 // ────────────────────────────────────────────────────────────────────────────
 // ClipEditorScreen — страница-редактор клипа (/edit/[jobId]/[clipId]).
