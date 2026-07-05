@@ -149,6 +149,19 @@ async function throwOnAuthOrQuota(res: Response): Promise<void> {
   }
 }
 
+/** Rich upload-progress reading passed to the UI so it can render a live rate + ETA (not just a %).
+ *  `elapsedSec` is measured at each progress EVENT (client-side, since this transfer's bytes began
+ *  moving), so the UI derives speed = loadedBytes / elapsedSec and an ETA purely from these — the
+ *  presigned-PUT contract to R2 is untouched (pure client math). Measuring elapsed at event time (not
+ *  in render) keeps the consuming component pure: no Date.now() during render. `loadedBytes`/
+ *  `totalBytes` are the summed bytes across all in-flight parts for a multipart upload. */
+export type UploadProgressInfo = {
+  pct: number;
+  loadedBytes: number;
+  totalBytes: number;
+  elapsedSec: number;
+};
+
 /** XHR с upload-progress + abort. Резолвит {status, responseText}. (fetch не даёт upload-progress.) */
 function xhrRequest(
   method: string,
@@ -156,12 +169,13 @@ function xhrRequest(
   body: XMLHttpRequestBodyInit | null,
   opts: {
     headers?: Record<string, string>;
-    onProgress?: (pct: number) => void;
+    onProgress?: (p: UploadProgressInfo) => void;
     signal?: AbortSignal;
   } = {},
 ): Promise<{ status: number; responseText: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    const startTime = Date.now(); // anchor for the client-side rate/ETA math
     xhr.open(method, url);
     for (const [k, v] of Object.entries(opts.headers ?? {})) xhr.setRequestHeader(k, v);
     const { signal } = opts;
@@ -181,7 +195,12 @@ function xhrRequest(
     }
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && opts.onProgress) {
-        opts.onProgress(Math.round((e.loaded / e.total) * 100));
+        opts.onProgress({
+          pct: Math.round((e.loaded / e.total) * 100),
+          loadedBytes: e.loaded,
+          totalBytes: e.total,
+          elapsedSec: (Date.now() - startTime) / 1000,
+        });
       }
     };
     xhr.onload = () => resolve({ status: xhr.status, responseText: xhr.responseText });
@@ -237,16 +256,22 @@ async function uploadParts(
   file: File,
   parts: { part_number: number; url: string }[],
   partSize: number,
-  onProgress?: (pct: number) => void,
+  onProgress?: (p: UploadProgressInfo) => void,
   signal?: AbortSignal,
 ): Promise<{ part_number: number; etag: string }[]> {
   const total = file.size;
+  const startTime = Date.now(); // anchor for the client-side rate/ETA math (all parts share it)
   const loaded = new Array<number>(parts.length).fill(0);
   const result = new Array<{ part_number: number; etag: string }>(parts.length);
   const report = () => {
     if (onProgress) {
       const sum = loaded.reduce((a, b) => a + b, 0);
-      onProgress(Math.min(100, Math.round((sum / total) * 100)));
+      onProgress({
+        pct: Math.min(100, Math.round((sum / total) * 100)),
+        loadedBytes: Math.min(total, sum),
+        totalBytes: total,
+        elapsedSec: (Date.now() - startTime) / 1000,
+      });
     }
   };
 
@@ -283,7 +308,7 @@ async function uploadParts(
 export async function createUploadJob(
   file: File,
   maxClips?: number,
-  onProgress?: (pct: number) => void,
+  onProgress?: (p: UploadProgressInfo) => void,
   signal?: AbortSignal,
   language?: string | null,
 ): Promise<{ id: string }> {

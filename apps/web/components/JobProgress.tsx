@@ -5,7 +5,7 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Meter } from "@/components/ui/Meter";
 import { Numeral } from "@/components/ui/Numeral";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { mmss } from "@/lib/format";
+import { etaSeconds, mmss } from "@/lib/format";
 import type { JobStatus, SourceKind } from "@/lib/types";
 
 const ORDER: JobStatus[] = ["queued", "downloading", "transcribing", "selecting", "rendering", "done"];
@@ -64,6 +64,19 @@ export function JobProgress({
   const stageFloor = [0, 8, 35, 60, 80, 100][Math.min(cur, 5)] ?? 8;
   const pct = Math.min(99, Math.max(progress ?? 0, stageFloor));
 
+  // Time-remaining readout — extrapolated CLIENT-SIDE from how the worker's raw `progress` has
+  // advanced over `elapsed` (NOT the stage-floored `pct`, which would distort the estimate). Coarse
+  // buckets + a signal gate (etaSeconds) keep it calm and honest: `null` → "Estimating…" rather than
+  // a fake number. After a few minutes a reassurance line reminds the user it survives closing the tab.
+  const eta = etaSeconds(elapsed, progress != null ? progress / 100 : 0);
+  const etaText =
+    eta == null
+      ? t("etaEstimating")
+      : eta < 60
+        ? t("etaSeconds", { value: eta })
+        : t("etaMinutes", { value: Math.round(eta / 60) });
+  const longRunning = elapsed >= 180;
+
   // Reserve a realistic number of clip slots (cap so the skeleton grid stays tidy).
   const skeletonCount = Math.min(6, Math.max(2, requestedClips));
 
@@ -118,6 +131,14 @@ export function JobProgress({
       <div className="mt-5 flex items-center gap-3">
         <Meter value={pct / 100} tone="accent" aria-label="Overall progress" className="flex-1" />
         <Numeral className="shrink-0 text-xs text-muted">{Math.round(pct)}%</Numeral>
+      </div>
+      {/* time-remaining readout (+ a calm long-run reassurance) — the anti-frozen-screen signal */}
+      <div className="mt-2.5 flex flex-col gap-1" aria-live="polite">
+        <p className="text-xs text-muted">
+          <span className="text-faint">{t("timeLeft")}: </span>
+          {etaText}
+        </p>
+        {longRunning && <p className="text-xs text-faint">{t("etaLongNote")}</p>}
       </div>
       <div className="mt-5 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line bg-line">
         {telemetry.map((t) => (

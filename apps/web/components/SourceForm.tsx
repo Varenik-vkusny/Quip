@@ -189,6 +189,13 @@ export function SourceForm({
       />
       {fileError ? <p className="mt-2 text-sm text-bad">{fileError}</p> : null}
 
+      {/* Quiet reliability reassurance under the drop-zone: a direct file upload is the surest path
+          to clips (the YouTube-link import is intentionally hidden). Only while the drop-zone is
+          shown and nothing's wrong — don't stack it over a file plate or an error. */}
+      {file == null && !fileError ? (
+        <p className="mt-2 text-xs leading-relaxed text-faint">{t("reliabilityNote")}</p>
+      ) : null}
+
       {/* Secondary option: a YouTube link (best-effort import — may not work for every video, in
           which case we ask you to upload the file). Hidden once a file is picked (file wins).
           Only rendered when the link path is wired (onSubmit) so upload-only callers stay clean. */}

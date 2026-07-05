@@ -17,7 +17,8 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import { Spinner } from "@/components/ui/Spinner";
 import { Split } from "@/components/ui/Split";
-import { cancelJob, createJob, createUploadJob } from "@/lib/api";
+import { cancelJob, createJob, createUploadJob, type UploadProgressInfo } from "@/lib/api";
+import { etaSeconds, formatRate } from "@/lib/format";
 import { markReviewed, noteRecentCreated } from "@/lib/recent";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
@@ -87,9 +88,26 @@ function labelFromUrl(url: string): string {
  *  progress to show. A full, static bar there reads as frozen (the L5 "silent gap"), so we flip to
  *  an explicit, animated "Preparing your video…" state (spinner + indeterminate bar) until
  *  `createUploadJob` resolves and the live status view (the JobProgress stepper) takes over. */
-function UploadProgress({ pct }: { pct: number }) {
+function UploadProgress({ info }: { info: UploadProgressInfo }) {
   const t = useTranslations("dashboard");
+  const { pct, loadedBytes, totalBytes, elapsedSec } = info;
   const preparing = pct >= 100;
+
+  // Live browser→R2 speed + ETA — pure client math from the bytes + elapsedSec we thread through the
+  // upload callback (elapsed is measured at event time in lib/api, so render stays pure: no Date.now()
+  // here). Only while bytes are actually moving (not in the "preparing" finalize window). Degrades
+  // gracefully: instant/tiny uploads never build enough signal, so formatRate/etaSeconds return null
+  // and we quietly fall back to the plain hint.
+  const rateLabel = preparing || elapsedSec <= 0 ? null : formatRate(loadedBytes / elapsedSec);
+  const etaSec = preparing ? null : etaSeconds(elapsedSec, totalBytes > 0 ? loadedBytes / totalBytes : 0);
+  const etaLabel =
+    etaSec == null
+      ? null
+      : etaSec < 60
+        ? t("uploadEtaSeconds", { value: etaSec })
+        : t("uploadEtaMinutes", { value: Math.round(etaSec / 60) });
+  const rateEtaLine = [rateLabel, etaLabel].filter(Boolean).join(" · ") || null;
+
   return (
     <div className="mx-auto w-full max-w-2xl">
       <div className="flex items-end justify-between gap-4 border-b border-line pb-4">
@@ -124,7 +142,12 @@ function UploadProgress({ pct }: { pct: number }) {
           style={preparing ? undefined : { width: `${Math.max(2, pct)}%` }}
         />
       </div>
-      <p className="mt-3 text-xs leading-relaxed text-faint">
+      {rateEtaLine && (
+        <p className="mt-3 text-xs tabular-nums text-muted" aria-live="polite">
+          {rateEtaLine}
+        </p>
+      )}
+      <p className={`${rateEtaLine ? "mt-1.5" : "mt-3"} text-xs leading-relaxed text-faint`}>
         {preparing ? t("uploadHintPreparing") : t("uploadHintSending")}
       </p>
     </div>
@@ -136,7 +159,7 @@ function DashboardInner() {
   const router = useRouter();
   const { job, jobId, error: pollError, reconnecting, elapsed, start, reset, reconnectNow } = useJob();
   const [submitting, setSubmitting] = useState(false);
-  const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const [upload, setUpload] = useState<UploadProgressInfo | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   // Requested clip count (from the form) → drives the reserved skeleton count while processing.
   const [requestedClips, setRequestedClips] = useState(3);
@@ -208,17 +231,19 @@ function DashboardInner() {
     setSubmitError(null);
     setSubmitting(true);
     setRequestedClips(maxClips);
-    setUploadPct(0); // show the uploading screen immediately, before bytes move
+    // Show the uploading screen immediately, before bytes move (0%). Real bytes + a real elapsedSec
+    // (measured at event time in lib/api) overwrite this on the first progress event.
+    setUpload({ pct: 0, loadedBytes: 0, totalBytes: file.size, elapsedSec: 0 });
     try {
-      const { id } = await createUploadJob(file, maxClips, setUploadPct, ctrl.signal, language);
+      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language);
       if (ctrl.signal.aborted) return; // отменена/вытеснена — не трогаем стейт
-      setUploadPct(null);
+      setUpload(null);
       noteRecentCreated({ id, label: file.name, at: Date.now() });
       start(id);
     } catch (e) {
       // намеренная отмена (reset/unmount/новый сабмит) → НЕ показываем ошибку
       if (ctrl.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
-      setUploadPct(null);
+      setUpload(null);
       setSubmitError(e instanceof Error ? e.message : t("errors.upload"));
     } finally {
       if (uploadCtrl.current === ctrl) {
@@ -246,7 +271,7 @@ function DashboardInner() {
     reset();
     setSubmitError(null);
     setSubmitting(false);
-    setUploadPct(null);
+    setUpload(null);
     // Drop ?job= so a deep-linked project doesn't keep us out of the idle "New project"
     // form (phase below treats a present ?job= as loading). Without this, reset couldn't
     // return to idle when the URL still carried the job id.
@@ -315,8 +340,8 @@ function DashboardInner() {
               <PromoRedeem />
             </aside>
           </Split>
-        ) : uploadPct !== null ? (
-          <UploadProgress pct={uploadPct} />
+        ) : upload !== null ? (
+          <UploadProgress info={upload} />
         ) : showProgressiveGrid && job ? (
           // Progressive grid: clips render in as they finish. Same <ClipGrid key={job.id}> as the
           // done branch → flipping to "done" doesn't remount (no flicker, selection preserved).
