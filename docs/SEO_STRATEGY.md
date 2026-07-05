@@ -122,10 +122,19 @@ MnogoReels, Reels-Boss** — все они присутствуют в обзо�
 | `auto-subtitles` | автоматические субтитры на видео | #7 |
 | `video-to-clips` | нарезка длинного видео на клипы | +доб. к ядру |
 
-> `make-shorts` и `video-to-clips` добавлены к ядру под прямые head-запросы фаундера. Следующие
-> волны (`ai-video-clipper`, `interview-to-clips`, `opusclip-alternative`, `tiktok-from-long-video`,
-> `vk-clips-from-video`, `vertical-video-maker`, …) — после подтверждения индексации этой волны в
-> Вебмастере. Добавление новой страницы = одна запись в `USE_CASES` (sitemap/роут подхватывают сами).
+> `make-shorts` и `video-to-clips` добавлены к ядру под прямые head-запросы фаундера.
+>
+> **Вторая волна (2026-07-06, ICP-фокус) — LIVE, +2 страницы (итого 10, слаги латиницей):**
+> - `clips-for-editors` — «нарезка для монтажёров и студий» (НОВЫЙ сегмент: SEO-поверхность под ICP
+>   монтажёры / студии-агентства и тариф Studio, которой раньше не было).
+> - `interview-to-clips` (#5) — «клипы из интервью» (раньше интент был только вложен в `webinar-to-shorts`).
+> - **Схема:** в `buildUseCaseJsonLd` (`lib/jsonld.ts`) добавлен узел `SoftwareApplication` → теперь ВСЕ
+>   use-case-URL (10 слагов × en/ru = 20) несут `SoftwareApplication + FAQPage + BreadcrumbList`
+>   (закрывает задачу Слоя 1 «Schema на /use-case/*»).
+>
+> Следующие волны (`ai-video-clipper` [P0], `opusclip-alternative`, `tiktok-from-long-video`,
+> `vk-clips-from-video`, `vertical-video-maker`, …) — после подтверждения индексации в Вебмастере.
+> Добавление новой страницы = одна запись в `USE_CASES` (sitemap/роут подхватывают сами).
 
 ### 2.3. Информационные кластеры (обучающий интент → `/blog/*`)
 
