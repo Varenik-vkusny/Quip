@@ -1,5 +1,6 @@
 import { buildHomeJsonLd } from "@/lib/jsonld";
 import { getOptionalUser } from "@/lib/supabase/server";
+import { Audience } from "@/components/landing/sections/Audience";
 import { Comparison } from "@/components/landing/sections/Comparison";
 import { CostAnchor } from "@/components/landing/sections/CostAnchor";
 import { Craft } from "@/components/landing/sections/Craft";
@@ -38,6 +39,7 @@ export default async function Page() {
         <Hero authed={authed} />
         <Demo />
         <CostAnchor />
+        <Audience />
         <HowItWorks />
         <WhyQuip />
         <Craft />

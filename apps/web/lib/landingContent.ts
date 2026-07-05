@@ -131,6 +131,22 @@ export interface LandingContent {
     eyebrow: string;
     cells: { label: string; value: string; unit: string; accent?: boolean }[];
   };
+  audience: {
+    eyebrow: string;
+    heading: string;
+    sub: string;
+    grindLabel: string;
+    gainLabel: string;
+    privacyLabel: string;
+    roles: {
+      id: "editor" | "studio" | "creator";
+      who: string;
+      role: string;
+      grind: string;
+      gain: string;
+    }[];
+    trust: string;
+  };
   howItWorks: {
     eyebrow: string;
     heading: string;
@@ -217,7 +233,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       headlineMid: "Know ",
       headlineAccent: "why",
       headlinePost: " they're worth posting.",
-      sub: "Drop a podcast, interview, or stream. Quip cuts the few clips worth posting, and reports why each one lands.",
+      sub: "Drop a podcast, interview, or stream. Quip cuts the few clips worth posting and reports why each one lands, so you spend your time on the edit, not the search.",
       primary: "Upload a video",
       secondary: "See how it works",
       trust: "No card. 2 free videos / month.",
@@ -262,6 +278,38 @@ const STRINGS: Record<Locale, LandingStrings> = {
         { label: "To start on Quip", value: "$0", unit: "no card", accent: true },
       ],
     },
+    audience: {
+      eyebrow: "// WHO IT'S FOR",
+      heading: "For the people who cut for a living.",
+      sub: "Finding the moments, the vertical reframe, the first pass of captions: that is the slow eighty percent of the job. Quip does that part and hands back the reason each clip works, so you take on more work instead of drowning in it.",
+      grindLabel: "The grind today",
+      gainLabel: "With Quip",
+      privacyLabel: "Privacy",
+      roles: [
+        {
+          id: "editor",
+          who: "Video editors",
+          role: "Take on more clients",
+          grind: "Hours scrubbing a two-hour podcast for the moments worth cutting, before the real edit even starts.",
+          gain: "Quip finds and reframes them first. You skip the search, keep the craft, and fit more clients into the same week.",
+        },
+        {
+          id: "studio",
+          who: "Studios and agencies",
+          role: "Approve faster, revise less",
+          grind: "Every clip turns into a debate: the client asks why this moment, and you defend it from a gut feeling.",
+          gain: "Each clip ships with a hook, a confidence score, and a plain reason. Forward that, and the client signs off on the first pass.",
+        },
+        {
+          id: "creator",
+          who: "Creators and podcasters",
+          role: "Post daily, solo",
+          grind: "You record long, then the clips never happen because cutting them yourself eats the whole day.",
+          gain: "Drop the episode, get a handful of clips you can stand behind, and post every day without hiring an editor.",
+        },
+      ],
+      trust: "The AI that picks and explains your clips reads only the transcript text, never your video itself. Your footage stays yours.",
+    },
     howItWorks: {
       eyebrow: "// HOW IT WORKS",
       heading: "Long video in. Clips you can trust out.",
@@ -287,7 +335,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     why: {
       eyebrow: "Why Quip",
       heading: "Every clip comes with its reasons.",
-      sub: "Most AI clippers hand you thirty clips and a shrug. Quip hands you fewer, each with a hook, a confidence score, the moment type, and a plain reason it'll land. You post with intent, not hope.",
+      sub: "Most AI clippers hand you thirty clips and a shrug. Quip hands you fewer, each with a hook, a confidence score, the moment type, and a plain reason it'll land. You post with intent, not hope, and when a client asks why this clip, the answer is already written.",
       payload: [
         { id: "hook", label: "Hook", body: "A scroll-stopping top line, written for that exact moment." },
         { id: "whyItWorks", label: "Why it works", body: "The real reason: open loop, payoff, tension, in one sentence." },
@@ -446,6 +494,10 @@ const STRINGS: Record<Locale, LandingStrings> = {
           a: "Yes. Download them and they're yours. Paid plans export without a watermark.",
         },
         {
+          q: "What happens to my video?",
+          a: "The AI that picks moments and writes hooks reads only the transcript text, never the video itself. Your footage is processed to cut and reframe the clips, then stored in your account for you to download. Nothing is posted anywhere on your behalf.",
+        },
+        {
           q: "What is a credit?",
           a: "One credit is one video, up to 60 minutes of source. Longer videos use minutes proportionally (a 90-minute upload counts as 1.5). Your plan includes a set number of video-credits per month, so you always know your limit. Pay-as-you-go credits cost $3 each and never expire.",
         },
@@ -523,7 +575,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       headlineMid: "Знайте, ",
       headlineAccent: "почему",
       headlinePost: " их стоит постить.",
-      sub: "Загрузите подкаст, интервью или стрим. Quip нарежет те несколько клипов, что стоит выложить, и объяснит, почему каждый сработает.",
+      sub: "Загрузите подкаст, интервью или стрим. Quip нарежет те несколько клипов, что стоит выложить, и объяснит, почему каждый сработает — чтобы вы тратили время на монтаж, а не на поиск моментов.",
       primary: "Загрузить видео",
       secondary: "Как это работает",
       trust: "Без карты. 2 видео в месяц бесплатно.",
@@ -568,6 +620,38 @@ const STRINGS: Record<Locale, LandingStrings> = {
         { label: "Старт на Quip", value: "$0", unit: "без карты", accent: true },
       ],
     },
+    audience: {
+      eyebrow: "// ДЛЯ КОГО",
+      heading: "Для тех, кто монтирует на жизнь.",
+      sub: "Поиск моментов, вертикальный рефрейм, черновые субтитры — это медленные восемьдесят процентов работы. Quip берёт эту часть на себя и возвращает причину, почему каждый клип сработает, чтобы вы брали больше заказов, а не тонули в рутине.",
+      grindLabel: "Рутина сейчас",
+      gainLabel: "С Quip",
+      privacyLabel: "Приватность",
+      roles: [
+        {
+          id: "editor",
+          who: "Монтажёры",
+          role: "Берите больше клиентов",
+          grind: "Часы уходят на то, чтобы вручную пересмотреть двухчасовой подкаст и найти моменты для нарезки, ещё до начала настоящего монтажа.",
+          gain: "Quip находит и кадрирует их первым. Вы пропускаете поиск, оставляете себе ремесло и вмещаете больше клиентов в ту же неделю.",
+        },
+        {
+          id: "studio",
+          who: "Студии и агентства",
+          role: "Аппрув быстрее, правок меньше",
+          grind: "Каждый клип превращается в спор: клиент спрашивает, почему именно этот момент, а вы защищаете его на ощущениях.",
+          gain: "Каждый клип идёт с хуком, оценкой уверенности и понятной причиной. Перешлите это клиенту, и он согласует с первого раза.",
+        },
+        {
+          id: "creator",
+          who: "Креаторы и подкастеры",
+          role: "Постите каждый день в одиночку",
+          grind: "Вы пишете вдолгую, а клипы так и не выходят, потому что нарезать их самому — это весь день.",
+          gain: "Загрузите выпуск, получите несколько клипов, за которые не стыдно, и постите каждый день без найма монтажёра.",
+        },
+      ],
+      trust: "ИИ, который отбирает и объясняет клипы, читает только текст расшифровки, а не само видео. Отснятый материал остаётся вашим.",
+    },
     howItWorks: {
       eyebrow: "// КАК ЭТО РАБОТАЕТ",
       heading: "На входе — длинное видео. На выходе — клипы, которым можно доверять.",
@@ -593,7 +677,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     why: {
       eyebrow: "Почему Quip",
       heading: "Каждый клип идёт со своими причинами.",
-      sub: "Большинство ИИ-нарезчиков выдают тридцать клипов и пожимают плечами. Quip даёт меньше — но каждый с хуком, оценкой уверенности, типом момента и понятной причиной, почему он сработает. Вы постите осознанно, а не на удачу.",
+      sub: "Большинство ИИ-нарезчиков выдают тридцать клипов и пожимают плечами. Quip даёт меньше — но каждый с хуком, оценкой уверенности, типом момента и понятной причиной, почему он сработает. Вы постите осознанно, а не на удачу, а когда клиент спросит «почему этот клип», ответ уже написан.",
       payload: [
         { id: "hook", label: "Хук", body: "Цепляющая верхняя строка, написанная под этот конкретный момент." },
         { id: "whyItWorks", label: "Почему работает", body: "Настоящая причина: интрига, развязка, напряжение — в одном предложении." },
@@ -752,6 +836,10 @@ const STRINGS: Record<Locale, LandingStrings> = {
           a: "Да. Скачали — они ваши. На платных планах экспорт без вотермарки.",
         },
         {
+          q: "Что происходит с моим видео?",
+          a: "ИИ, который выбирает моменты и пишет хуки, читает только текст расшифровки, а не само видео. Материал обрабатывается, чтобы нарезать и кадрировать клипы, затем хранится в вашем аккаунте для скачивания. Ничего никуда не публикуется от вашего имени.",
+        },
+        {
           q: "Что такое кредит?",
           a: "Кредит — это одно видео, до 60 минут исходника. Видео длиннее тратят минуты пропорционально (90-минутная загрузка считается за 1,5). В плане — фиксированное число видео-кредитов в месяц, так что лимит всегда понятен. Кредиты pay-as-you-go стоят $3 за штуку и не сгорают.",
         },
@@ -834,6 +922,7 @@ export function getLandingContent(locale: Locale): LandingContent {
     clips,
     demo: s.demo,
     costAnchor: s.costAnchor,
+    audience: s.audience,
     howItWorks: s.howItWorks,
     why: s.why,
     craft: s.craft,
