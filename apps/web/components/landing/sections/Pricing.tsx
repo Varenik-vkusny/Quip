@@ -1,6 +1,7 @@
 import { getLocale } from "next-intl/server";
 import { resolveLocale } from "@/i18n/locale";
 import { getLandingContent } from "@/lib/landingContent";
+import { checkoutHref } from "@/lib/polar";
 import { Container, Eyebrow, Section } from "../components/primitives";
 import { PrimaryCTA, GhostCTA } from "../components/CTA";
 import { Reveal } from "../components/Reveal";
@@ -23,6 +24,7 @@ export async function Pricing() {
         <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {plans.map((plan, i) => {
             const pro = plan.recommended;
+            const href = checkoutHref(plan.id);
             return (
               <Reveal key={plan.id} delay={i * 0.06}>
                 <div
@@ -66,11 +68,11 @@ export async function Pricing() {
 
                   <div className="mt-8">
                     {pro ? (
-                      <PrimaryCTA href={plan.href} arrow={false} className="w-full">
+                      <PrimaryCTA href={href} arrow={false} className="w-full">
                         {plan.cta}
                       </PrimaryCTA>
                     ) : (
-                      <GhostCTA href={plan.href} className="w-full">
+                      <GhostCTA href={href} className="w-full">
                         {plan.cta}
                       </GhostCTA>
                     )}

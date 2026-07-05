@@ -35,7 +35,7 @@ export type Clip = {
 };
 
 export type Plan = {
-  id: string;
+  id: "free" | "starter" | "pro" | "studio";
   name: string;
   price: string;
   cadence: string;
