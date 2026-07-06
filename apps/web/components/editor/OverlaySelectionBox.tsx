@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useEffect, useRef } from "react";
 import type { OverlayRect } from "@/lib/overlayBox";
 import { computeSnap, SNAP_THRESHOLD_PX } from "@/lib/snapEngine";
@@ -109,6 +110,7 @@ export function OverlaySelectionBox({
   snapEnabled = true,
   guidesRef,
 }: OverlaySelectionBoxProps) {
+  const t = useTranslations("editor.preview");
   const boxRef = useRef<HTMLDivElement>(null);
   // MOVE: pointer start + the box's base offset (px in render box) so it tracks the cursor 1:1.
   const moveRef = useRef<{
@@ -438,7 +440,7 @@ export function OverlaySelectionBox({
     <div
       ref={boxRef}
       role="group"
-      aria-label={`${label}: drag to move, corner to resize, side to change width`}
+      aria-label={t("overlayGroupAria", { label })}
       onPointerDown={onBodyDown}
       onPointerMove={onBodyMove}
       onPointerUp={onBodyUp}
@@ -461,7 +463,7 @@ export function OverlaySelectionBox({
       <button
         type="button"
         data-side="-1"
-        aria-label={`Change ${label.toLowerCase()} width`}
+        aria-label={t("changeWidthAria", { label })}
         onPointerDown={onWidthDown}
         onPointerMove={onWidthMove}
         onPointerUp={onWidthUp}
@@ -470,7 +472,7 @@ export function OverlaySelectionBox({
       <button
         type="button"
         data-side="1"
-        aria-label={`Change ${label.toLowerCase()} width`}
+        aria-label={t("changeWidthAria", { label })}
         onPointerDown={onWidthDown}
         onPointerMove={onWidthMove}
         onPointerUp={onWidthUp}
@@ -479,7 +481,7 @@ export function OverlaySelectionBox({
       {/* CORNER resize handle (bottom-right) → font size */}
       <button
         type="button"
-        aria-label={`Resize ${label.toLowerCase()} text`}
+        aria-label={t("resizeTextAria", { label })}
         onPointerDown={onHandleDown}
         onPointerMove={onHandleMove}
         onPointerUp={onHandleUp}

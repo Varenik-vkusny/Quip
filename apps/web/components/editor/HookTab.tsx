@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { memo, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Checkbox";
@@ -18,12 +19,8 @@ import { CAPTION_FONTS, ColorField, DebouncedSlider } from "./StyleControls";
 // Поля HookOverlay все опциональны → создавая хук с нуля, шлём только нужное,
 // pydantic дольёт дефолты.
 
-const HOOK_ANIMATIONS: { value: NonNullable<HookOverlay["animation"]>; label: string }[] = [
-  { value: "none", label: "None" },
-  { value: "pop", label: "Pop (scale-in)" },
-  { value: "fade", label: "Fade in" },
-  { value: "bounce", label: "Bounce" },
-];
+// Labels resolve from editor.hook.animations.<value>.
+const HOOK_ANIMATION_VALUES: NonNullable<HookOverlay["animation"]>[] = ["none", "pop", "fade", "bounce"];
 
 const HOOK_DEFAULTS = {
   color: "#FFFFFF",
@@ -52,6 +49,7 @@ export const HookTab = memo(function HookTab({
   onRegenerate?: () => void;
   regenerating?: boolean;
 }) {
+  const t = useTranslations("editor.hook");
   const hook = edit.captions.hook ?? null;
   const enabled = hook?.enabled ?? false;
   const fullClip = hook?.full_clip ?? true;
@@ -88,7 +86,7 @@ export const HookTab = memo(function HookTab({
       {/* ── PRIMARY: текст + показ + регенерация + тайминг + Remove ── */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-ink">Top text (hook)</h3>
+          <h3 className="text-sm font-semibold text-ink">{t("topText")}</h3>
           <div className="flex items-center gap-2">
             {hook && (
               <button
@@ -97,11 +95,11 @@ export const HookTab = memo(function HookTab({
                 onClick={() => onHookChange(null)}
                 className="rounded text-xs font-medium text-bad/70 transition duration-150 ease-snappy hover:text-bad focus:outline-none focus-visible:ring-2 focus-visible:ring-bad/40 disabled:opacity-50"
               >
-                Remove
+                {t("remove")}
               </button>
             )}
             <Checkbox
-              label="Show"
+              label={t("show")}
               className="text-xs"
               checked={enabled}
               disabled={busy}
@@ -117,7 +115,7 @@ export const HookTab = memo(function HookTab({
           disabled={busy}
           rows={2}
           maxLength={80}
-          placeholder="Catchy headline at the top of the clip…"
+          placeholder={t("placeholder")}
           onChange={(e) => commitText(e.target.value)}
           onBlur={() => {
             if (timer.current) clearTimeout(timer.current);
@@ -127,7 +125,7 @@ export const HookTab = memo(function HookTab({
         />
         <p className="flex items-center gap-1.5 text-xs leading-snug text-muted">
           <Sparkles className="size-3 shrink-0 text-muted" />
-          A short headline (≤6 words) tied to the moment. Stops the scroll.
+          {t("helper")}
         </p>
 
         {/* W4: хук НЕ обновляется сам при сдвиге клипа — явная регенерация под новый интервал */}
@@ -146,11 +144,10 @@ export const HookTab = memo(function HookTab({
               ) : (
                 <RefreshCw className="size-3.5" />
               )}
-              {regenerating ? "Writing a new hook…" : "Regenerate for current clip"}
+              {regenerating ? t("writingHook") : t("regenerate")}
             </Button>
             <p className="text-xs leading-snug text-muted">
-              The hook doesn&apos;t auto-update when you move or trim the clip. Regenerate it for
-              the new moment, or just edit the text above.
+              {t("regenerateHelper")}
             </p>
           </div>
         )}
@@ -158,7 +155,7 @@ export const HookTab = memo(function HookTab({
 
       {/* ── когда показывать ── */}
       <section className="space-y-2">
-        <Eyebrow tone="muted">When to show</Eyebrow>
+        <Eyebrow tone="muted">{t("whenToShow")}</Eyebrow>
         <div className="grid grid-cols-2 gap-1.5">
           <button
             type="button"
@@ -170,7 +167,7 @@ export const HookTab = memo(function HookTab({
                 : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-ink"
             }`}
           >
-            Whole clip
+            {t("wholeClip")}
           </button>
           <button
             type="button"
@@ -182,7 +179,7 @@ export const HookTab = memo(function HookTab({
                 : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-ink"
             }`}
           >
-            First seconds
+            {t("firstSeconds")}
           </button>
         </div>
         {!fullClip && (
@@ -190,7 +187,7 @@ export const HookTab = memo(function HookTab({
             {/* Reuse DebouncedSlider so the 20px range-touch thumb is centered in its own
                 h-10 row (clear of the label) — a bare input here overlapped the label text. */}
             <DebouncedSlider
-              label="Show duration (s)"
+              label={t("showDuration")}
               min={1}
               max={15}
               value={Math.round(hook?.duration_sec ?? 4)}
@@ -214,14 +211,14 @@ export const HookTab = memo(function HookTab({
           ) : (
             <ChevronRight className="size-4 shrink-0 text-muted" />
           )}
-          Style
+          {t("style")}
         </button>
 
         {styleOpen && (
           <div className="mt-3 space-y-3">
             {/* ── пресеты хука (галерея look'ов) ── */}
             <div className="space-y-2">
-              <Eyebrow tone="muted">Presets</Eyebrow>
+              <Eyebrow tone="muted">{t("presets")}</Eyebrow>
               <div className="grid grid-cols-2 gap-3 py-1">
                 {HOOK_PRESETS.map((preset) => (
                   <button
@@ -244,13 +241,13 @@ export const HookTab = memo(function HookTab({
             {/* ── стиль (паритет с субтитрами) ── */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <ColorField
-                label="Text color"
+                label={t("textColor")}
                 value={hook?.color ?? HOOK_DEFAULTS.color}
                 disabled={busy}
                 onChange={(v) => onHookChange({ color: v })}
               />
               <label className="flex flex-col gap-1.5 text-xs text-muted">
-                Font
+                {t("font")}
                 <Select
                   value={hook?.font ?? HOOK_DEFAULTS.font}
                   disabled={busy}
@@ -272,19 +269,19 @@ export const HookTab = memo(function HookTab({
               onChange={(e) =>
                 onHookChange({ box_color: e.target.checked ? (boxColor ?? "#FF5A3D") : null })
               }
-              label="Background plaque"
+              label={t("backgroundPlaque")}
               className="text-xs"
             />
             {hasPlaque ? (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <ColorField
-                  label="Plaque color"
+                  label={t("plaqueColor")}
                   value={boxColor ?? "#FF5A3D"}
                   disabled={busy}
                   onChange={(v) => onHookChange({ box_color: v })}
                 />
                 <DebouncedSlider
-                  label="Plaque opacity"
+                  label={t("plaqueOpacity")}
                   min={0}
                   max={100}
                   value={Math.round((hook?.box_opacity ?? HOOK_DEFAULTS.box_opacity) * 100)}
@@ -295,13 +292,13 @@ export const HookTab = memo(function HookTab({
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <ColorField
-                  label="Outline"
+                  label={t("outline")}
                   value={hook?.outline_color ?? HOOK_DEFAULTS.outline_color}
                   disabled={busy}
                   onChange={(v) => onHookChange({ outline_color: v })}
                 />
                 <DebouncedSlider
-                  label="Outline width"
+                  label={t("outlineWidth")}
                   min={0}
                   max={16}
                   value={hook?.outline_w ?? HOOK_DEFAULTS.outline_w}
@@ -312,7 +309,7 @@ export const HookTab = memo(function HookTab({
             )}
 
             <DebouncedSlider
-              label="Size"
+              label={t("size")}
               min={36}
               max={120}
               value={hook?.size ?? HOOK_DEFAULTS.size}
@@ -321,18 +318,18 @@ export const HookTab = memo(function HookTab({
             />
 
             <DebouncedSlider
-              label="Position (from top)"
+              label={t("positionFromTop")}
               min={40}
               max={900}
               value={hook?.margin_v ?? HOOK_DEFAULTS.margin_v}
               disabled={busy}
               // clear pos_y so the slider regains vertical control after a free drag; keep pos_x.
               onCommit={(v) => onHookChange({ margin_v: v, pos_y: null })}
-              hint="Or just drag the hook on the video"
+              hint={t("positionHint")}
             />
 
             <label className="flex flex-col gap-1.5 text-xs text-muted">
-              Entrance animation
+              {t("entranceAnimation")}
               <Select
                 value={hook?.animation ?? HOOK_DEFAULTS.animation}
                 disabled={busy}
@@ -340,9 +337,9 @@ export const HookTab = memo(function HookTab({
                   onHookChange({ animation: e.target.value as HookOverlay["animation"] })
                 }
               >
-                {HOOK_ANIMATIONS.map((a) => (
-                  <option key={a.value} value={a.value}>
-                    {a.label}
+                {HOOK_ANIMATION_VALUES.map((a) => (
+                  <option key={a} value={a}>
+                    {t(`animations.${a}`)}
                   </option>
                 ))}
               </Select>
@@ -352,7 +349,7 @@ export const HookTab = memo(function HookTab({
               checked={hook?.uppercase ?? HOOK_DEFAULTS.uppercase}
               disabled={busy}
               onChange={(e) => onHookChange({ uppercase: e.target.checked })}
-              label="UPPERCASE"
+              label={t("uppercase")}
               className="text-xs"
             />
           </div>

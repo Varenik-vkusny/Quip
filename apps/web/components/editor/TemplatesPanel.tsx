@@ -1,6 +1,7 @@
 "use client";
 
 import { Check, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { memo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { IconButton } from "@/components/ui/IconButton";
@@ -48,6 +49,8 @@ export const TemplatesPanel = memo(function TemplatesPanel({
   onDeleteTemplate: (id: string) => Promise<void>;
   onSetDefaultTemplate: (id: string, isDefault: boolean) => Promise<void>;
 }) {
+  // `tt` (not `t`) — the template row/handlers already bind `t` to a StyleTemplate.
+  const tt = useTranslations("editor.templates");
   // Own busy keyed by action (no global busy → other rows stay live) + transient toast.
   const [tplBusy, setTplBusy] = useState<string | null>(null);
   const [tplMsg, setTplMsg] = useState<string | null>(null);
@@ -60,16 +63,16 @@ export const TemplatesPanel = memo(function TemplatesPanel({
 
   const applyToClip = (t: StyleTemplate) => {
     onApplyTemplateClip(t.look);
-    flashTpl(`Applied “${t.name}” to this clip`);
+    flashTpl(tt("appliedToClip", { name: t.name }));
   };
 
   const applyToAll = async (t: StyleTemplate) => {
     setTplBusy(`all:${t.id}`);
     try {
       const n = await onApplyTemplateAll(t.look);
-      flashTpl(`Applied “${t.name}” to ${n} clip${n === 1 ? "" : "s"}`);
+      flashTpl(tt("appliedToClips", { name: t.name, count: n }));
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Couldn’t apply to all clips");
+      onError(e instanceof Error ? e.message : tt("couldntApplyAll"));
     } finally {
       setTplBusy(null);
     }
@@ -78,11 +81,11 @@ export const TemplatesPanel = memo(function TemplatesPanel({
   const saveCurrent = async () => {
     setTplBusy("save");
     try {
-      await onSaveTemplate(newName.trim() || `My style ${templates.length + 1}`, false);
+      await onSaveTemplate(newName.trim() || tt("defaultStyleName", { n: templates.length + 1 }), false);
       setNewName("");
-      flashTpl("Template saved");
+      flashTpl(tt("templateSaved"));
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Couldn’t save the template");
+      onError(e instanceof Error ? e.message : tt("couldntSave"));
     } finally {
       setTplBusy(null);
     }
@@ -94,9 +97,9 @@ export const TemplatesPanel = memo(function TemplatesPanel({
     setTplBusy(`upd:${t.id}`);
     try {
       await onUpdateTemplate(t.id);
-      flashTpl(`Updated “${t.name}” to the current style`);
+      flashTpl(tt("updatedToStyle", { name: t.name }));
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Couldn’t update the template");
+      onError(e instanceof Error ? e.message : tt("couldntUpdate"));
     } finally {
       setTplBusy(null);
     }
@@ -107,7 +110,7 @@ export const TemplatesPanel = memo(function TemplatesPanel({
     try {
       await onDeleteTemplate(t.id);
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Couldn’t delete the template");
+      onError(e instanceof Error ? e.message : tt("couldntDelete"));
     } finally {
       setTplBusy(null);
     }
@@ -119,11 +122,11 @@ export const TemplatesPanel = memo(function TemplatesPanel({
       await onSetDefaultTemplate(t.id, defaultTemplateId !== t.id);
       flashTpl(
         defaultTemplateId === t.id
-          ? "No longer your default"
-          : `“${t.name}” will start new videos`,
+          ? tt("noLongerDefault")
+          : tt("willStartNew", { name: t.name }),
       );
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Couldn’t set default");
+      onError(e instanceof Error ? e.message : tt("couldntSetDefault"));
     } finally {
       setTplBusy(null);
     }
@@ -133,9 +136,9 @@ export const TemplatesPanel = memo(function TemplatesPanel({
     <section className="space-y-2.5">
       <div className="flex items-center justify-between gap-2">
         <div className="flex flex-col">
-          <h3 className="text-sm font-semibold text-ink">Style templates</h3>
+          <h3 className="text-sm font-semibold text-ink">{tt("title")}</h3>
           <p className="text-xs leading-snug text-muted">
-            Reuse a whole look — colors, fonts, position, size and the hook — on any clip.
+            {tt("subtitle")}
           </p>
         </div>
         {tplMsg && <span className="truncate text-xs font-medium text-ok">{tplMsg}</span>}
@@ -143,8 +146,7 @@ export const TemplatesPanel = memo(function TemplatesPanel({
 
       {templates.length === 0 ? (
         <p className="text-xs leading-snug text-muted">
-          Save the current look as a template, then reuse it on any clip — or apply it to a
-          whole video in one click. Star one to start every new video with it.
+          {tt("emptyBody")}
         </p>
       ) : (
         <div className="space-y-1.5">
@@ -175,13 +177,13 @@ export const TemplatesPanel = memo(function TemplatesPanel({
                   type="button"
                   onClick={() => applyToClip(t)}
                   disabled={busy}
-                  title="Apply to this clip"
+                  title={tt("applyToClipTitle")}
                   className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-ink transition hover:text-accent disabled:opacity-50"
                 >
                   {t.name}
                   {isDefault && (
                     <Badge tone="neutral" className="ml-1.5 align-middle">
-                      default
+                      {tt("default")}
                     </Badge>
                   )}
                 </button>
@@ -189,30 +191,30 @@ export const TemplatesPanel = memo(function TemplatesPanel({
                   type="button"
                   onClick={() => void applyToAll(t)}
                   disabled={busy || tplBusy !== null}
-                  title="Apply to ALL clips of this video"
+                  title={tt("applyAllTitle")}
                   className="shrink-0 rounded border border-line px-2 py-1 text-xs font-semibold text-muted transition duration-150 ease-snappy enabled:hover:border-line-strong enabled:hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
                 >
-                  {busyAll ? "Applying…" : "All clips"}
+                  {busyAll ? tt("applying") : tt("allClips")}
                 </button>
                 <button
                   type="button"
                   onClick={() => void updateTpl(t)}
                   disabled={busy || tplBusy !== null}
-                  title="Update — overwrite this template with the current clip’s style"
+                  title={tt("updateTitle")}
                   className="inline-flex shrink-0 items-center gap-1 rounded border border-line px-2 py-1 text-xs font-semibold text-muted transition duration-150 ease-snappy enabled:hover:border-line-strong enabled:hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
                 >
                   <RefreshCw className={`size-3 ${busyUpd ? "animate-spin" : ""}`} aria-hidden />
-                  {busyUpd ? "Updating…" : "Update"}
+                  {busyUpd ? tt("updating") : tt("update")}
                 </button>
                 <IconButton
                   size="sm"
                   tone="accent"
                   title={
                     isDefault
-                      ? "Default for new videos (click to unset)"
-                      : "Use for new videos"
+                      ? tt("defaultForNewTitle")
+                      : tt("useForNewTitle")
                   }
-                  aria-label="Toggle default template"
+                  aria-label={tt("toggleDefaultAria")}
                   disabled={tplBusy !== null}
                   onClick={() => void toggleDefault(t)}
                 >
@@ -221,8 +223,8 @@ export const TemplatesPanel = memo(function TemplatesPanel({
                 <IconButton
                   size="sm"
                   tone="danger"
-                  title="Delete template"
-                  aria-label="Delete template"
+                  title={tt("deleteTitle")}
+                  aria-label={tt("deleteTitle")}
                   disabled={tplBusy !== null}
                   onClick={() => void removeTpl(t)}
                 >
@@ -238,7 +240,7 @@ export const TemplatesPanel = memo(function TemplatesPanel({
         <input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
-          placeholder="Name this style…"
+          placeholder={tt("namePlaceholder")}
           maxLength={60}
           onKeyDown={(e) => {
             if (e.key === "Enter") void saveCurrent();
@@ -256,7 +258,7 @@ export const TemplatesPanel = memo(function TemplatesPanel({
           ) : (
             <Plus className="size-3.5" />
           )}
-          Save current
+          {tt("saveCurrent")}
         </button>
       </div>
     </section>

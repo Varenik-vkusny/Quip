@@ -1,6 +1,7 @@
 "use client";
 
 import { RotateCcw, Scissors } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { type ReactNode, memo, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "@/components/ui/IconButton";
 import { Badge } from "@/components/ui/Badge";
@@ -24,21 +25,22 @@ import { originalReplyText } from "./replyUtils";
 // «look» → вынесено в глобальный header-popover (TemplatesPanel / EditorHeader).
 // ────────────────────────────────────────────────────────────────────────────
 
-const ANIMATIONS: { value: NonNullable<HighlightStyle["animation"]>; label: string }[] = [
-  { value: "karaoke_fill", label: "Karaoke (fill)" },
-  { value: "color_sweep", label: "Color sweep (word by word)" },
-  { value: "blur_in", label: "Focus (from blur)" },
-  { value: "spring", label: "Spring (overshoot)" },
-  { value: "pop", label: "Pop (word flash)" },
-  { value: "punch", label: "Punch (hard hit)" },
-  { value: "bounce", label: "Bounce" },
-  { value: "fade", label: "Fade (words appear)" },
-  { value: "drop_in", label: "Drop in (from above)" },
-  { value: "glow_pulse", label: "Glow pulse" },
-  { value: "shake", label: "Shake" },
-  { value: "slide_up", label: "Slide up" },
-  { value: "flash", label: "Flash (white to accent)" },
-  { value: "none", label: "No animation" },
+// Order preserved; labels resolve from editor.subtitles.animations.<value>.
+const ANIMATION_VALUES: NonNullable<HighlightStyle["animation"]>[] = [
+  "karaoke_fill",
+  "color_sweep",
+  "blur_in",
+  "spring",
+  "pop",
+  "punch",
+  "bounce",
+  "fade",
+  "drop_in",
+  "glow_pulse",
+  "shake",
+  "slide_up",
+  "flash",
+  "none",
 ];
 
 // Primary group title (tier 1): Onest semibold ink, NOT uppercase, with a hairline rule —
@@ -85,6 +87,7 @@ export const SubtitlesTab = memo(function SubtitlesTab({
   onStyleChange: (patch: Partial<CaptionStyle>) => void;
   onHighlightChange: (patch: Partial<HighlightStyle> | null) => void;
 }) {
+  const t = useTranslations("editor.subtitles");
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -135,7 +138,7 @@ export const SubtitlesTab = memo(function SubtitlesTab({
     <div className="flex flex-col gap-5 pr-1">
       {/* ───────────── LINES (content) ───────────── */}
       <section className="flex flex-col gap-2">
-        <Eyebrow tone="muted">Lines · click to edit · cut to drop from clip</Eyebrow>
+        <Eyebrow tone="muted">{t("linesEyebrow")}</Eyebrow>
 
         {/* видео уже с вшитыми субтитрами → не накладывать наши (без двойных) */}
         <div className="rounded-md border border-line bg-surface-2 px-2.5 py-2">
@@ -143,7 +146,7 @@ export const SubtitlesTab = memo(function SubtitlesTab({
             checked={!burn}
             disabled={busy}
             onChange={(e) => onBurnChange(!e.target.checked)}
-            label="Video already has captions — don’t overlay ours"
+            label={t("alreadyCaptioned")}
             className="w-full text-xs"
           />
         </div>
@@ -172,7 +175,7 @@ export const SubtitlesTab = memo(function SubtitlesTab({
                   <button
                     type="button"
                     onClick={() => onSeekReply(i)}
-                    title="Jump to line"
+                    title={t("jumpToLine")}
                     className="shrink-0 pt-0.5 text-muted transition hover:text-accent"
                   >
                     <Numeral className="text-[10px]">{fmtSec(group[0].start)}</Numeral>
@@ -206,7 +209,7 @@ export const SubtitlesTab = memo(function SubtitlesTab({
                       {text}
                       {reply.text_override != null && (
                         <Badge tone="neutral" className="ml-1.5 align-middle">
-                          edited
+                          {t("edited")}
                         </Badge>
                       )}
                     </button>
@@ -218,8 +221,8 @@ export const SubtitlesTab = memo(function SubtitlesTab({
                         <IconButton
                           size="sm"
                           tone="accent"
-                          title="Restore original text"
-                          aria-label="Restore original text"
+                          title={t("restoreOriginal")}
+                          aria-label={t("restoreOriginal")}
                           onClick={() => onReplyTextChange(i, null)}
                         >
                           <RotateCcw className="size-3.5" />
@@ -228,8 +231,8 @@ export const SubtitlesTab = memo(function SubtitlesTab({
                       <IconButton
                         size="sm"
                         tone="danger"
-                        title="Cut this line from the clip"
-                        aria-label="Cut this line from the clip"
+                        title={t("cutLine")}
+                        aria-label={t("cutLine")}
                         disabled={busy}
                         onClick={() => onCutReply(i)}
                       >
@@ -242,36 +245,36 @@ export const SubtitlesTab = memo(function SubtitlesTab({
             );
           })}
           {rows.length === 0 && (
-            <p className="px-2 py-3 text-xs text-muted">No lines in this clip.</p>
+            <p className="px-2 py-3 text-xs text-muted">{t("noLines")}</p>
           )}
         </div>
       </section>
 
       {/* ───────────── STYLE (appearance) — one clear group: how the captions LOOK ───────────── */}
-      <GroupTitle hint="how your captions look">Style</GroupTitle>
+      <GroupTitle hint={t("styleGroupHint")}>{t("styleGroup")}</GroupTitle>
 
       <section className="space-y-2">
-        <Eyebrow tone="muted">Presets</Eyebrow>
+        <Eyebrow tone="muted">{t("presets")}</Eyebrow>
         <PresetStrip activePresetId={activePresetId} onApply={onPresetApply} onError={onError} />
       </section>
 
       <section className="space-y-3">
-        <Eyebrow tone="muted">Colors</Eyebrow>
+        <Eyebrow tone="muted">{t("colors")}</Eyebrow>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <ColorField
-            label="Text color"
+            label={t("textColor")}
             value={st.color ?? "#FFFFFF"}
             disabled={busy}
             onChange={(v) => onStyleChange({ color: v })}
           />
           <ColorField
-            label="Highlight color"
+            label={t("highlightColor")}
             value={hl?.color ?? "#FF5A3D"}
             disabled={busy || hl === null}
             onChange={(v) => onHighlightChange({ color: v })}
           />
           <ColorField
-            label="Outline"
+            label={t("outline")}
             value={st.outline_color ?? "#000000"}
             disabled={busy}
             onChange={(v) => onStyleChange({ outline_color: v })}
@@ -285,12 +288,12 @@ export const SubtitlesTab = memo(function SubtitlesTab({
             onChange={(e) =>
               onStyleChange({ emphasis_color: e.target.checked ? "#FF5A3D" : null })
             }
-            label="Highlight keywords"
+            label={t("highlightKeywords")}
             className="text-xs"
           />
           {st.emphasis_color && (
             <ColorField
-              label="Keyword color"
+              label={t("keywordColor")}
               value={st.emphasis_color}
               disabled={busy}
               onChange={(v) => onStyleChange({ emphasis_color: v })}
@@ -300,10 +303,10 @@ export const SubtitlesTab = memo(function SubtitlesTab({
       </section>
 
       <section className="space-y-3">
-        <Eyebrow tone="muted">Text</Eyebrow>
+        <Eyebrow tone="muted">{t("text")}</Eyebrow>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1.5 text-xs text-muted">
-            Font
+            {t("font")}
             <Select
               value={st.font ?? "Montserrat"}
               disabled={busy}
@@ -318,7 +321,7 @@ export const SubtitlesTab = memo(function SubtitlesTab({
           </label>
         </div>
         <DebouncedSlider
-          label="Size"
+          label={t("size")}
           min={40}
           max={140}
           value={st.size ?? 90}
@@ -329,28 +332,28 @@ export const SubtitlesTab = memo(function SubtitlesTab({
           checked={st.uppercase ?? true}
           disabled={busy}
           onChange={(e) => onStyleChange({ uppercase: e.target.checked })}
-          label="UPPERCASE"
+          label={t("uppercase")}
           className="text-xs"
         />
       </section>
 
       <section className="space-y-3">
-        <Eyebrow tone="muted">Position</Eyebrow>
+        <Eyebrow tone="muted">{t("position")}</Eyebrow>
         <DebouncedSlider
-          label="Position (from bottom)"
+          label={t("positionFromBottom")}
           min={40}
           max={1200}
           value={st.margin_v ?? 260}
           disabled={busy}
           onCommit={(v) => onStyleChange({ margin_v: v, pos_y: null })}
-          hint="Or just drag the captions on the video"
+          hint={t("positionHint")}
         />
       </section>
 
       <section className="space-y-3">
-        <Eyebrow tone="muted">Animation</Eyebrow>
+        <Eyebrow tone="muted">{t("animation")}</Eyebrow>
         <label className="flex flex-col gap-1.5 text-xs text-muted">
-          Active-word animation
+          {t("activeWordAnimation")}
           <Select
             value={hl === null ? "off" : (hl.animation ?? "karaoke_fill")}
             disabled={busy}
@@ -360,12 +363,12 @@ export const SubtitlesTab = memo(function SubtitlesTab({
               else onHighlightChange({ animation: v as HighlightStyle["animation"] });
             }}
           >
-            {ANIMATIONS.map((a) => (
-              <option key={a.value} value={a.value}>
-                {a.label}
+            {ANIMATION_VALUES.map((v) => (
+              <option key={v} value={v}>
+                {t(`animations.${v}`)}
               </option>
             ))}
-            <option value="off">Highlight off</option>
+            <option value="off">{t("highlightOff")}</option>
           </Select>
         </label>
       </section>
