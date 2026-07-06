@@ -739,6 +739,41 @@ class TestPlanRegions:
         assert regions[0].points and abs(regions[0].points[0].cx - 0.5) < 1e-9
 
 
+class TestFollowerSmoothing:
+    """_track_trajectory (follower): центрированное сглаживание + верная трассировка кривой.
+    Founder QA clip_04 — статичное лицо НЕ должно дрейфовать (баг разрежённых кейфреймов +
+    линейной интерполяции); реальное движение — плавно."""
+
+    def _track(self, cx_list: list[float], fps: float = 30.0) -> tuple:
+        from app.pipeline.stage3_reframe import SpeakerTrack, _track_trajectory
+
+        tr = SpeakerTrack(f0=0, f1=len(cx_list), cx=tuple(cx_list), width=0.15, speak=1.0)
+        return _track_trajectory(tr, 0, len(cx_list), fps=fps, smoothing=0.1)
+
+    def test_smooth_cx_centered_kills_noise(self) -> None:
+        from app.pipeline.stage3_reframe import _smooth_cx_centered
+
+        vals = [0.50, 0.56, 0.44, 0.53, 0.47, 0.51, 0.49, 0.50]  # покачивание вокруг 0.5
+        out = _smooth_cx_centered(vals, win=5)
+        assert len(out) == len(vals)
+        assert all(abs(v - 0.5) < 0.03 for v in out)  # шум сглажен к среднему
+
+    def test_static_face_does_not_drift(self) -> None:
+        # лицо строго статично на 0.45 три секунды → кроп держит 0.45 всё время (ноль дрейфа).
+        pts = self._track([0.45] * 90)
+        assert all(abs(p.cx - 0.45) < 0.01 for p in pts)
+
+    def test_static_then_move_holds_then_eases(self) -> None:
+        # статика 0.45 (2с), затем рамп к 0.305 (1с) → рано ДЕРЖИТ ~0.45 (лицо в зоне), после выхода
+        # за зону плавно доводит В СТОРОНУ лица (dead-zone → останавливается, не доводя до центра).
+        cx = [0.45] * 60 + [0.45 - 0.005 * i for i in range(30)]
+        pts = self._track(cx)
+        early = [p.cx for p in pts if p.t < 1.5]
+        assert early and all(abs(c - 0.45) < 0.03 for c in early)  # нет раннего дрейфа
+        assert pts[-1].cx < 0.42  # в итоге сместился к лицу (но dead-zone → ~0.06 не доходя центра)
+        assert pts[-1].cx > 0.30  # и не перелетел лицо
+
+
 class TestComputeLockedCx:
     """compute_locked_cx: ОДИН статичный центр на шот, гарантирующий ВСЁ лицо в 9:16-кропе.
 
@@ -766,12 +801,26 @@ class TestComputeLockedCx:
         # размах 0.6 + ширина 0.1 = 0.7 > 0.32 → статикой лицо не удержать → None (фолбэк слежения)
         assert compute_locked_cx([0.2, 0.8], face_width=0.1, crop_w_frac=0.32) is None
 
-    def test_exact_budget_boundary_locks(self) -> None:
+    def test_full_crop_span_follows_with_margin(self) -> None:
         from app.pipeline.stage3_reframe import compute_locked_cx
 
-        # размах 0.22 + ширина 0.10 = 0.32 == crop_w_frac → ровно влезает (граница включительно)
-        cx = compute_locked_cx([0.39, 0.61], face_width=0.10, crop_w_frac=0.32)
-        assert cx is not None and abs(cx - 0.5) < 1e-9
+        # размах 0.22 + ширина 0.10 = 0.32 == crop_w_frac: РАНЬШЕ локалось «край-в-край» (лицо
+        # касалось границы = «пол-лица» на движении). Теперь с запасом _LOCK_COVERAGE_MARGIN=0.8
+        # это > 0.32*0.8=0.256 → None → фолбэк на следование (лицо держится в центре).
+        assert compute_locked_cx([0.39, 0.61], face_width=0.10, crop_w_frac=0.32) is None
+
+    def test_locks_only_within_margin(self) -> None:
+        # Робастно к значению _LOCK_COVERAGE_MARGIN: бюджет = crop_w_frac × margin.
+        from app.pipeline.stage3_reframe import _LOCK_COVERAGE_MARGIN, compute_locked_cx
+
+        crop, w = 0.40, 0.10
+        budget = crop * _LOCK_COVERAGE_MARGIN
+        span_ok = budget - w - 0.02  # span+width чуть НИЖЕ бюджета → лок с запасом от края
+        span_bad = budget - w + 0.04  # чуть ВЫШЕ бюджета → None → следование (лицо не у края)
+        ok = [0.5 - span_ok / 2, 0.5 + span_ok / 2]
+        bad = [0.5 - span_bad / 2, 0.5 + span_bad / 2]
+        assert compute_locked_cx(ok, face_width=w, crop_w_frac=crop) is not None
+        assert compute_locked_cx(bad, face_width=w, crop_w_frac=crop) is None
 
     def test_empty_returns_none(self) -> None:
         from app.pipeline.stage3_reframe import compute_locked_cx

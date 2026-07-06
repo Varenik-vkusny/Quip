@@ -39,6 +39,28 @@ def uniform(n: int, sentence_ends: set[int] | None = None) -> list[Word]:
     ]
 
 
+class TestSnapEndBackwardSentence:
+    """snap_end_index шаг 4: конец не на .?! → назад к ближайшему концу предложения (широкое окно,
+    без диаризации, не короче min_dur_sec). Founder QA: clip_05 садился на "…face" (пауза посреди
+    фразы), т.к. .?! был в 9 словах назад — на 1 за окном ±8."""
+
+    def test_pulls_back_to_sentence_beyond_max_extend(self) -> None:
+        # .?! только в idx16; кандидат-конец idx25 (не .?!), вперёд +8 нет .?!, пауз нет →
+        # тянем НАЗАД к "w16." (9<20 слов назад; раньше окно ±8 его не доставало).
+        words = uniform(40, {16})
+        assert snap_end_index(words, 25, start_idx=0) == 16
+
+    def test_prefers_nearest_previous_sentence(self) -> None:
+        # два .?! (16 и 22) → берём БЛИЖАЙШИЙ назад (22 = длиннее клип), не 16.
+        words = uniform(40, {16, 22})
+        assert snap_end_index(words, 25, start_idx=0) == 22
+
+    def test_min_dur_guard_keeps_pause(self) -> None:
+        # пуллбэк к idx16 дал бы клип 16.8с < min_dur 20с → не уходим под минимум, держим конец.
+        words = uniform(40, {16})
+        assert snap_end_index(words, 25, start_idx=0, min_dur_sec=20.0) == 25
+
+
 class TestClampScore:
     def test_above_one(self) -> None:
         assert clamp_score(1.5) == 1.0

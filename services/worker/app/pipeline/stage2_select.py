@@ -105,6 +105,13 @@ def _primary_speaker(words: list[Word], start_idx: int, end_idx: int) -> int | N
     return min(counts, key=lambda s: (-counts[s], s))
 
 
+# How far BACK snap_end_index may look for a sentence end when the clip would otherwise end
+# mid-sentence on a mere breath-pause. Wider than max_extend because on long clips / long sentences
+# the nearest .?! is often >8 words away in BOTH directions (founder QA: clip_05 ended on "…face"
+# because "myself." was 9 words back — one past the ±8 window — and "mean." ~17 words forward).
+_SENTENCE_BACK_WINDOW = 20
+
+
 def snap_end_index(
     words: list[Word],
     end_idx: int,
@@ -112,6 +119,7 @@ def snap_end_index(
     min_pause: float = 0.35,
     *,
     start_idx: int | None = None,
+    min_dur_sec: float | None = None,
 ) -> int:
     """Конец клипа → чистая граница (W1 + D2). Приоритет:
 
@@ -162,14 +170,27 @@ def snap_end_index(
         if gap >= min_pause and gap > best_gap:
             best_gap = gap
             best_j = j
-    # 4) D2: основного перебили, конец не на .?! → назад к его последнему .?! (не полумысль)
-    if primary is not None and not _is_sentence_end(words[best_j].text):
-        for k in range(1, max_extend + 1):
+    # 4) конец НЕ на .?! → тянем НАЗАД к ближайшему концу предложения (завершённая мысль вместо
+    #    вдоха посреди фразы). Широкое окно _SENTENCE_BACK_WINDOW: на длинных клипах ближайший .?!
+    #    часто дальше max_extend в ОБЕ стороны (founder QA: clip_05 сел на "…face", т.к. "myself."
+    #    в 9 словах назад — на 1 за окном ±8). Работает и БЕЗ диаризации. Не пересекаем смену
+    #    спикера / начало клипа и не уходим короче min_dur_sec (иначе клип выкинет гейт длины).
+    if not _is_sentence_end(words[best_j].text):
+        for k in range(1, _SENTENCE_BACK_WINDOW + 1):
             p = best_j - k
             if p <= lo:
                 break
-            if _is_sentence_end(words[p].text) and words[p].speaker in (None, primary):
-                return p
+            if not _is_sentence_end(words[p].text):
+                continue
+            if primary is not None and words[p].speaker not in (None, primary):
+                continue
+            if (
+                start_idx is not None
+                and min_dur_sec is not None
+                and words[p].end - words[start_idx].start < min_dur_sec
+            ):
+                break  # дальше назад только короче → сохраняем паузу как границу
+            return p
     return best_j
 
 
@@ -426,7 +447,7 @@ def postprocess(
             # A1: детерминированный снап к границам предложений (start первым — от него зависит
             # speaker-aware логика конца). A2: аудио-слой поверх (no-op без loudness).
             si = snap_start_index(words, si)
-            ei = snap_end_index(words, ei, start_idx=si)
+            ei = snap_end_index(words, ei, start_idx=si, min_dur_sec=min_sec)
             if loudness:
                 si, ei = refine_boundaries_audio(words, loudness, si, ei)
             start, end = indices_to_times(words, si, ei)

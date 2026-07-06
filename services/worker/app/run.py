@@ -40,6 +40,7 @@ from app.pipeline.stage1_transcribe import (
     transcribe_to_file,
 )
 from app.pipeline.stage2_select import select_segments
+from app.pipeline.stage2b_vision_review import apply_vision_reviews, review_segments_with_video
 from app.pipeline.stage3_reframe import reframe_segment
 from app.pipeline.stage4_captions import words_in_segment
 from app.pipeline.stage5_render import clamp_output_dims, render_clip
@@ -635,6 +636,7 @@ def run_pipeline(
     t0 = time.perf_counter()
     seg_path = out / "segments.json"
     usage: dict[str, int] = {}
+    vision_cost = 0.0
     if seg_path.exists():
         segments = [
             Segment.model_validate(x) for x in json.loads(seg_path.read_text(encoding="utf-8"))
@@ -650,11 +652,38 @@ def run_pipeline(
             loudness=loudness or None,
             usage_sink=usage,
         )
+        print(f"[2] select: {len(segments)} segments")
+        # ── Stage 2b (B1): Gemini-vision ревью каждого окна — ре-ранк по мультимодальному
+        #    hook_strength (видео+звук) + уточнение чистого реза краёв (trim клампится к ±1 слову
+        #    детерминированной границы). Нужен source ВИДЕО: гоняем ТОЛЬКО когда source.mp4 уже
+        #    материализован (YouTube/кэш). Upload-путь откладывает source.mp4 за select → там
+        #    ревью пропускаем с логом (правило №8: явная ветка, детерминированный отбор цел).
+        #    Kill-switch VISION_REVIEW_ENABLED. Мутируем segments ДО записи segments.json → кэш
+        #    хранит УЖЕ отревьюенные сегменты (повторный прогон не дёргает Gemini снова). ──
+        if s.vision_review_enabled and segments and (out / "source.mp4").exists():
+            t_vis = time.perf_counter()
+            vis_usage: dict[str, int] = {}
+            try:
+                reviews = review_segments_with_video(
+                    out / "source.mp4", segments, meta, settings=s, usage_sink=vis_usage
+                )
+                segments = apply_vision_reviews(
+                    segments, reviews, transcript.words, max_clips=len(segments)
+                )
+                n_ok = sum(1 for r in reviews if r.ok)
+                print(f"[2b] vision: reviewed {n_ok}/{len(reviews)} windows, re-ranked")
+            except Exception as e:  # noqa: BLE001 — весь проход упал → детерминированный отбор (№8)
+                print(f"[2b] vision: FAILED, keeping deterministic selection: {e}")
+            vision_cost = _gemini_cost(vis_usage)
+            stages["vision_review"] = round(time.perf_counter() - t_vis, 2)
+        elif s.vision_review_enabled and not (out / "source.mp4").exists():
+            print("[2b] vision: skipped (source.mp4 deferred — upload path, not yet materialized)")
         seg_path.write_text(
-            json.dumps([s.model_dump() for s in segments], ensure_ascii=False, indent=2),
+            json.dumps([s_.model_dump() for s_ in segments], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        print(f"[2] select: {len(segments)} segments")
+    # NB: llm_select — время ВСЕГО Stage 2 блока (вкл. под-проход 2b, если он был); отдельная
+    # латентность ревью — в stages["vision_review"].
     stages["llm_select"] = round(time.perf_counter() - t0, 2)
     select_cost = _gemini_cost(usage)
     db.set_progress_detail(job_id, moments_found=len(segments))  # live narration
@@ -756,7 +785,7 @@ def run_pipeline(
 
     # ── job.json (wire-контракт) ──
     total_sec = round(time.perf_counter() - t_start, 2)
-    total_usd = round(transcribe_cost + select_cost, 4)
+    total_usd = round(transcribe_cost + select_cost + vision_cost, 4)
     job = Job(
         id=job_id,
         status=JobStatus.done,

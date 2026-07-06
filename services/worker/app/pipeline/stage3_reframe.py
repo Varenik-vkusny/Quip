@@ -199,8 +199,47 @@ def smooth_centers(
     return result
 
 
+# Follower smoothing: a CENTERED (non-causal) moving average kills sub-second head-sway jitter
+# WITHOUT lag — the shot is processed offline (batch), so we look ahead + behind. Cheap O(n) array
+# math, no model → zero extra load. Window (sec) + keyframe time-resolution for tracing the curve.
+_FOLLOW_SMOOTH_SEC = 0.9
+_FOLLOW_SAMPLE_SEC = 0.5
+# Dead-zone virtual camera: the face may drift ±_FOLLOW_DEADZONE (frame-width) from the held crop
+# centre WITHOUT the camera moving; only when it leaves the band does the crop ease toward it. → the
+# crop moves ONLY when the face really needs it, and always smoothly (founder: "track only if the
+# face doesn't fit — that prevents jerking"). _FOLLOW_EASE = per-frame catch-up once outside.
+_FOLLOW_DEADZONE = 0.06
+_FOLLOW_EASE = 0.04
+
+
+def _smooth_cx_centered(values: list[float], win: int) -> list[float]:
+    """Centered moving average over `win` frames (non-causal → ZERO lag). PURE.
+
+    Unlike causal EMA (smooth_centers), a centered window smooths head-sway without trailing the
+    face: the crop tracks the true low-frequency motion → holds on a still face, eases gently on a
+    real move (no oscillation, no lag). Edges clamp the window.
+    """
+    n = len(values)
+    if n == 0 or win <= 1:
+        return list(values)
+    half = win // 2
+    out: list[float] = []
+    for i in range(n):
+        a, b = max(0, i - half), min(n, i + half + 1)
+        out.append(sum(values[a:b]) / (b - a))
+    return out
+
+
+# Safety margin on the locked-crop coverage gate: hold a STATIC per-shot crop only if the face
+# stays within this fraction of the crop width across the WHOLE shot; otherwise return None so the
+# caller falls back to the follower — the face then never drifts to the crop edge. Fixes "half-face"
+# on a moving subject inside a long fill shot (founder QA on Cardi B clip_04, where a 21 s shot
+# locked at cx=0.37 let the face touch the frame edge). 1.0 = old edge-touching behaviour.
+_LOCK_COVERAGE_MARGIN = 0.65
+
+
 def compute_locked_cx(centers: list[float], face_width: float, crop_w_frac: float) -> float | None:
-    """ОДИН статичный cx на шот, при котором ВСЁ лицо влезает в 9:16-кроп на каждом кадре. PURE.
+    """ОДИН статичный cx на шот, при котором ВСЁ лицо влезает в 9:16-кроп с запасом. PURE.
 
     Размах центров лица за шот [min, max] плюс ширина лица должен влезть в ширину кропа
     (crop_w_frac): тогда ставим кроп на СЕРЕДИНУ размаха — лицо целиком на каждом кадре,
@@ -215,7 +254,7 @@ def compute_locked_cx(centers: list[float], face_width: float, crop_w_frac: floa
     if not centers:
         return None
     lo, hi = min(centers), max(centers)
-    if (hi - lo) + face_width <= crop_w_frac:
+    if (hi - lo) + face_width <= crop_w_frac * _LOCK_COVERAGE_MARGIN:
         return (lo + hi) / 2
     return None
 
@@ -408,7 +447,7 @@ def _track_trajectory(
     f1: int,
     fps: float,
     smoothing: float,
-    min_delta: float = 0.03,
+    min_delta: float = 0.012,
     *,
     init_cx: float | None = None,
 ) -> tuple[TrackPoint, ...]:
@@ -428,12 +467,32 @@ def _track_trajectory(
     raw = [t.cx[f - t.f0] for f in range(lo, hi)]
     if not raw:
         return (TrackPoint(t=f0 / fps, mode="fill", cx=0.5 if init_cx is None else init_cx),)
-    sm = smooth_centers([c for c in raw], smoothing, init=raw[0] if init_cx is None else init_cx)
-    last_cx = sm[0]
-    pts: list[TrackPoint] = [TrackPoint(t=lo / fps, mode="fill", cx=last_cx)]
-    for i, c in enumerate(sm[1:], 1):
-        if abs(c - last_cx) >= min_delta:
-            pts.append(TrackPoint(t=(lo + i) / fps, mode="fill", cx=c))
+    # Centered low-pass (zero lag) removes head-sway jitter before the dead-zone logic.
+    sm = _smooth_cx_centered(raw, max(1, round(_FOLLOW_SMOOTH_SEC * fps)))
+    # Dead-zone virtual camera: HOLD while the face stays within ±_FOLLOW_DEADZONE of the crop
+    # centre; only when it leaves the band does the crop EASE toward it, then hold again → moves
+    # only when the face needs it, smoothly. init_cx (legacy glide) seeds the start centre.
+    cam = init_cx if init_cx is not None else sm[0]
+    cams = [cam]
+    for i in range(1, len(sm)):
+        if abs(sm[i] - cam) > _FOLLOW_DEADZONE:
+            cam += _FOLLOW_EASE * (sm[i] - cam)
+        cams.append(cam)
+    # Keyframes from the CAMERA path: keep endpoints + the frame before a move (anchors the hold) +
+    # the move; collapse the long flat holds. Faithful → no false linear drift (the clip_04 bug).
+    step = max(1, round(_FOLLOW_SAMPLE_SEC * fps))
+    idxs = list(range(0, len(cams), step))
+    if idxs[-1] != len(cams) - 1:
+        idxs.append(len(cams) - 1)
+    pts: list[TrackPoint] = [TrackPoint(t=(lo + idxs[0]) / fps, mode="fill", cx=cams[idxs[0]])]
+    last_cx = cams[idxs[0]]
+    for k in range(1, len(idxs)):
+        c = cams[idxs[k]]
+        is_last = k == len(idxs) - 1
+        moved = abs(c - last_cx) >= min_delta
+        next_moves = (not is_last) and abs(cams[idxs[k + 1]] - c) >= min_delta
+        if moved or next_moves or is_last:
+            pts.append(TrackPoint(t=(lo + idxs[k]) / fps, mode="fill", cx=c))
             last_cx = c
     return tuple(pts)
 

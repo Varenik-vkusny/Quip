@@ -140,6 +140,23 @@ class Settings(BaseSettings):
     select_chunk_enabled: bool = True
     select_chunk_target_sec: int = 720  # ~12 мин речи на окно (~2000 слов) — влезает в recall
     select_chunk_overlap_sec: int = 75  # нахлёст соседних окон: момент на стыке виден целиком
+    # B (multimodal clip quality, Phase B1): после текстового отбора прогоняем Gemini-vision
+    # проход ПО КАЖДОМУ кандидат-окну (видео+звук, 480p, media_resolution=low) — оцениваем
+    # вирусность хука (hook_strength → ре-ранк клипов) и уточняем ЧИСТЫЙ рез краёв (маленький
+    # trim, ЖЁСТКО клампится к ±1 слову детерминированной границы). Запускается в run.py ПОСЛЕ
+    # select, ДО рендера; НЕ трогает reframe (это B2). Per-window сбой → нейтральный review
+    # (no-op); весь проход упал / нет ключа / нет source.mp4 → пропуск, детерминированный отбор
+    # сохраняется (правило №8: явная ветка + лог, джоб доходит до done). Kill-switch
+    # VISION_REVIEW_ENABLED=false → мгновенный откат без передеплоя.
+    vision_review_enabled: bool = False  # B1 unverified E2E → OFF in prod; enable via env
+    # Пин версии (как llm_model): -latest/gemini-3* могут молча уехать на ×10 стоимости → coerce.
+    vision_review_model: str = "gemini-2.5-flash"
+    vision_review_media_res: str = "low"  # low | medium | high (Gemini media_resolution окна)
+
+    @field_validator("vision_review_model", mode="after")
+    @classmethod
+    def _pin_vision_model(cls, v: str) -> str:
+        return pin_llm_model(v)
 
     # transcript cache (content-addressed, data/_cache/transcripts/)
     transcript_cache_enabled: bool = True
@@ -153,7 +170,7 @@ class Settings(BaseSettings):
     reframe_engine: str = "A"
     # ASD требует 25fps (модель обучена на 25fps; выше = точнее/медленнее).
     reframe_face_fps: float = 25.0
-    reframe_smoothing: float = 0.15  # exponential smoothing коэф (0=без; 1=нет сглаж.)
+    reframe_smoothing: float = 0.10  # EMA follower coef: lower = smoother/lazier
     # анти-флеш/СТРОБ: регион < min_hold НЕ переключает режим, поглощается предыдущим (гасит
     # рапид-монтаж). 1.5 (ВЕРНУЛ с 0.8): на реальном 25fps-видео 0.8 пускал короткие шоты →
     # режим скакал fill↔fit = СТРОБ («флеши» на 25fps, где grid-флеш в принципе невозможен).

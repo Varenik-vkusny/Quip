@@ -245,7 +245,7 @@ def resolve_regions_accurate(
     mode_setting: str = "auto",
     speaker_crop_scale: float = 0.55,
     face_fps: float = 25.0,
-    smoothing: float = 0.15,
+    smoothing: float = 0.10,  # vestigial: вызовы передают s.reframe_smoothing (синхрон с config)
     lock_per_shot: bool = True,
     min_hold_sec: float = 1.5,
     speak_threshold: float = 0.0,
