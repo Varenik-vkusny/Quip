@@ -929,6 +929,234 @@ export const USE_CASES: UseCase[] = [
       ctaTitle: "Сделайте клипы из своего вебинара",
     },
   },
+  {
+    slug: "clips-for-editors",
+    keyword: "clips for video editors",
+    en: {
+      title: "Clips for Video Editors and Small Studios | Quip",
+      metaDescription:
+        "Clips for video editors and studios. Quip finds the moments, reframes to 9:16, drafts captions, and gives a hook plus a reason so clients approve fast.",
+      h1: "Clips for video editors and studios",
+      intro:
+        "You already know how to edit. What eats your day is the grunt work before it: scrubbing an hour of footage for the moments, reframing each one to 9:16, roughing in captions. Quip takes that off your plate and hands back a hook, a confidence score, and a plain reason each clip works, so you can take on more clients and get approvals on the first pass.",
+      steps: [
+        {
+          title: "Upload the client's footage",
+          body: "A podcast, interview, stream, or long talk, up to 3 hours. One upload covers a whole batch of clips.",
+        },
+        {
+          title: "Quip finds and explains",
+          body: "It transcribes, picks the strong segments, reframes to 9:16, writes a hook, and scores each clip so you know which ones to send.",
+        },
+        {
+          title: "Polish and deliver",
+          body: "Adjust captions and framing in the editor, export at 1080p with no watermark on paid plans, and hand the client a reason for every clip.",
+        },
+      ],
+      benefits: [
+        {
+          title: "Offload the slow 80%",
+          body: "Moment-hunting, the 9:16 reframe, and draft captions run automatically, so your hours go to the editing that clients actually pay for.",
+        },
+        {
+          title: "A reason clients approve",
+          body: "Each clip ships with a hook, a confidence score, and a plain reason it works, which turns the 'why this moment' debate into a first-pass yes.",
+        },
+        {
+          title: "Take on more clients",
+          body: "A one-hour source becomes a batch of clips in minutes, so you can serve more accounts without adding editors or hours.",
+        },
+      ],
+      faq: [
+        {
+          q: "Can I still edit the clips myself?",
+          a: "Yes. Quip does the grunt work; the editor lets you fine-tune the timing, framing, captions, and hook before you deliver.",
+        },
+        {
+          q: "How does this help with client approval?",
+          a: "Every clip carries a hook, a confidence score, and a plain reason it works, so clients see why a moment was chosen and sign off faster.",
+        },
+        {
+          q: "Is there a plan for high volume?",
+          a: "Yes. Paid plans raise the monthly video count for studios and agencies running many clients. One credit equals one video, with no token metering.",
+        },
+        {
+          q: "Can I match the client's brand?",
+          a: "The editor has several caption styles and hook presets, plus color and position controls, so clips match each client's look.",
+        },
+      ],
+      ctaTitle: "Clip your next client project",
+    },
+    ru: {
+      title: "Нарезка для монтажёров и студий | Quip",
+      metaDescription:
+        "Нарезка для монтажёров, студий и агентств. Quip берёт на себя поиск моментов, кадр 9:16 и черновые субтитры, а хук и оценка уверенности ускоряют аппрув у клиента.",
+      h1: "Нарезка для монтажёров и студий",
+      intro:
+        "Монтировать вы умеете и без нас. Время съедает рутина до монтажа: пересмотреть час записи в поисках моментов, скадрировать каждый в 9:16, набросать субтитры. Quip снимает эту рутину и возвращает хук, оценку уверенности и понятную причину, почему клип сработает, — чтобы вы брали больше клиентов и получали аппрув с первого раза.",
+      steps: [
+        {
+          title: "Загрузите исходник клиента",
+          body: "Подкаст, интервью, стрим или длинное выступление — до 3 часов. Одна загрузка закрывает целую пачку клипов.",
+        },
+        {
+          title: "Quip находит и объясняет",
+          body: "Транскрибирует, выбирает сильные фрагменты, кадрирует в 9:16, пишет хук и ставит оценку — вы сразу видите, какие клипы отдавать.",
+        },
+        {
+          title: "Доработайте и сдайте",
+          body: "Поправьте субтитры и кадр в редакторе, экспортируйте в 1080p без вотермарка на платных планах и отдайте клиенту причину для каждого клипа.",
+        },
+      ],
+      benefits: [
+        {
+          title: "Снимаем медленные 80%",
+          body: "Поиск моментов, кадр 9:16 и черновые субтитры идут автоматически — ваши часы уходят на монтаж, за который клиент реально платит.",
+        },
+        {
+          title: "Причина для быстрого аппрува",
+          body: "Каждый клип идёт с хуком, оценкой уверенности и понятной причиной — споры «почему этот момент» превращаются в согласие с первого раза.",
+        },
+        {
+          title: "Берите больше клиентов",
+          body: "Часовой исходник становится пачкой клипов за минуты — можно вести больше проектов без новых монтажёров и переработок.",
+        },
+      ],
+      faq: [
+        {
+          q: "Можно ли доработать клипы вручную?",
+          a: "Да. Quip снимает рутину, а в редакторе вы точно настраиваете тайминг, кадр, субтитры и хук перед сдачей.",
+        },
+        {
+          q: "Чем это помогает с аппрувом клиента?",
+          a: "Каждый клип несёт хук, оценку уверенности и понятную причину — клиент видит, почему выбран момент, и согласует быстрее.",
+        },
+        {
+          q: "Есть ли план под большой объём?",
+          a: "Да. На платных планах выше месячный лимит видео — под студии и агентства с потоком клиентов. Кредит = одно видео, без токенов.",
+        },
+        {
+          q: "Можно подогнать под бренд клиента?",
+          a: "В редакторе есть разные стили субтитров и пресеты хуков, а также настройки цвета и положения — клипы попадают в стиль каждого клиента.",
+        },
+      ],
+      ctaTitle: "Нарежьте следующий проект клиента",
+    },
+  },
+  {
+    slug: "interview-to-clips",
+    keyword: "interview to clips",
+    en: {
+      title: "Interview to Clips: Auto-Clip Conversations | Quip",
+      metaDescription:
+        "Interview to clips: turn a long interview or two-person chat into vertical 9:16 clips with speaker-tracked reframe, captions, and a reason each moment lands.",
+      h1: "Interview to clips",
+      intro:
+        "A long interview is a stack of clips waiting to be pulled. Quip listens to the whole conversation, finds the moments that land, reframes them to vertical 9:16 while tracking whoever is speaking, adds captions, and tells you in plain words why each one is worth posting.",
+      steps: [
+        {
+          title: "Upload the interview",
+          body: "A recording of an interview or two-person conversation, up to 3 hours. Both speakers on camera works best for the reframe.",
+        },
+        {
+          title: "Quip finds and explains",
+          body: "It transcribes, picks the strongest exchanges, writes a hook, scores each clip, and explains why the moment works.",
+        },
+        {
+          title: "Polish and post",
+          body: "A 9:16 frame that follows the active speaker, captions in your style, exported at 1080p with no watermark on paid plans.",
+        },
+      ],
+      benefits: [
+        {
+          title: "Speaker-tracked reframe",
+          body: "The vertical frame follows whoever is talking, so a two-person interview stays watchable without a static center crop.",
+        },
+        {
+          title: "Cuts on complete answers",
+          body: "Clips start and end on thought boundaries, so a question and its answer stay together instead of cutting off mid-sentence.",
+        },
+        {
+          title: "A reason each moment lands",
+          body: "Every clip carries a hook, a confidence score, and a plain reason, so you post the exchanges that actually hold attention.",
+        },
+      ],
+      faq: [
+        {
+          q: "Does it handle two speakers?",
+          a: "Yes. Quip follows the active speaker and keeps them in the vertical frame; you can nudge the position by hand in the editor.",
+        },
+        {
+          q: "Will an answer get cut off mid-sentence?",
+          a: "No. Clips are cut on thought boundaries, so a question and its answer stay together in one clip.",
+        },
+        {
+          q: "Which languages work?",
+          a: "English and Russian both work today, with the language detected automatically. No setting to flip.",
+        },
+        {
+          q: "Do I have to edit anything?",
+          a: "No. The clipping, reframe, and captions are automatic. The editor is there only if you want to tweak the timing or style.",
+        },
+      ],
+      ctaTitle: "Clip your interview",
+    },
+    ru: {
+      title: "Клипы из интервью: нарезка на шортсы | Quip",
+      metaDescription:
+        "Клипы из интервью: превратите длинное интервью или разговор двоих в вертикальные клипы 9:16 с кадром за активным спикером, субтитрами и причиной, почему момент зайдёт.",
+      h1: "Клипы из интервью",
+      intro:
+        "Длинное интервью — это готовая стопка клипов, которые осталось вытащить. Quip слушает весь разговор, находит моменты, которые заходят, кадрирует их в вертикаль 9:16, следя за тем, кто сейчас говорит, добавляет субтитры и простыми словами объясняет, почему каждый стоит выложить.",
+      steps: [
+        {
+          title: "Загрузите интервью",
+          body: "Запись интервью или разговора двоих — до 3 часов. Для рефрейма лучше, когда оба спикера в кадре.",
+        },
+        {
+          title: "Quip находит и объясняет",
+          body: "Транскрибирует, выбирает самые сильные фрагменты, пишет хук, оценивает клипы и объясняет, почему момент работает.",
+        },
+        {
+          title: "Доработайте и выложите",
+          body: "Кадр 9:16 за активным спикером, субтитры в вашем стиле, экспорт в 1080p без вотермарка на платных планах.",
+        },
+      ],
+      benefits: [
+        {
+          title: "Кадр за активным спикером",
+          body: "Вертикальный кадр следует за тем, кто говорит, — интервью на двоих остаётся смотрибельным без статичной обрезки по центру.",
+        },
+        {
+          title: "Режет по законченным ответам",
+          body: "Клипы начинаются и заканчиваются на границах мыслей — вопрос и ответ остаются вместе, а не обрываются на полуслове.",
+        },
+        {
+          title: "Причина для каждого момента",
+          body: "Каждый клип идёт с хуком, оценкой уверенности и понятной причиной — вы выкладываете фрагменты, которые правда держат внимание.",
+        },
+      ],
+      faq: [
+        {
+          q: "Справится с двумя спикерами?",
+          a: "Да. Quip следит за активным говорящим и держит его в вертикальном кадре; положение можно поправить вручную в редакторе.",
+        },
+        {
+          q: "Не оборвётся ли ответ на полуслове?",
+          a: "Нет. Клипы режутся по границам мыслей, поэтому вопрос и ответ остаются в одном клипе.",
+        },
+        {
+          q: "Какие языки поддерживаются?",
+          a: "Русский и английский работают уже сейчас, язык определяется автоматически — ничего переключать не нужно.",
+        },
+        {
+          q: "Нужно ли что-то монтировать?",
+          a: "Нет. Нарезка, кадр и субтитры делаются автоматически. Редактор нужен, только если хотите поправить тайминг или стиль.",
+        },
+      ],
+      ctaTitle: "Нарежьте своё интервью на клипы",
+    },
+  },
 ];
 
 /** Lookup by slug (used by both routes + generateMetadata). */

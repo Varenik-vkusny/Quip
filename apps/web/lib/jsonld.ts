@@ -62,6 +62,21 @@ export function buildUseCaseJsonLd(useCase: UseCase, locale: Locale): Record<str
         ],
       },
       {
+        "@type": "SoftwareApplication",
+        name: siteConfig.name,
+        applicationCategory: "MultimediaApplication",
+        operatingSystem: "Web",
+        description: siteConfig.description,
+        url: siteConfig.url,
+        inLanguage: ["en", "ru"],
+        offers: PLANS.map((p) => ({
+          "@type": "Offer",
+          name: p.name,
+          price: p.price,
+          priceCurrency: "USD",
+        })),
+      },
+      {
         "@type": "FAQPage",
         inLanguage: locale,
         mainEntity: content.faq.map((f) => ({
