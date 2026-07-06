@@ -279,7 +279,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       ],
     },
     audience: {
-      eyebrow: "// WHO IT'S FOR",
+      eyebrow: "WHO IT'S FOR",
       heading: "For the people who cut for a living.",
       sub: "Finding the moments, the vertical reframe, the first pass of captions: that is the slow eighty percent of the job. Quip does that part and hands back the reason each clip works, so you take on more work instead of drowning in it.",
       grindLabel: "The grind today",
