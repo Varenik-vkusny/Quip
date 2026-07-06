@@ -18,8 +18,11 @@ Clean-cut edges (be CONSERVATIVE — only flag REAL problems at the very edges):
   SMALL refined in/out time IN SECONDS RELATIVE TO THE START OF THIS CLIP (0 = first frame).
   Trim at most a fraction of a second — a word or two. If the edge is already clean, return null.
 
-Also return (used later, does not affect this decision — best effort, null if unsure):
-- subject_hint: who/what should stay in frame (e.g. "left speaker", "the woman", "the phone").
+Also return (used later for vertical reframing, does not affect this decision — best effort):
+- subject_box: the 2D bounding box of the ONE person/subject the viewer should watch, as
+  [ymin, xmin, ymax, xmax] normalized to 0-1000 (Gemini box convention). null if unsure or if
+  there is no single clear subject (e.g. a wide shot of several equally-important people).
+- subject_hint: a short label for that same subject (e.g. "left speaker", "the woman").
 - fill_vs_fit_hint: "fill" (single tight subject → crop) or "fit" (wide / multiple people / text).
 
 Return ONLY the JSON object with these exact keys.

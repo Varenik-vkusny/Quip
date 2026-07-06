@@ -103,7 +103,7 @@ def test_preview_and_video_map_run_concurrently_with_render(
         order.append("video_map")
         map_done.set()
 
-    def fake_render_all(job_id, o, source_name, segments, m, user_id):  # noqa: ANN001
+    def fake_render_all(job_id, o, source_name, segments, m, user_id, subject_cxs=None):  # noqa: ANN001
         # Рендер «идёт» — preview и video_map обязаны отработать, ПОКА мы здесь.
         assert preview_done.wait(timeout=10), "preview не стартовал во время рендера (хвост!)"
         assert map_done.wait(timeout=10), "video_map не отработал во время рендера (хвост!)"
@@ -139,7 +139,7 @@ def test_preview_thread_error_reraised_on_join_fails_job(
     def fake_preview(*a: Any, **k: Any) -> None:
         raise boom
 
-    def fake_render_all(job_id, o, source_name, segments, m, user_id):  # noqa: ANN001
+    def fake_render_all(job_id, o, source_name, segments, m, user_id, subject_cxs=None):  # noqa: ANN001
         render_ran.append(True)
         return [_ok_result(1)]
 

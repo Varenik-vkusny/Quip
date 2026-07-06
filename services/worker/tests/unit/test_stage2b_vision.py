@@ -14,10 +14,12 @@ from app.pipeline.stage2b_vision_review import (
     VisionReview,
     apply_review,
     apply_vision_reviews,
+    apply_vision_reviews_indexed,
     clamp_edges_to_words,
     neutral_review,
     parse_vision_response,
     rerank_and_cap,
+    subject_cx_from_box,
 )
 
 
@@ -67,7 +69,18 @@ class TestParseVisionResponse:
         assert r.trimmed_end_sec is None
         assert r.subject_hint is None
         assert r.fill_vs_fit_hint is None
+        assert r.subject_cx is None
         assert r.is_complete_thought is True  # neutral default when absent
+
+    def test_parses_subject_cx_from_box(self) -> None:
+        # Gemini box [ymin, xmin, ymax, xmax] normalized 0..1000 → centre-x = (300+700)/2/1000
+        text = '{"hook_strength": 0.5, "hook_reason": "x", "subject_box": [100, 300, 900, 700]}'
+        r = parse_vision_response(text)
+        assert r.subject_cx == 0.5
+
+    def test_subject_cx_none_without_box(self) -> None:
+        r = parse_vision_response('{"hook_strength": 0.5, "hook_reason": "x"}')
+        assert r.subject_cx is None
 
     def test_non_json_raises(self) -> None:
         with pytest.raises(JobError):
@@ -211,3 +224,111 @@ class TestApplyVisionReviews:
         reviews = [neutral_review(), neutral_review()]
         out = apply_vision_reviews(segs, reviews, w, max_clips=2)
         assert [s.score for s in out] == [0.8, 0.2]  # unchanged order (already desc)
+
+
+# ─────────────────────────── subject_cx_from_box (B2 parse) ───────────────────────────
+
+
+class TestSubjectCxFromBox:
+    def test_centre_x_of_box(self) -> None:
+        # [ymin, xmin, ymax, xmax] 0..1000 → cx = (200 + 600) / 2 / 1000 = 0.4
+        assert subject_cx_from_box([100, 200, 900, 600]) == 0.4
+
+    def test_none_when_absent(self) -> None:
+        assert subject_cx_from_box(None) is None
+
+    def test_none_when_wrong_length(self) -> None:
+        assert subject_cx_from_box([1, 2, 3]) is None
+
+    def test_none_when_not_a_list(self) -> None:
+        assert subject_cx_from_box("left") is None
+
+    def test_none_on_zero_width_box(self) -> None:
+        # degenerate / all-zero box (model gave nothing) → no real subject
+        assert subject_cx_from_box([0, 0, 0, 0]) is None
+
+    def test_none_on_reversed_box(self) -> None:
+        assert subject_cx_from_box([0, 700, 100, 300]) is None
+
+    def test_clamped_into_unit_range(self) -> None:
+        # xmax beyond 1000 → centre clamps to 1.0
+        assert subject_cx_from_box([0, 1400, 100, 1800]) == 1.0
+
+    def test_non_numeric_none(self) -> None:
+        assert subject_cx_from_box([0, "a", 100, 700]) is None
+
+
+# ─────────────────── apply_vision_reviews_indexed (B2: aligned subject_cx) ───────────────────
+
+
+class TestApplyVisionReviewsIndexed:
+    def test_returns_subject_cxs_aligned_to_reordered_segments(self) -> None:
+        w = uniform(120)
+        segs = [mkseg(0, 20, 0.8), mkseg(30, 50, 0.2)]
+        reviews = [
+            VisionReview(
+                0.1,
+                "weak",
+                True,
+                False,
+                False,
+                None,
+                None,
+                None,
+                None,
+                subject_cx=0.3,
+                ok=True,
+            ),  # fmt: skip
+            VisionReview(
+                0.95,
+                "viral",
+                True,
+                False,
+                False,
+                None,
+                None,
+                None,
+                None,
+                subject_cx=0.7,
+                ok=True,
+            ),  # fmt: skip
+        ]
+        out_segs, subj = apply_vision_reviews_indexed(segs, reviews, w, max_clips=2)
+        # second segment scored 0.95 → re-ranked first; its subject_cx must travel WITH it
+        assert out_segs[0].start == 30.0 and subj[0] == 0.7
+        assert out_segs[1].start == 0.0 and subj[1] == 0.3
+
+    def test_shorter_reviews_pad_subject_cx_none(self) -> None:
+        w = uniform(120)
+        segs = [mkseg(0, 20, 0.8), mkseg(30, 50, 0.2)]
+        reviews = [
+            VisionReview(
+                0.9,
+                "x",
+                True,
+                False,
+                False,
+                None,
+                None,
+                None,
+                None,
+                subject_cx=0.4,
+                ok=True,
+            )  # fmt: skip
+        ]  # only one review for two segments → second is neutral (subject None)
+        out_segs, subj = apply_vision_reviews_indexed(segs, reviews, w, max_clips=2)
+        assert out_segs[0].start == 0.0 and subj[0] == 0.4
+        assert out_segs[1].start == 30.0 and subj[1] is None
+
+    def test_matches_apply_vision_reviews_ordering(self) -> None:
+        # the indexed variant must produce the SAME segment ordering as apply_vision_reviews
+        w = uniform(120)
+        segs = [mkseg(0, 20, 0.8), mkseg(30, 50, 0.2)]
+        reviews = [
+            VisionReview(0.1, "a", True, False, False, None, None, None, None, ok=True),
+            VisionReview(0.95, "b", True, False, False, None, None, None, None, ok=True),
+        ]
+        plain = apply_vision_reviews(segs, reviews, w, max_clips=2)
+        indexed, _ = apply_vision_reviews_indexed(segs, reviews, w, max_clips=2)
+        assert [s.start for s in plain] == [s.start for s in indexed]
+        assert [s.score for s in plain] == [s.score for s in indexed]

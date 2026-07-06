@@ -58,6 +58,12 @@ _ASD_NODATA = -5.0
 # tight-кроп в «ноги»/торс. Репро CARDI B: говорящий бьётся 3 кадра (1.3%) в 7.9с B-roll → кроп ног.
 # Совпадает с coverage_min гейта _is_wide_shot (чистый разрыв 1–6% ↔ 35–100% покрытия).
 _FILL_MIN_COVERAGE = 0.25
+# B2 (exploratory, флаг REFRAME_VISION_SUBJECT): максимум |mean_cx(track) − subject_cx|, при котором
+# vision-подсказка считается «про этот трек». Gemini-box груб/дрожит (per-clip окно, не per-frame) →
+# берём его ТОЛЬКО чтобы ВЫБРАТЬ трек (тай-брейкер speak/width), НЕ чтобы двигать кроп. Если ни один
+# трек не ближе этого к подсказке — субъект, вероятно, НЕ-лицо (вне контракта face-track) → честный
+# фолбэк на speak/width (не тянем кроп к «ничему»). ~0.20 = запас против дрожания бокса.
+_VISION_SUBJECT_MAX_DIST = 0.20
 
 
 # ─────────────────── Фазовые тайминги (observability, [reframe]-строка) ───────────────────
@@ -405,10 +411,31 @@ def _split_pair(
     return ta, tb
 
 
-def _pick_target(active: list[SpeakerTrack], speak_threshold: float) -> SpeakerTrack | None:
-    """Выбрать дорожку в кадр: макс. speak; если ниже порога → макс. width (largest-face). PURE."""
+def _track_mean_cx(t: SpeakerTrack) -> float:
+    """PURE. Средний cx дорожки за её кадры (для сравнения с vision subject-x). Пусто → 0.5."""
+    return sum(t.cx) / len(t.cx) if t.cx else 0.5
+
+
+def _pick_target(
+    active: list[SpeakerTrack], speak_threshold: float, *, subject_cx: float | None = None
+) -> SpeakerTrack | None:
+    """Выбрать дорожку в кадр: макс. speak; если ниже порога → макс. width (largest-face). PURE.
+
+    B2 (тай-брейкер, вход subject_cx НЕ None): если есть УВЕРЕННАЯ vision-подсказка центра субъекта
+    (Gemini-box → centre-x, проводится ТОЛЬКО когда флаг REFRAME_VISION_SUBJECT включён у вызывателя
+    — эта функция чистая, конфиг не читает), берём дорожку с mean cx БЛИЖАЙШИМ к subject_cx —
+    ПЕРЕОПРЕДЕЛЯЯ speak/width. Это чинит «выбрали не того человека» в multi-face шоте. Если ни одна
+    дорожка не ближе _VISION_SUBJECT_MAX_DIST (субъект, вероятно, НЕ-лицо / бокс мимо) → ЯВНЫЙ
+    фолбэк на speak/width (не тихий: подсказка просто не подошла). subject_cx=None → байт-в-байт
+    прежнее поведение. Кроп-координаты подсказка НЕ двигает (Δ=0 сетка цела) — только ВЫБОР трека.
+    """
     if not active:
         return None
+    if subject_cx is not None:
+        nearest = min(active, key=lambda t: abs(_track_mean_cx(t) - subject_cx))
+        if abs(_track_mean_cx(nearest) - subject_cx) <= _VISION_SUBJECT_MAX_DIST:
+            return nearest
+        # уверенная подсказка есть, но ни один трек к ней не близок → фолбэк на speak/width
     best = max(active, key=lambda t: t.speak)
     if best.speak < speak_threshold:
         best = max(active, key=lambda t: t.width)
@@ -510,6 +537,7 @@ def plan_regions(
     mode_setting: str = "auto",
     split_enabled: bool = False,
     wide_speak_min: float = 0.3,
+    subject_cx: float | None = None,
 ) -> list[TrackRegion]:
     """Cut-aligned планировщик: на КАЖДЫЙ шот один режим + траектория. Сердце Pass-1. PURE.
 
@@ -521,6 +549,9 @@ def plan_regions(
     mode_setting "fill"/"fit" — глобальный оверрайд. wide_spread_min дефолт = crop_w_frac.
     Границы регионов = границы шотов (= кадры склеек) → смена режима только на склейке
     (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md не трогаем: split не двигает границы).
+    subject_cx (B2, exploratory, флаг REFRAME_VISION_SUBJECT у вызывателя): vision-подсказка центра
+    субъекта [0,1] → ТАЙ-БРЕЙКЕР `_pick_target` (какой face-track вести на FILL-шоте). НЕ влияет на
+    выбор режима fill/fit, границы и сетку — только на ВЫБОР трека. None → прежнее поведение.
     """
     spread_min = crop_w_frac * _WIDE_SPREAD_RATIO if wide_spread_min is None else wide_spread_min
     regions: list[TrackRegion] = []
@@ -565,7 +596,7 @@ def plan_regions(
         covered = [
             t for t in active if len(_track_cx_in_shot(t, f0, f1)) >= _FILL_MIN_COVERAGE * (f1 - f0)
         ]
-        target = _pick_target(covered, speak_threshold)
+        target = _pick_target(covered, speak_threshold, subject_cx=subject_cx)
         if mode_setting != "fill" and target is None:
             regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
             prev_fill_end_cx = None
@@ -1071,11 +1102,16 @@ def reframe_segment(
     min_scene_sec: float = 0.4,
     split_enabled: bool = False,
     wide_speak_min: float = 0.3,
+    subject_cx: float | None = None,
 ) -> tuple[list[TrackRegion], bool]:
     """Сегмент → (cut-aligned регионы, face_found). Единый путь (ASD по дефолту).
 
     PySceneDetect → кадры склеек → build_shots_frames → score_tracks_in_segment (MediaPipe+ASD)
     → plan_regions → merge_short_regions. Пишет reframe_<clip_id>.json ({regions:[...]}).
+
+    subject_cx (B2, exploratory): vision-подсказка центра субъекта [0,1] → тай-брейкер выбора
+    face-track в plan_regions (какой человек в кадре на multi-face шоте). None (дефолт) → прежнее
+    поведение байт-в-байт. Проводится ТОЛЬКО когда вызыватель включил REFRAME_VISION_SUBJECT.
     """
     from app.pipeline.asd_reframe import score_tracks_in_segment  # noqa: PLC0415
 
@@ -1124,6 +1160,7 @@ def reframe_segment(
             mode_setting=mode_setting,
             split_enabled=split_enabled,
             wide_speak_min=wide_speak_min,
+            subject_cx=subject_cx,
         ),
         min_hold_sec,
     )

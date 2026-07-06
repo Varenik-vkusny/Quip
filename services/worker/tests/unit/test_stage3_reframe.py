@@ -468,6 +468,22 @@ class TestPlanRegions:
         regions = plan_regions([(0, 30)], [], fps=30.0, crop_w_frac=0.32)
         assert regions[0].mode == "fit"
 
+    def test_subject_cx_tiebreaks_cluster_over_speak(self) -> None:
+        # B2: два лица КЛАСТЕРОМ (размах 0.15 < spread_min → не wide → fill-путь). Громче левое
+        # (cx=0.45, speak 0.9), но vision-subject возле правого (0.60) → кроп на правое лицо.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 30, 0.45, 0.1, 0.9), self._track(0, 30, 0.60, 0.1, 0.1)]
+        r0 = plan_regions(
+            [(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, smoothing=1.0, speak_threshold=0.0
+        )
+        assert abs(r0[0].points[0].cx - 0.45) < 1e-9  # без subject → громче
+        r1 = plan_regions(
+            [(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, smoothing=1.0,
+            speak_threshold=0.0, subject_cx=0.60,
+        )  # fmt: skip
+        assert abs(r1[0].points[0].cx - 0.60) < 1e-9  # vision-subject → правое лицо
+
     def test_low_coverage_face_is_fit_not_legs(self) -> None:
         # Хвост дорожки, заползший на 3/100 кадров за склейку в face-sparse establishing-план
         # (покрытие 3%), НЕ субъект → fit (wide), а НЕ tight-кроп в «ноги»/торс. Репро на реальном
@@ -737,6 +753,40 @@ class TestPlanRegions:
         regions = plan_regions([(0, 30)], [], fps=30.0, crop_w_frac=0.32, mode_setting="fill")
         assert regions[0].mode == "fill"
         assert regions[0].points and abs(regions[0].points[0].cx - 0.5) < 1e-9
+
+
+class TestPickTargetVisionSubject:
+    """_pick_target: vision subject-x tie-breaker (B2). Pure, off-by-default via caller."""
+
+    def _track(self, cx: float, speak: float, width: float = 0.1):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        return SpeakerTrack(f0=0, f1=10, cx=tuple([cx] * 10), width=width, speak=speak)
+
+    def test_none_subject_uses_speak_heuristic(self) -> None:
+        from app.pipeline.stage3_reframe import _pick_target
+
+        loud, quiet = self._track(0.2, 0.9), self._track(0.8, 0.1)
+        assert _pick_target([loud, quiet], 0.0) is loud  # backward-compatible: max speak
+
+    def test_subject_picks_nearest_track_over_louder(self) -> None:
+        from app.pipeline.stage3_reframe import _pick_target
+
+        loud_far = self._track(0.2, 0.9)  # loudest but far from subject
+        quiet_near = self._track(0.8, 0.1)  # quiet but near subject 0.82
+        assert _pick_target([loud_far, quiet_near], 0.0, subject_cx=0.82) is quiet_near
+
+    def test_subject_far_from_all_falls_through_to_speak(self) -> None:
+        from app.pipeline.stage3_reframe import _pick_target
+
+        # subject at 0.5, tracks at 0.1/0.9 (both ~0.4 away > threshold) → no confident match
+        loud, quiet = self._track(0.1, 0.9), self._track(0.9, 0.1)
+        assert _pick_target([loud, quiet], 0.0, subject_cx=0.5) is loud
+
+    def test_empty_active_is_none(self) -> None:
+        from app.pipeline.stage3_reframe import _pick_target
+
+        assert _pick_target([], 0.0, subject_cx=0.5) is None
 
 
 class TestFollowerSmoothing:

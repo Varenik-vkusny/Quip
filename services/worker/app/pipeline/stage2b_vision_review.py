@@ -18,8 +18,10 @@
 Gemini (как call_gemini_structured), а per-window сбой → НЕЙТРАЛЬНЫЙ review (no-op, логируем) —
 батч не падает (правило №8: явная ветка + лог, джоб доходит до done на детерминированном отборе).
 
-⚠️ B1 НЕ трогает reframe/stage3/stage5 (это B2). `subject_hint`/`fill_vs_fit_hint` возвращаются
-для будущего B2, но НИКУДА не проводятся.
+B2 (exploratory, флаг REFRAME_VISION_SUBJECT, ДЕФОЛТ OFF): парсим Gemini-box → `subject_cx`
+(centre-x субъекта, 0..1) и проводим его в reframe как ТАЙ-БРЕЙКЕР `_pick_target` (какой face-track
+вести в multi-face шоте). Границы регионов / fill-vs-fit / scene-cuts / Δ=0 сетку НЕ трогаем.
+`subject_hint`/`fill_vs_fit_hint` (текст) по-прежнему НИКУДА не проводятся.
 """
 
 from __future__ import annotations
@@ -66,7 +68,9 @@ class VisionReview:
     вызыватели (apply_review) его НЕ применяют — сегмент остаётся детерминированным.
 
     Времена trim'ов ОТНОСИТЕЛЬНЫ старта окна (0 = seg.start), null = «край не менять».
-    subject_hint / fill_vs_fit_hint — для будущего B2 (reframe), СЕЙЧАС никуда не проводятся.
+    subject_hint / fill_vs_fit_hint — текстовые B2-хинты (пока не проводятся в reframe).
+    subject_cx — ЧИСЛОВОЙ B2-сигнал (centre-x субъекта из Gemini-box, 0..1); проводится в
+    reframe как тай-брейкер `_pick_target` (какой трек вести); флаг REFRAME_VISION_SUBJECT.
     """
 
     hook_strength: float  # [0,1] — вирусность хука по видео+звуку
@@ -76,8 +80,9 @@ class VisionReview:
     edge_issue_end: bool
     trimmed_start_sec: float | None  # window-relative; None = без изменений
     trimmed_end_sec: float | None  # window-relative; None = без изменений
-    subject_hint: str | None  # B2-hint: кого держать в кадре (НЕ используется в B1)
-    fill_vs_fit_hint: str | None  # B2-hint: пер-шот режим (НЕ используется в B1)
+    subject_hint: str | None  # B2-hint (текст): кого держать в кадре
+    fill_vs_fit_hint: str | None  # B2-hint (текст): пер-шот режим
+    subject_cx: float | None = None  # B2: centre-x субъекта из Gemini-box [0,1]; None=нет
     ok: bool = True  # False = не применять (нейтральный/сбойный)
 
 
@@ -91,11 +96,31 @@ def neutral_review() -> VisionReview:
         hook_strength=0.0, hook_reason="", is_complete_thought=True,
         edge_issue_start=False, edge_issue_end=False,
         trimmed_start_sec=None, trimmed_end_sec=None,
-        subject_hint=None, fill_vs_fit_hint=None, ok=False,
+        subject_hint=None, fill_vs_fit_hint=None, subject_cx=None, ok=False,
     )  # fmt: skip
 
 
 # ─────────────────────────── pure: parse ───────────────────────────
+
+
+def subject_cx_from_box(box: Any) -> float | None:
+    """PURE. Gemini 2D box `[ymin, xmin, ymax, xmax]` (normalized 0..1000) → subject centre-x [0,1].
+
+    Gemini returns boxes in the [ymin, xmin, ymax, xmax] / 0..1000 convention. We keep ONLY the
+    horizontal centre (the reframe crop is a vertical 9:16 slice — only x matters). Returns None on
+    absent / malformed / degenerate (zero-or-negative width, e.g. an all-zero "no subject") box —
+    an EXPLICIT "no confident subject" signal, never a silent 0.0. Centre clamped into [0,1].
+    """
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    try:
+        _ymin, xmin, _ymax, xmax = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if xmax <= xmin:  # zero/negative width → not a real box (degenerate / all-zero)
+        return None
+    cx = (xmin + xmax) / 2.0 / 1000.0
+    return min(1.0, max(0.0, cx))
 
 
 def parse_vision_response(text: str) -> VisionReview:
@@ -139,6 +164,7 @@ def parse_vision_response(text: str) -> VisionReview:
         trimmed_end_sec=_opt_float("trimmed_end_sec"),
         subject_hint=_opt_str("subject_hint"),
         fill_vs_fit_hint=_opt_str("fill_vs_fit_hint"),
+        subject_cx=subject_cx_from_box(data.get("subject_box")),
         ok=True,
     )
 
@@ -224,6 +250,31 @@ def rerank_and_cap(segments: list[Segment], max_clips: int) -> list[Segment]:
     return sorted(segments, key=lambda s: s.score, reverse=True)[:max_clips]
 
 
+def apply_vision_reviews_indexed(
+    segments: list[Segment],
+    reviews: list[VisionReview],
+    words: list[Word],
+    *,
+    max_clips: int,
+) -> tuple[list[Segment], list[float | None]]:
+    """PURE. Как apply_vision_reviews, но ДОПОЛНИТЕЛЬНО возвращает subject_cx, ВЫРОВНЕННЫЙ по
+    ре-ранкнутым сегментам (B2: центр субъекта должен ехать ВМЕСТЕ со «своим» клипом сквозь
+    сортировку по score, т.к. Segment — read-only контракт, поле subject_cx туда не добавить).
+
+    len(reviews) короче segments (тех.сбой) → недостающие = нейтральные (no-op, subject_cx=None).
+    Сортировка идентична apply_vision_reviews (стабильный sort по score убыв. + обрезка).
+    """
+    applied: list[tuple[Segment, float | None]] = [
+        (
+            apply_review(seg, reviews[i] if i < len(reviews) else neutral_review(), words),
+            reviews[i].subject_cx if i < len(reviews) else None,
+        )
+        for i, seg in enumerate(segments)
+    ]
+    ordered = sorted(applied, key=lambda p: p[0].score, reverse=True)[:max_clips]
+    return [seg for seg, _ in ordered], [cx for _, cx in ordered]
+
+
 def apply_vision_reviews(
     segments: list[Segment],
     reviews: list[VisionReview],
@@ -234,12 +285,11 @@ def apply_vision_reviews(
     """PURE. Наложить reviews на segments (по индексу) и ре-ранкнуть best-first до max_clips.
 
     len(reviews) короче segments (тех.сбой) → недостающие трактуются как нейтральные (no-op).
+    Тонкая обёртка над apply_vision_reviews_indexed (единый источник порядка) — отбрасывает
+    subject_cx для вызывателей, которым нужен только ре-ранк сегментов.
     """
-    applied = [
-        apply_review(seg, reviews[i] if i < len(reviews) else neutral_review(), words)
-        for i, seg in enumerate(segments)
-    ]
-    return rerank_and_cap(applied, max_clips)
+    segs, _ = apply_vision_reviews_indexed(segments, reviews, words, max_clips=max_clips)
+    return segs
 
 
 # ─────────────────────────── prompt + structured schema (Gemini) ───────────────────────────
@@ -267,8 +317,11 @@ Clean-cut edges (be CONSERVATIVE — only flag REAL problems at the very edges):
   SMALL refined in/out time IN SECONDS RELATIVE TO THE START OF THIS CLIP (0 = first frame).
   Trim at most a fraction of a second — a word or two. If the edge is already clean, return null.
 
-Also return (used later, does not affect this decision — best effort, null if unsure):
-- subject_hint: who/what should stay in frame (e.g. "left speaker", "the woman", "the phone").
+Also return (used later for vertical reframing, does not affect this decision — best effort):
+- subject_box: the 2D bounding box of the ONE person/subject the viewer should watch, as
+  [ymin, xmin, ymax, xmax] normalized to 0-1000 (Gemini box convention). null if unsure or if
+  there is no single clear subject (e.g. a wide shot of several equally-important people).
+- subject_hint: a short label for that same subject (e.g. "left speaker", "the woman").
 - fill_vs_fit_hint: "fill" (single tight subject → crop) or "fit" (wide / multiple people / text).
 
 Return ONLY the JSON object with these exact keys.
@@ -292,6 +345,7 @@ class _VisionSchema(BaseModel):
     edge_issue_end: bool
     trimmed_start_sec: float | None = None
     trimmed_end_sec: float | None = None
+    subject_box: list[int] | None = None  # B2: [ymin,xmin,ymax,xmax] 0..1000 → subject centre-x
     subject_hint: str | None = None
     fill_vs_fit_hint: str | None = None
 

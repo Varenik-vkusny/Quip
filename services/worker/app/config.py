@@ -152,6 +152,16 @@ class Settings(BaseSettings):
     # Пин версии (как llm_model): -latest/gemini-3* могут молча уехать на ×10 стоимости → coerce.
     vision_review_model: str = "gemini-2.5-flash"
     vision_review_media_res: str = "low"  # low | medium | high (Gemini media_resolution окна)
+    # B2 (multimodal clip quality, exploratory): vision-подсказка центра субъекта (Gemini-box →
+    # centre-x) как ТАЙ-БРЕЙКЕР `_pick_target` в reframe — выбрать ПРАВИЛЬНОЕ лицо в multi-face
+    # шоте, переопределяя speak/width. НЕ трогает границы/fill-vs-fit/Δ=0 сетку — только ВЫБОР
+    # трека. Дефолт OFF (прототип для оценки фаундером, НЕ отгружено). Требует
+    # VISION_REVIEW_ENABLED (subject_cx берётся из vision-ревью). Gemini-box груб/дрожит →
+    # используем ТОЛЬКО чтобы выбрать трек, не двигать кроп. Проводится в reframe ТОЛЬКО на
+    # in-process рендер-пути (локально/dev + фолбэк фан-аута); контейнерный фан-аут (Modal/
+    # Cloud Run) НЕ несёт subject_cx через границу (clip_spawn_args не расширяли) — это осознанное
+    # ограничение прототипа. Kill-switch REFRAME_VISION_SUBJECT=false → байт-в-байт прежний reframe.
+    reframe_vision_subject: bool = False
 
     @field_validator("vision_review_model", mode="after")
     @classmethod

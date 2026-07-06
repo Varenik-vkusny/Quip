@@ -92,6 +92,7 @@ def test_render_all_clips_local_renders_every_clip_in_order(monkeypatch, tmp_pat
         seg: Segment,
         meta: SourceMeta,
         user_id: str | None = None,
+        subject_cx: float | None = None,
     ) -> dict:
         calls.append(clip_index)
         seen_users.append(user_id)
@@ -160,7 +161,7 @@ def test_render_all_clips_cloudrun_fanout_falls_back_in_process(
     monkeypatch.setenv("RENDER_CONCURRENCY", "1")  # детерминированный sequential-фолбэк
     calls: list[int] = []
 
-    def fake_one(out, source_name, clip_index, seg, meta, user_id=None):
+    def fake_one(out, source_name, clip_index, seg, meta, user_id=None, subject_cx=None):
         calls.append(clip_index)
         return {
             "clip_id": f"clip_{clip_index:02d}",
@@ -249,7 +250,7 @@ def test_render_all_clips_local_one_clip_fails_others_render(monkeypatch, tmp_pa
 
     monkeypatch.setattr(run_mod.dispatch, "modal_spawn_enabled", lambda: False)
 
-    def maybe_boom(out, source_name, clip_index, seg, meta, user_id=None):
+    def maybe_boom(out, source_name, clip_index, seg, meta, user_id=None, subject_cx=None):
         if clip_index == 2:
             raise JobError("render", "0 video frames for this clip")
         return {
