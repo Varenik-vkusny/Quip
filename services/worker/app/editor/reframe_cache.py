@@ -49,10 +49,10 @@ def _manual_region(ov: CropOverride, dur: float) -> list[TrackRegion]:
     MVP (2026-06-24): split удалён → легаси split-override трактуем как fit (wide).
     """
     if ov.mode in ("fit", "split"):
-        return [TrackRegion(t0=0.0, t1=dur, mode="fit", points=())]
+        return [TrackRegion(t0=0.0, t1=dur, mode="fit", points=(), fit_style=ov.fit_style)]
     cx = ov.center if ov.center is not None else 0.5
     pt = TrackPoint(t=0.0, mode="fill", cx=cx)
-    return [TrackRegion(t0=0.0, t1=dur, mode="fill", points=(pt,))]
+    return [TrackRegion(t0=0.0, t1=dur, mode="fill", points=(pt,), fit_style=ov.fit_style)]
 
 
 def _recolor_region(r: TrackRegion, ov: CropOverride) -> TrackRegion:
@@ -62,12 +62,13 @@ def _recolor_region(r: TrackRegion, ov: CropOverride) -> TrackRegion:
     MVP (2026-06-24): split удалён → легаси split-override трактуем как fit. Неизвестный mode → r.
     """
     if ov.mode in ("fit", "split"):
-        return TrackRegion(t0=r.t0, t1=r.t1, mode="fit", points=())
+        return TrackRegion(t0=r.t0, t1=r.t1, mode="fit", points=(), fit_style=ov.fit_style)
     if ov.mode == "fill":
         cx = ov.center if ov.center is not None else 0.5
         return TrackRegion(
             t0=r.t0, t1=r.t1, mode="fill",
             points=(TrackPoint(t=r.t0, mode="fill", cx=cx),),
+            fit_style=r.fit_style,
         )  # fmt: skip
     return r
 
@@ -205,6 +206,7 @@ def _region_to_dict(r: TrackRegion) -> dict[str, Any]:
         "mode": r.mode,
         "points": pts(r.points),
         "points_b": pts(r.points_b),
+        "fit_style": r.fit_style,
     }
 
 
@@ -215,10 +217,17 @@ def _region_from_dict(d: dict[str, Any]) -> TrackRegion:
     # MVP (2026-06-24): split удалён → легаси persisted split-регион трактуем как fit (wide),
     # границы (t0/t1) сохраняем (кадровая сетка цела).
     if d["mode"] == "split":
-        return TrackRegion(t0=d["t0"], t1=d["t1"], mode="fit", points=())
+        return TrackRegion(
+            t0=d["t0"],
+            t1=d["t1"],
+            mode="fit",
+            points=(),
+            fit_style=d.get("fit_style", "blur_zoom"),
+        )
     return TrackRegion(
         t0=d["t0"], t1=d["t1"], mode=d["mode"],
         points=pts(d["points"]), points_b=pts(d.get("points_b", [])),
+        fit_style=d.get("fit_style", "blur_zoom"),
     )  # fmt: skip
 
 

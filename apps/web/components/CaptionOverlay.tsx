@@ -40,6 +40,7 @@ const DEFAULT_STYLE: Required<CaptionStyle> = {
   pos_x: null,
   pos_y: null,
   wrap_width: null,
+  fit_style: "blur_zoom",
 };
 
 function resolveStyle(style?: CaptionStyle | null): Required<CaptionStyle> {

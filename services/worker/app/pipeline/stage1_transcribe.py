@@ -139,6 +139,7 @@ def call_deepgram(
         # D2: диаризация ВКЛ → per-word speaker. Нужна, чтобы конец клипа не захватывал реплику
         # ДРУГОГО спикера (snap_end_index учитывает смену спикера). Включено в Nova-3 без доп.цены.
         "diarize": "true",
+        "filler_words": "true",
     }
     if language:
         params["language"] = language

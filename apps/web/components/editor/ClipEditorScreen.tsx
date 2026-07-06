@@ -120,6 +120,7 @@ interface RawRegion {
   mode: string;
   points: { t: number; cx: number | null }[];
   points_b?: { t: number; cx: number | null }[];
+  fit_style?: string;
 }
 
 /** Per-clip data warmed into the neighbor-prefetch cache (instant paint on switch). */
@@ -1264,6 +1265,7 @@ export default function ClipEditorScreen({
       mode: "auto" | "fill" | "fit",
       center: number | null,
       centerB: number | null,
+      fitStyle?: string,
     ) => {
       if (!edit) return;
       setError(null);
@@ -1278,6 +1280,7 @@ export default function ClipEditorScreen({
           mode,
           center,
           center_b: centerB,
+          fit_style: fitStyle,
         });
         commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
         setDirty(true);
@@ -1775,14 +1778,24 @@ export default function ClipEditorScreen({
       const ov = pickActiveOverride(edit?.reframe_overrides ?? [], t);
       if (ov) {
         const m = ov.mode === "fit" ? "fit" : ov.mode === "split" ? "split" : "fill";
-        return { mode: m, cx: ov.center ?? (m === "split" ? 0.3 : 0.5), cxB: ov.center_b ?? 0.7 };
+        return {
+          mode: m,
+          cx: ov.center ?? (m === "split" ? 0.3 : 0.5),
+          cxB: ov.center_b ?? 0.7,
+          fitStyle: ov.fit_style ?? "blur_zoom",
+        };
       }
       if (rawRegions) {
         const clipT = Math.max(0, t - outerStart);
         const reg =
           rawRegions.find((r) => clipT >= r.t0 && clipT < r.t1) ?? rawRegions.at(-1) ?? null;
         if (reg && (reg.mode === "fit" || reg.mode === "split" || reg.mode === "fill")) {
-          return { mode: reg.mode, cx: cxAt(reg.points, clipT), cxB: cxAt(reg.points_b, clipT) };
+          return {
+            mode: reg.mode,
+            cx: cxAt(reg.points, clipT),
+            cxB: cxAt(reg.points_b, clipT),
+            fitStyle: reg.fit_style ?? "blur_zoom",
+          };
         }
       }
       return null;

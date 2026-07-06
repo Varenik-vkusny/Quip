@@ -156,7 +156,9 @@
   транскод source→720p) снят с критического пути — отдельная `preview_job` строит его ПАРАЛЛЕЛЬНО
   с клипами (редактор фолбэчит на source, пока не готов). Локально (dev) — старый цикл + inline
   preview. Не трогает stage3/stage5 (инвариант кадровой сетки цел). См. JOURNAL 2026-06-17.
-- **State:** Supabase Postgres project **`qiagetbnsssvbiowuxpp`**, migrations **0001–0014 applied**
+- **State:** Supabase Postgres project **`mwfnjbnsowiaywkdrlyz`** (⚠️ старый `qiagetbnsssvbiowuxpp` = МЁРТВ,
+  сменён при миграции на Cloud Run 2026-07-02), migrations **0001–0015** (0015 = схема автопостинга — dormant;
+  Studio-миграция 0016 ещё НЕ написана — поэтому Studio-тариф не live), applied **0001–0014**
   (0009 = RLS на agent_runs; 0010 = RPC `set_clip_video_url` для incremental-выдачи клипов;
   0011 = `jobs.source_minutes/transcript_words/moments_found` для live-narration счётчиков;
   0012 = `job_artifacts.preview_moments` для co-watch-маркеров;
@@ -170,13 +172,22 @@
   ⏳ **Studio $49 / 42 videos** — код проведён (billing/polar/plans.ts, Polar-продукт `708186c8-…`), но
   НЕ live: нужна миграция **0016** (`profiles.plan` CHECK += 'studio') + редеплой воркера + push фронта.
   Детали → `docs/JOURNAL.md` «2026-07-03 (биллинг)».
-- **AI-модели:** транскрипция — Deepgram **`nova-3`**; отбор/хуки/агент — **Gemini**, запинено на
+- **AI-модели:** транскрипция — Deepgram **`nova-3`** (+ `"filler_words": "true"` — слова-паразиты
+  получают таймкоды, ИИ не режет клип на «um»); отбор/хуки/агент — **Gemini**, запинено на
   **`gemini-2.5-flash`** (⚠️ 2026-06-22: `gemini-flash-latest` уехал на `gemini-3.5-flash` = ~×10 цена;
   `config.pin_llm_model` коэрсит любой `*-latest`/`gemini-3*` → `gemini-2.5-flash` с логом, поэтому даже
   Modal-секрет `LLM_MODEL=gemini-flash-latest` безопасен — но рекомендуется обновить секрет на
   `gemini-2.5-flash`). Фолбэк: select/хуки → `-flash-lite`; **чат-агент** — цепочка
   `gemini-2.5-flash → 2.5-flash-lite` (раньше начиналась с `-latest`; убрано тем же гардом). Гард-тест
   `test_config_llm_guard.py`. Видео в LLM не уходит — только индексированный текст транскрипта.
+- **Умные границы клипов (2026-07-06):** три механизма предотвращают обрывы слов/мыслей на краях.
+  (1) **Filler words** — Deepgram `filler_words=true`; слова-паразиты размечены таймкодами,
+  ИИ видит «uh/um/э-э» и не обрезает клип внутри паразита. (2) **Индексированный транскрипт**
+  (`build_indexed_transcript`): формат `[N]слово` (инлайн на каждое слово) + теги `<pause: X.Xs>`
+  и `<Speaker X>:` — ИИ обязан резать только на паузах/сменах спикера. (3) **Безопасный паддинг
+  старта** −150 мс (зажатый на конце предыдущего слова) — устраняет обрезание согласных в начале
+  первого слова. Источник: `stage1_transcribe.py`, `stage2_select.py`,
+  `prompts/select_moments.v2.txt`.
 - **Язык чат-агента (2026-06-18):** ЧАТ — на языке юзера; ON-SCREEN хук — ВСЕГДА на языке
   ТРАНСКРИПЦИИ клипа (язык видео), даже если юзер пишет на другом (`set_hook_text` переводит).
   Источник: `prompts/agent_clip_editor.v1.txt` (LANGUAGE POLICY).
@@ -345,19 +356,21 @@ Pick [X] by task:
 > **2026-06-24:** the old GitHub `Varenik-vkusny` is suspended; the live remote is now
 > **`cloud` → `github.com/akybaevtimur1/Quip`** (use `git push cloud main` only to back up history —
 > ⚠️ **GitHub auto-deploy is DEAD, the `akybaevtimur1` account is blocked**). Ship the frontend by CLI:
-> **`vercel deploy --prod`** (from repo root, committed `.vercelignore`, aliases `quip.ink`). The worker
-> deploys independently via `modal deploy deploy/modal/worker.py`.
+> **`vercel deploy --prod --scope timurkas-projects`** (from repo root, committed `.vercelignore`, aliases
+> `quip.ink`). The worker deploys independently to **GCP Cloud Run** — `gcloud builds submit services/worker`
+> then `gcloud run jobs update quip-pipeline quip-render` + `gcloud run deploy quip-api` (pin `@sha256`).
+> ⚠️ **Modal больше не используется** — забанен по ToS 2026-07-02 (миграция → `docs/CLOUDRUN_AND_RENDER_PERF.md`).
 
 | Piece | Where | How it deploys | Dashboard |
 |-------|-------|----------------|-----------|
-| Frontend (`apps/web`) | Vercel **`quip-app`** | **`vercel deploy --prod`** (CLI, from repo root → aliases `quip.ink`). ⚠️ GitHub auto-deploy DEAD (acct `akybaevtimur1` blocked) | vercel.com/timurkas-projects/quip-app |
-| Worker (`services/worker`) | Modal **`quip-worker`** | `modal deploy deploy/modal/worker.py` | modal.com (workspace akybaevtimur7) |
-| State / auth / billing data | Supabase **`qiagetbnsssvbiowuxpp`** | SQL Editor / migrations `0001–0014` | supabase.com dashboard |
+| Frontend (`apps/web`) | Vercel **`quip-app`** | **`vercel deploy --prod --scope timurkas-projects`** (CLI, from repo root → aliases `quip.ink`). ⚠️ GitHub auto-deploy DEAD (acct `akybaevtimur1` blocked) | vercel.com/timurkas-projects/quip-app |
+| Worker (`services/worker`) | **GCP Cloud Run** — project `quip-project-500711`, `europe-west1`: Service **`quip-api`** + Jobs **`quip-pipeline`** (8vCPU/32Gi coordinator) + **`quip-render`** (4vCPU/16Gi per-clip fan-out) | `gcloud builds submit services/worker` → `gcloud run jobs update quip-pipeline quip-render` + `gcloud run deploy quip-api` (pin `@sha256`) | console.cloud.google.com (project `quip-project-500711`) |
+| State / auth / billing data | Supabase **`mwfnjbnsowiaywkdrlyz`** (old `qiagetbnsssvbiowuxpp` = DEAD) | SQL Editor / migrations `0001–0015` (0015 = social autoposting schema, dormant; Studio 0016 not written yet) | supabase.com dashboard |
 | Clip storage | Cloudflare **R2** (`cdn.quip.ink`) | n/a | Cloudflare dashboard |
 | Payments | **Polar** (production) | products + webhook configured | polar.sh dashboard |
 
-Secrets: worker reads Modal secrets `quip-worker` (Deepgram/Gemini/Supabase/R2) + `quip-billing`
-(`BILLING_ENABLED` + `POLAR_WEBHOOK_SECRET` + product IDs). Frontend reads Vercel env
+Secrets: worker reads **GCP Secret Manager** (Deepgram / Gemini / **Groq** / Supabase service-role / R2 /
+`POLAR_WEBHOOK_SECRET`) — **not Modal secrets** (Modal is dead). Frontend reads Vercel env
 (`NEXT_PUBLIC_SUPABASE_*`, `NEXT_PUBLIC_WORKER_URL`, `POLAR_ACCESS_TOKEN`, `POLAR_SERVER`).
 
 ---

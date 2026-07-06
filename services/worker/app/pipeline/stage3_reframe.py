@@ -119,6 +119,7 @@ class TrackRegion:
     mode: str  # "fill" | "fit" | "split"
     points: tuple[TrackPoint, ...]  # fill/split: значимые cx; fit: пустой tuple
     points_b: tuple[TrackPoint, ...] = ()  # только split: второй спикер
+    fit_style: str = "blur_zoom"
 
 
 @dataclass(frozen=True)

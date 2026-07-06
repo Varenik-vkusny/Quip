@@ -131,6 +131,7 @@ export interface CaptionStyle {
   color?: string;
   emphasis_auto?: boolean;
   emphasis_color?: string | null;
+  fit_style?: string;
   font?: string;
   margin_v?: number;
   outline_color?: string;
@@ -262,6 +263,7 @@ export interface ClipEdit {
 export interface CropOverride {
   center?: number | null;
   center_b?: number | null;
+  fit_style?: string;
   mode: string;
   source_end: number;
   source_start: number;

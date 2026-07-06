@@ -172,13 +172,24 @@ def snap_start_index(
 
 
 def indices_to_times(words: list[Word], start_idx: int, end_idx: int) -> tuple[float, float]:
-    """Индексы слов → (start_sec, end_sec). JobError при выходе за диапазон или start>end."""
+    """Индексы слов → (start_sec, end_sec) с безопасным сдвигом начала назад на 150мс.
+    JobError при выходе за диапазон или start>end.
+    """
     n = len(words)
     if not (0 <= start_idx < n and 0 <= end_idx < n):
         raise JobError(_STAGE, f"index out of range: start={start_idx}, end={end_idx}, n={n}")
     if start_idx > end_idx:
         raise JobError(_STAGE, f"start_word_index > end_word_index: {start_idx} > {end_idx}")
-    return words[start_idx].start, words[end_idx].end
+
+    start = words[start_idx].start
+    # Микро-паддинг 150мс назад для сохранения первой согласной,
+    # не залезая на аудио предыдущего слова
+    if start_idx > 0:
+        start = max(words[start_idx - 1].end, start - 0.15)
+    else:
+        start = max(0.0, start - 0.15)
+
+    return start, words[end_idx].end
 
 
 def pad_clip_end(
@@ -255,13 +266,12 @@ def postprocess(
         tone = str(tone_raw).strip().lower() or None if tone_raw else None
         key_quote = str(key_quote_raw).strip() or None if key_quote_raw else None
         try:
-            si = snap_start_index(words, si)
-            ei = snap_end_index(words, ei, start_idx=si)
             start, end = indices_to_times(words, si, ei)
         except (JobError, IndexError):
             continue
         # Гейт по РЕЧИ (до паддинга): иначе клип у границы max_sec дропнется из-за тишины.
-        if not (min_sec <= end - start <= max_sec):
+        raw_dur = words[ei].end - words[si].start
+        if not (min_sec <= raw_dur <= max_sec):
             continue
         if tail_pad > 0 and duration is not None:
             end = pad_clip_end(end, words, ei, duration, tail_pad)
@@ -329,7 +339,7 @@ def load_system_prompt() -> str:
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are an expert short-form video editor. You receive a word-indexed transcript of a \
-single-speaker video and must select the BEST standalone moments to cut into vertical clips.
+video and must select the BEST standalone moments to cut into vertical clips.
 
 Return moments as word index ranges. For each moment choose a `type`:
 - hook: a strong opening — a question, bold claim, conflict, or number in the first seconds.
@@ -347,9 +357,18 @@ For each moment ALSO produce (in this order — classify the feeling BEFORE writ
 - `why_works`: ONE short sentence (transcript language) on WHY it performs standalone.
 
 HARD RULES:
+- The transcript contains `<pause: Xs>` tokens indicating pauses/silences between words,
+  and `<Speaker X>:` headers indicating speaker turns. Use these tags to find natural
+  sentence/speech boundaries.
+- Each word in the transcript is marked with its absolute index `[index]word` (e.g. `[12]think`).
+  Use these exact indices for `start_word_index` and `end_word_index` of your selections.
 - Each moment MUST be a complete thought: clean start (begin a sentence), clean ending.
-- Respect the HARD length limit stated in the request (sweet spot ~20-45s). A clip over the
-  stated maximum is rejected — trim long moments to their strongest in-range window, never skip.
+- Choose the word indices EXACTLY so that the speaker finishes their thought. Never cut in the
+  middle of a sentence, during a dramatic tone/pitch change, or in the middle of a
+  rising intonation. The final clip must feel logically complete and satisfying.
+  Prefer cutting at `<pause: Xs>` gaps or speaker transitions.
+- Respect the HARD length limit stated in the request. Aim for a sweet spot of 30-60 seconds
+  (but at least 20 seconds).
 - Moments MUST NOT overlap.
 - `reason` must be CONCRETE and specific to THIS moment (why it works), not generic.
 - `tone`, `hook_style`, `hook`, `why_works` are REQUIRED and specific to each moment.
@@ -378,13 +397,44 @@ class _LlmSelection(BaseModel):
     segments: list[_LlmSegment]
 
 
-def build_indexed_transcript(words: list[Word], per_line: int = 10) -> str:
-    """Пронумерованный по словам транскрипт: каждая строка начинается с [индекс первого слова]."""
+def build_indexed_transcript(words: list[Word], per_line: int = 15) -> str:
+    """Пронумерованный по словам транскрипт с разметкой пауз и спикеров.
+    Каждое слово идет в формате '[индекс]слово'.
+    """
     lines: list[str] = []
-    for i in range(0, len(words), per_line):
-        chunk = " ".join(w.text for w in words[i : i + per_line])
-        lines.append(f"[{i}] {chunk}")
-    return "\n".join(lines)
+    current_speaker: int | None = -999  # Сентинел
+    current_line: list[str] = []
+
+    for i, w in enumerate(words):
+        # 1) Смена спикера
+        if w.speaker is not None and w.speaker != current_speaker:
+            if current_line:
+                lines.append(" ".join(current_line))
+                current_line = []
+            lines.append(f"\n<Speaker {w.speaker}>:")
+            current_speaker = w.speaker
+
+        # 2) Паузы
+        if i > 0:
+            pause = w.start - words[i - 1].end
+            if pause >= 0.4:
+                current_line.append(f"<pause: {pause:.1f}s>")
+                if current_line:
+                    lines.append(" ".join(current_line))
+                    current_line = []
+
+        # 3) Слово с индексом
+        current_line.append(f"[{i}]{w.text}")
+
+        # Перенос длинных строк
+        if len(current_line) >= per_line:
+            lines.append(" ".join(current_line))
+            current_line = []
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return "\n".join(lines).strip()
 
 
 def build_user_prompt(

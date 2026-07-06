@@ -170,7 +170,7 @@ class TestIndicesToTimes:
     def test_maps_to_word_boundaries(self) -> None:
         words = uniform(10)
         start, end = indices_to_times(words, 2, 5)
-        assert start == 2.0  # words[2].start
+        assert start == 1.85  # words[2].start - 0.15
         assert end == 5.8  # words[5].end
 
     def test_out_of_range_raises(self) -> None:
@@ -541,10 +541,9 @@ class TestPostprocess:
         assert s.score == 1.0  # клипнут
         assert s.reason == "concrete why"  # тримнут
         assert s.type is ClipType.hook
-        # start снэпнут к началу предложения (после w2.) = idx3 -> остаётся 3 (idx2 конец)
-        assert s.start == 3.0
-        # end снэпнут к w25. = idx25 -> end = 25.8
-        assert s.end == 25.8
+        # Доверяем ИИ-индексам напрямую без snap (с учетом безопасного паддинга старта)
+        assert s.start == 2.85
+        assert s.end == 22.8
 
     def test_drops_too_short(self) -> None:
         words = uniform(40)
@@ -693,8 +692,8 @@ class TestPostprocess:
         assert segs[0].hook is None and segs[0].why_works is None
 
     def test_applies_tail_padding(self) -> None:
-        # W1: tail_pad добивает конец тишиной (чистый луп). end snap к w25.→25.8; w26 старт 26.0;
-        # pad 0.3 → min(26.1, 26.0) = 26.0.
+        # W1: tail_pad добивает конец тишиной (чистый луп). end = w22.end = 22.8; w23 старт = 23.0;
+        # pad 0.3 → min(23.1, 23.0) = 23.0.
         words = uniform(40, sentence_ends={2, 25})
         raw = [
             {
@@ -707,7 +706,7 @@ class TestPostprocess:
         ]
         segs = postprocess(raw, words, min_sec=15, max_sec=60, duration=100.0, tail_pad=0.3)
         assert len(segs) == 1
-        assert segs[0].end == pytest.approx(26.0)
+        assert segs[0].end == pytest.approx(23.0)
 
     def test_tail_padding_gate_uses_unpadded_length(self) -> None:
         # Гейт длины считается по РЕЧИ (без паддинга): клип ровно на max_sec проходит,
@@ -786,3 +785,35 @@ class TestBackoffDelay:
         # (jitter рассинхронизирует волны ретраев). Детерминированный delay → set размера 1.
         vals = {_backoff_delay(5) for _ in range(50)}
         assert len(vals) > 1
+
+
+class TestBuildIndexedTranscriptFormatting:
+    def test_formats_speaker_tags_pauses_and_inline_indices(self) -> None:
+        words = [
+            Word(text="Hello", start=1.0, end=1.5, speaker=0),
+            Word(text="world", start=1.5, end=2.0, speaker=0),
+            # Пауза 1.0 сек
+            Word(text="How", start=3.0, end=3.5, speaker=0),
+            # Смена спикера
+            Word(text="Fine", start=3.5, end=4.0, speaker=1),
+        ]
+        res = build_indexed_transcript(words)
+        assert "<Speaker 0>:" in res
+        assert "[0]Hello [1]world" in res
+        assert "<pause: 1.0s>" in res
+        assert "[2]How" in res
+        assert "<Speaker 1>:" in res
+        assert "[3]Fine" in res
+
+
+class TestIndicesToTimesClamping:
+    def test_clamps_start_padding_to_prev_word_end(self) -> None:
+        words = [
+            Word(text="first", start=1.0, end=1.9),
+            # Пауза 0.1 сек (меньше 0.15 сек)
+            Word(text="second", start=2.0, end=2.5),
+        ]
+        start, end = indices_to_times(words, 1, 1)
+        # Должен зажаться на 1.9, а не уйти на 1.85 (2.0 - 0.15 = 1.85)
+        assert start == 1.9
+        assert end == 2.5

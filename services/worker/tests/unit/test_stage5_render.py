@@ -484,3 +484,39 @@ class TestBuildSinglePassCmd:
         assert "aac" in s
         assert "+faststart" in s
         assert cmd[-1] == "clips/clip_01.mp4"
+
+
+class TestFitStyles:
+    def test_build_smooth_filter_blur_zoom(self) -> None:
+        region = TrackRegion(t0=0.0, t1=5.0, mode="fit", points=(), fit_style="blur_zoom")
+        fc = build_smooth_filter([region], 1920, 1080, 24.0, None)
+        assert "force_original_aspect_ratio=increase" in fc
+        assert "gblur=sigma=20" in fc
+
+    def test_build_smooth_filter_blur(self) -> None:
+        region = TrackRegion(t0=0.0, t1=5.0, mode="fit", points=(), fit_style="blur")
+        fc = build_smooth_filter([region], 1920, 1080, 24.0, None)
+        assert "force_original_aspect_ratio=decrease" in fc
+        assert "pad=" in fc
+        assert "gblur=sigma=60" in fc
+
+    def test_build_smooth_filter_black(self) -> None:
+        region = TrackRegion(t0=0.0, t1=5.0, mode="fit", points=(), fit_style="black")
+        fc = build_smooth_filter([region], 1920, 1080, 24.0, None)
+        assert "color=black" in fc
+        assert "force_original_aspect_ratio=decrease" in fc
+
+    def test_build_timeline_filter_fit_styles(self) -> None:
+        seg_black = TimelineSegment(
+            src_f0=0,
+            src_f1=120,
+            src_t0=0.0,
+            src_t1=5.0,
+            mode="fit",
+            points=(),
+            region_t0=0.0,
+            fit_style="black",
+        )
+        fc = build_timeline_filter([seg_black], 1920, 1080, 24.0, None)
+        assert "color=black" in fc
+        assert "force_original_aspect_ratio=decrease" in fc

@@ -96,11 +96,12 @@ SELECTION QUALITY (be generous with STRONG moments, ruthless with weak ones):
   withhold strong ones to keep the list short.
 
 HARD RULES (selection):
+- The transcript contains `<pause: Xs>` tokens indicating pauses/silences between words, and `<Speaker X>:` headers indicating speaker turns. Use these tags to find natural sentence/speech boundaries.
+- Each word in the transcript is marked with its absolute index `[index]word` (e.g. `[12]think`). Make sure to use these exact indices for `start_word_index` and `end_word_index` of your selections.
 - Each moment MUST be a complete thought: clean start (begin a sentence), clean ending (.?!).
-- MINIMUM clip length is 20 seconds. Never select a fragment ("огрызок") shorter than 20s —
-  if a strong moment is shorter, expand to the nearest natural sentence boundary to reach ≥20s.
-- Respect the HARD length limit stated in the request (sweet spot ~20-45s). A clip over the
-  stated maximum is rejected — trim long moments to their strongest in-range window, never skip.
+- Choose the word indices EXACTLY so that the speaker finishes their thought. Never cut in the middle of a sentence, during a dramatic tone/pitch change, or in the middle of a rising intonation. The final clip must feel logically complete and satisfying to the viewer. Prefer cutting at `<pause: Xs>` gaps or speaker transitions.
+- MINIMUM clip length is 20 seconds, but aim for a sweet spot of 30-60 seconds. A clip under 30 seconds is often too brief to deliver satisfying value; expand the moment to adjacent sentences to reach 30+ seconds if possible.
+- Respect the HARD length limit stated in the request. A clip over the stated maximum is rejected — trim long moments to their strongest in-range window, never skip.
 - Moments MUST NOT overlap.
 - High bar, but surface ALL genuinely strong standalone moments — never pad to hit a number.
 - Use ONLY word indices that exist in the transcript.

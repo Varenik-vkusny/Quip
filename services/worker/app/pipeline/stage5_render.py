@@ -24,7 +24,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.errors import JobError
 from app.pipeline.stage3_reframe import TrackPoint, compute_crop_window
@@ -277,6 +277,7 @@ def _region_chain(
     out_w: int,
     out_h: int,
     blur: int,
+    fit_style: str = "blur_zoom",
 ) -> str:
     """Фильтр-чейн одного региона (между trim и setsar): fit | fill | split. PURE.
 
@@ -286,13 +287,28 @@ def _region_chain(
     по ширине (full-bleed, без рамок), vstack.
     """
     if mode == "fit":
-        return (
-            f"split=2[bg{i}][fg{i}];"
-            f"[bg{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{out_h},gblur=sigma={blur}[bgb{i}];"
-            f"[fg{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fgb{i}];"
-            f"[bgb{i}][fgb{i}]overlay=(W-w)/2:(H-h)/2"
-        )
+        if fit_style == "black":
+            return (
+                f"color=black:size={out_w}x{out_h}[bg{i}];"
+                f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fg{i}];"
+                f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2"
+            )
+        elif fit_style == "blur":
+            return (
+                f"split=2[bg{i}][fg{i}];"
+                f"[bg{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,gblur=sigma=60[bgb{i}];"
+                f"[fg{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fgb{i}];"
+                f"[bgb{i}][fgb{i}]overlay=(W-w)/2:(H-h)/2"
+            )
+        else:  # "blur_zoom"
+            return (
+                f"split=2[bg{i}][fg{i}];"
+                f"[bg{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+                f"crop={out_w}:{out_h},gblur=sigma={blur}[bgb{i}];"
+                f"[fg{i}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[fgb{i}];"
+                f"[bgb{i}][fgb{i}]overlay=(W-w)/2:(H-h)/2"
+            )
     if mode == "split":
         if not points or not points_b:
             raise JobError(_STAGE, f"split region #{i} is missing two trajectories")
@@ -377,7 +393,7 @@ def build_smooth_filter(
         f1 = round(r.t1 * fps)
         seg = _region_chain(
             i, r.mode, r.points, r.points_b, r.t0, src_w, src_h,
-            out_w=out_w, out_h=out_h, blur=blur,
+            out_w=out_w, out_h=out_h, blur=blur, fit_style=r.fit_style,
         )  # fmt: skip
         parts.append(
             f"[a{i}]trim=start_frame={f0}:end_frame={f1},setpts=PTS-STARTPTS,{seg},setsar=1[s{i}];"
@@ -517,9 +533,9 @@ def render_frame_by_frame(
                 break
             t_clip = frame_idx / fps
             region = _get_region_at(regions, t_clip)
+            out_frame: Any
             if region.mode == "fit":
-                bg = cv2.resize(frame, (out_w, out_h))
-                bg = cv2.GaussianBlur(bg, (ksize, ksize), 0)
+                fit_style = region.fit_style
                 scale = min(out_w / src_w, out_h / src_h)
                 fw = max(2, round(src_w * scale))
                 fh = max(2, round(src_h * scale))
@@ -528,8 +544,27 @@ def render_frame_by_frame(
                 fg = cv2.resize(frame, (fw, fh))
                 y_off = (out_h - fh) // 2
                 x_off = (out_w - fw) // 2
-                bg[y_off : y_off + fh, x_off : x_off + fw] = fg
-                out_frame = bg
+
+                if fit_style == "black":
+                    import numpy as np
+
+                    bg_black = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+                    bg_black[y_off : y_off + fh, x_off : x_off + fw] = fg
+                    out_frame = bg_black
+                elif fit_style == "blur":
+                    import numpy as np
+
+                    tmp_letterbox = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+                    tmp_letterbox[y_off : y_off + fh, x_off : x_off + fw] = fg
+                    ksize_strong = 121
+                    bg_blur = cv2.GaussianBlur(tmp_letterbox, (ksize_strong, ksize_strong), 0)
+                    bg_blur[y_off : y_off + fh, x_off : x_off + fw] = fg
+                    out_frame = bg_blur
+                else:  # "blur_zoom"
+                    bg_zoom = cv2.resize(frame, (out_w, out_h))
+                    bg_zoom = cv2.GaussianBlur(bg_zoom, (ksize, ksize), 0)
+                    bg_zoom[y_off : y_off + fh, x_off : x_off + fw] = fg
+                    out_frame = bg_zoom
             else:
                 cx = _interp_cx(region, t_clip)
                 c = compute_crop_window(src_w, src_h, cx, t=0.0)
@@ -646,6 +681,7 @@ class TimelineSegment:
     points: tuple[TrackPoint, ...]
     region_t0: float  # interval-relative старт региона (offset для crop-expr)
     points_b: tuple[TrackPoint, ...] = ()  # split: траектория второго спикера
+    fit_style: str = "blur_zoom"
 
 
 def flatten_timeline(
@@ -678,6 +714,7 @@ def flatten_timeline(
                     points=r.points,
                     region_t0=r.t0,
                     points_b=r.points_b,
+                    fit_style=r.fit_style,
                 )
             )
     return segs
@@ -715,7 +752,7 @@ def build_timeline_filter(
     for i, s in enumerate(segments):
         seg = _region_chain(
             i, s.mode, s.points, s.points_b, s.region_t0, src_w, src_h,
-            out_w=out_w, out_h=out_h, blur=blur,
+            out_w=out_w, out_h=out_h, blur=blur, fit_style=s.fit_style,
         )  # fmt: skip
         parts.append(
             f"[v{i}]trim=start_frame={s.src_f0}:end_frame={s.src_f1},"

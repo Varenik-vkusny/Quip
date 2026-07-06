@@ -62,6 +62,7 @@ export function FrameTab({
     mode: FrameMode,
     center: number | null,
     centerB: number | null,
+    fitStyle?: string,
   ) => Promise<void>;
   onAspectChange: (aspect: Aspect) => void;
   onMotionChange: (lockPerShot: boolean) => void;
@@ -85,6 +86,7 @@ export function FrameTab({
   const cm = current?.mode;
   const [mode, setMode] = useState<FrameMode>(cm === "fill" || cm === "fit" ? cm : "auto");
   const [center, setCenter] = useState(current?.center ?? 0.5);
+  const [fitStyle, setFitStyle] = useState(current?.fit_style ?? "blur_zoom");
 
   // touched guard — only apply on user-initiated changes, not initial mount
   const touchedRef = useRef(false);
@@ -101,13 +103,13 @@ export function FrameTab({
 
   // Schedule a debounced apply with the given values (captured at call time from handlers)
   const scheduleApply = useCallback(
-    (m: FrameMode, c: number) => {
+    (m: FrameMode, c: number, fs: string) => {
       if (debounceRef.current !== null) {
         clearTimeout(debounceRef.current);
       }
       debounceRef.current = setTimeout(() => {
         debounceRef.current = null;
-        void onApply(m, m === "fill" ? c : null, null);
+        void onApply(m, m === "fill" ? c : null, null, fs);
       }, DEBOUNCE_MS);
     },
     [onApply],
@@ -116,19 +118,25 @@ export function FrameTab({
   const handleModeChange = (m: FrameMode) => {
     setMode(m);
     touchedRef.current = true;
-    scheduleApply(m, center);
+    scheduleApply(m, center, fitStyle);
   };
 
   const handleCenterChange = (v: number) => {
     setCenter(v);
     touchedRef.current = true;
-    scheduleApply(mode, v);
+    scheduleApply(mode, v, fitStyle);
   };
 
   const handleResetToAuto = () => {
     setMode("auto");
     touchedRef.current = true;
-    scheduleApply("auto", center);
+    scheduleApply("auto", center, fitStyle);
+  };
+
+  const handleFitStyleChange = (fs: string) => {
+    setFitStyle(fs);
+    touchedRef.current = true;
+    scheduleApply(mode, center, fs);
   };
 
   return (
@@ -219,6 +227,38 @@ export function FrameTab({
           {t(MODES.find((m) => m.value === mode)?.descKey ?? "modeAutoDesc")}
         </p>
       </section>
+
+      {mode === "fit" && (
+        <section className="space-y-2">
+          <Eyebrow tone="muted">{t("fitStyle")}</Eyebrow>
+          <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label={t("fitStyle")}>
+            {[
+              { value: "blur_zoom", labelKey: "fitStyleBlurZoom" },
+              { value: "blur", labelKey: "fitStyleBlur" },
+              { value: "black", labelKey: "fitStyleBlack" },
+            ].map((s) => {
+              const selected = fitStyle === s.value;
+              return (
+                <button
+                  key={s.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  disabled={busy}
+                  onClick={() => handleFitStyleChange(s.value)}
+                  className={`rounded-lg border px-2 py-2 text-center text-xs font-semibold transition duration-150 ease-snappy disabled:opacity-50 ${
+                    selected
+                      ? "border-accent-line bg-surface-3 text-accent"
+                      : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-ink"
+                  }`}
+                >
+                  {t(s.labelKey)}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {mode === "fill" && (
         <section className="space-y-3">

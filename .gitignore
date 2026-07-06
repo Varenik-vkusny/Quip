@@ -108,3 +108,7 @@ apps/web/.ds-tmp/
 
 # Лог экономики прогонов (machine-local; курируемая версия — docs/BENCHMARKS.md)
 services/worker/runs.jsonl
+
+.vercel
+
+.vercel

@@ -22,6 +22,7 @@ export interface FrameState {
   mode: "fill" | "fit" | "split";
   cx: number; // центр кропа [0..1] (fill / верх split)
   cxB: number; // низ split
+  fitStyle?: string;
 }
 
 export function PreviewPlayer({
@@ -86,7 +87,26 @@ export function PreviewPlayer({
       v.style.objectPosition = m === "fill" ? `${(f?.cx ?? 0.5) * 100}% 50%` : "";
       v.style.opacity = m === "split" ? "0" : "";
       const aux = auxARef.current;
-      if (aux) aux.style.opacity = m === "fit" ? "1" : "0";
+      if (aux) {
+        if (m === "fit") {
+          const fs = f?.fitStyle ?? "blur_zoom";
+          if (fs === "black") {
+            aux.style.opacity = "0";
+          } else if (fs === "blur") {
+            aux.style.opacity = "1";
+            aux.style.objectFit = "contain";
+            aux.style.transform = "scale(1)";
+            aux.style.filter = "blur(60px) brightness(0.5)";
+          } else {  // "blur_zoom"
+            aux.style.opacity = "1";
+            aux.style.objectFit = "cover";
+            aux.style.transform = "scale(1.1)";
+            aux.style.filter = "blur(20px) brightness(0.5)";
+          }
+        } else {
+          aux.style.opacity = "0";
+        }
+      }
     },
     [videoRef],
   );
@@ -339,7 +359,7 @@ export function PreviewPlayer({
             muted
             playsInline
             preload="auto"
-            className="absolute inset-0 size-full scale-110 object-cover blur-xl brightness-50 opacity-0"
+            className="absolute inset-0 size-full opacity-0 transition-all duration-150"
           />
         )}
 

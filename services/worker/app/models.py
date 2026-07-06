@@ -197,6 +197,7 @@ class CropOverride(BaseModel):
     mode: str  # "fill" | "fit" | "split"
     center: float | None = None  # центр кропа [0..1] для fill / верхней половины split
     center_b: float | None = None  # второй центр [0..1] для mode="split" (нижняя половина)
+    fit_style: str = "blur_zoom"  # "blur_zoom" | "blur" | "black" (только для mode="fit")
 
 
 class CaptionStyle(BaseModel):
@@ -225,6 +226,7 @@ class CaptionStyle(BaseModel):
     pos_x: float | None = Field(default=None, ge=0.0, le=1.0)
     pos_y: float | None = Field(default=None, ge=0.0, le=1.0)
     wrap_width: float | None = Field(default=None, ge=0.0, le=1.0)
+    fit_style: str = "blur_zoom"  # "blur_zoom" | "blur" | "black" (сохраняется в шаблон стиля)
 
 
 class HighlightStyle(BaseModel):

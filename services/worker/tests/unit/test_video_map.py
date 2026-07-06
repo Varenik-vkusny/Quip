@@ -268,10 +268,12 @@ def test_moment_to_interval_snaps_to_word_boundaries() -> None:
     # moment input in the middle
     s, e = moment_to_interval(10.0, 25.0, words, source_dur=source_dur)
 
-    # returned times must align exactly with some word's .start and some word's .end
-    word_starts = {w.start for w in words}
+    # returned times must align exactly with some word's .start (padded) and some word's .end
+    word_starts_padded = {
+        max(words[i - 1].end if i > 0 else 0.0, w.start - 0.15) for i, w in enumerate(words)
+    }
     word_ends = {w.end for w in words}
-    assert s in word_starts, f"s={s} is not a word boundary (.start)"
+    assert s in word_starts_padded, f"s={s} is not a valid padded start boundary"
     assert e in word_ends, f"e={e} is not a word boundary (.end)"
 
 

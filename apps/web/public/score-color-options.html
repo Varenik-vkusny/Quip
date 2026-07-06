@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Score Color Options</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #111; font-family: 'Inter', sans-serif; }
+  .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px; width: 160px; }
+  .timecode { color: #555; font-size: 10px; font-variant-numeric: tabular-nums; }
+  .hook { color: #e5e5e5; font-size: 13px; font-weight: 700; line-height: 1.3; margin-top: 10px; }
+  .bar-track { height: 4px; background: #2a2a2a; border-radius: 9999px; overflow: hidden; margin-top: 6px; }
+  .option-label { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 16px; }
+  .section-title { color: #fff; font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+  .score-row { display: flex; align-items: flex-start; justify-content: space-between; }
+  .score-block { display: flex; align-items: baseline; gap: 2px; }
+  .score-num { font-size: 28px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }
+  .score-denom { font-size: 11px; color: #555; }
+  .pill { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 9999px; letter-spacing: 0.05em; text-transform: uppercase; align-self: flex-start; margin-top: 4px; }
+  .divider { border-top: 1px solid #222; margin: 32px 0; }
+  .current-label { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+</style>
+</head>
+<body class="p-8">
+
+<h1 class="text-white text-2xl font-bold mb-2">Score Color Options</h1>
+<p class="text-zinc-500 text-sm mb-10">Dark theme preview — pick the approach that best communicates clip quality at a glance.</p>
+
+<!-- ═══════════════════════════════════════════════════════ OPTION A -->
+<div class="section-title">Option A — Tiered number color</div>
+<p class="option-label mb-6">Number + bar both change color by tier. Instant read: green = great, red = skip.</p>
+
+<div class="flex gap-4 flex-wrap mb-4">
+
+  <!-- 95 -->
+  <div class="card">
+    <div class="current-label">score 95</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#4ade80">95</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:95%;height:100%;background:linear-gradient(90deg,rgba(74,222,128,0.5) 0%,#4ade80 55%,#bbf7d0 100%);box-shadow:0 0 7px rgba(74,222,128,0.55);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">0:12–1:04</span>
+    </div>
+    <div class="hook">"This is the moment that changes everything"</div>
+  </div>
+
+  <!-- 82 -->
+  <div class="card">
+    <div class="current-label">score 82</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#fb923c">82</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:82%;height:100%;background:linear-gradient(90deg,rgba(251,146,60,0.55) 0%,#fb923c 55%,#fde68a 100%);box-shadow:0 0 7px rgba(251,146,60,0.5);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">0:44–1:32</span>
+    </div>
+    <div class="hook">"Nobody tells you about this part"</div>
+  </div>
+
+  <!-- 68 -->
+  <div class="card">
+    <div class="current-label">score 68</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#f97316">68</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:68%;height:100%;background:linear-gradient(90deg,rgba(249,115,22,0.45) 0%,#f97316 55%,#fdba74 100%);box-shadow:0 0 5px rgba(249,115,22,0.35);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">2:10–3:01</span>
+    </div>
+    <div class="hook">"Here's what I learned from it"</div>
+  </div>
+
+  <!-- 45 -->
+  <div class="card">
+    <div class="current-label">score 45</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#f87171">45</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:45%;height:100%;background:linear-gradient(90deg,rgba(248,113,113,0.4) 0%,#f87171 55%,#fca5a5 100%);box-shadow:0 0 4px rgba(248,113,113,0.3);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">4:22–5:10</span>
+    </div>
+    <div class="hook">"So anyway that's the whole story"</div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════════════════════════════════════════════ OPTION B -->
+<div class="section-title">Option B — Amber number + label pill</div>
+<p class="option-label mb-6">Number stays amber (consistent look). Small badge adds instant semantic signal.</p>
+
+<div class="flex gap-4 flex-wrap mb-4">
+
+  <!-- 95 -->
+  <div class="card">
+    <div class="current-label">score 95</div>
+    <div class="score-row">
+      <div>
+        <div class="flex items-center gap-1.5">
+          <div class="score-block">
+            <span class="score-num" style="color:#fb923c">95</span>
+            <span class="score-denom">/100</span>
+          </div>
+          <span class="pill" style="background:rgba(74,222,128,0.15);color:#4ade80;border:1px solid rgba(74,222,128,0.3)">TOP</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:95%;height:100%;background:linear-gradient(90deg,rgba(251,146,60,0.55) 0%,#fb923c 55%,#fde68a 100%);box-shadow:0 0 7px rgba(251,146,60,0.5);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">0:12–1:04</span>
+    </div>
+    <div class="hook">"This is the moment that changes everything"</div>
+  </div>
+
+  <!-- 82 -->
+  <div class="card">
+    <div class="current-label">score 82</div>
+    <div class="score-row">
+      <div>
+        <div class="flex items-center gap-1.5">
+          <div class="score-block">
+            <span class="score-num" style="color:#fb923c">82</span>
+            <span class="score-denom">/100</span>
+          </div>
+          <span class="pill" style="background:rgba(251,146,60,0.15);color:#fb923c;border:1px solid rgba(251,146,60,0.3)">STRONG</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:82%;height:100%;background:linear-gradient(90deg,rgba(251,146,60,0.55) 0%,#fb923c 55%,#fde68a 100%);box-shadow:0 0 7px rgba(251,146,60,0.5);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">0:44–1:32</span>
+    </div>
+    <div class="hook">"Nobody tells you about this part"</div>
+  </div>
+
+  <!-- 68 -->
+  <div class="card">
+    <div class="current-label">score 68</div>
+    <div class="score-row">
+      <div>
+        <div class="flex items-center gap-1.5">
+          <div class="score-block">
+            <span class="score-num" style="color:#fb923c">68</span>
+            <span class="score-denom">/100</span>
+          </div>
+          <span class="pill" style="background:rgba(100,100,100,0.2);color:#888;border:1px solid rgba(100,100,100,0.3)">DECENT</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:68%;height:100%;background:linear-gradient(90deg,rgba(251,146,60,0.55) 0%,#fb923c 55%,#fde68a 100%);box-shadow:0 0 7px rgba(251,146,60,0.5);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">2:10–3:01</span>
+    </div>
+    <div class="hook">"Here's what I learned from it"</div>
+  </div>
+
+  <!-- 45 -->
+  <div class="card">
+    <div class="current-label">score 45</div>
+    <div class="score-row">
+      <div>
+        <div class="flex items-center gap-1.5">
+          <div class="score-block">
+            <span class="score-num" style="color:#fb923c">45</span>
+            <span class="score-denom">/100</span>
+          </div>
+          <span class="pill" style="background:rgba(248,113,113,0.15);color:#f87171;border:1px solid rgba(248,113,113,0.3)">WEAK</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:45%;height:100%;background:linear-gradient(90deg,rgba(251,146,60,0.55) 0%,#fb923c 55%,#fde68a 100%);box-shadow:0 0 7px rgba(251,146,60,0.5);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">4:22–5:10</span>
+    </div>
+    <div class="hook">"So anyway that's the whole story"</div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ═══════════════════════════════════════════════════════ OPTION C -->
+<div class="section-title">Option C — Bar color + glow intensity</div>
+<p class="option-label mb-6">Number always amber. Bar changes: green glow at top, grey/muted at bottom. Subtler but elegant.</p>
+
+<div class="flex gap-4 flex-wrap mb-4">
+
+  <!-- 95 -->
+  <div class="card">
+    <div class="current-label">score 95</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#fb923c">95</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:95%;height:100%;background:linear-gradient(90deg,rgba(74,222,128,0.5) 0%,#4ade80 60%,#bbf7d0 100%);box-shadow:0 0 10px rgba(74,222,128,0.7);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">0:12–1:04</span>
+    </div>
+    <div class="hook">"This is the moment that changes everything"</div>
+  </div>
+
+  <!-- 82 -->
+  <div class="card">
+    <div class="current-label">score 82</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#fb923c">82</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:82%;height:100%;background:linear-gradient(90deg,rgba(251,146,60,0.55) 0%,#fb923c 55%,#fde68a 100%);box-shadow:0 0 7px rgba(251,146,60,0.5);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">0:44–1:32</span>
+    </div>
+    <div class="hook">"Nobody tells you about this part"</div>
+  </div>
+
+  <!-- 68 -->
+  <div class="card">
+    <div class="current-label">score 68</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#fb923c">68</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:68%;height:100%;background:linear-gradient(90deg,rgba(249,115,22,0.4) 0%,#f97316 55%,#fdba74 100%);box-shadow:0 0 4px rgba(249,115,22,0.3);border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">2:10–3:01</span>
+    </div>
+    <div class="hook">"Here's what I learned from it"</div>
+  </div>
+
+  <!-- 45 -->
+  <div class="card">
+    <div class="current-label">score 45</div>
+    <div class="score-row">
+      <div>
+        <div class="score-block">
+          <span class="score-num" style="color:#fb923c">45</span>
+          <span class="score-denom">/100</span>
+        </div>
+        <div class="bar-track">
+          <div style="width:45%;height:100%;background:#3a3a3a;border-radius:9999px"></div>
+        </div>
+      </div>
+      <span class="timecode">4:22–5:10</span>
+    </div>
+    <div class="hook">"So anyway that's the whole story"</div>
+  </div>
+</div>
+
+<div class="divider"></div>
+<p class="text-zinc-600 text-xs">Current design uses amber number + amber bar for all scores (no tier distinction). All options above are dark-theme faithful.</p>
+
+</body>
+</html>

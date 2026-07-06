@@ -523,6 +523,7 @@ export async function setCropOverride(
     mode: "fill" | "fit" | "auto";
     center?: number | null;
     center_b?: number | null;
+    fit_style?: string | null;
   },
 ): Promise<ClipEdit> {
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/crop`, {
@@ -703,6 +704,7 @@ export interface ReframeRegion {
   mode: string;
   points: { t: number; mode?: string; cx: number | null }[];
   points_b?: { t: number; mode?: string; cx: number | null }[];
+  fit_style?: string;
 }
 
 export async function getClipReframe(

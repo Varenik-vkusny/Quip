@@ -225,6 +225,10 @@
           ],
           "default": null
         },
+        "fit_style": {
+          "default": "blur_zoom",
+          "type": "string"
+        },
         "font": {
           "default": "Montserrat",
           "type": "string"
@@ -630,6 +634,10 @@
             }
           ],
           "default": null
+        },
+        "fit_style": {
+          "default": "blur_zoom",
+          "type": "string"
         },
         "mode": {
           "type": "string"
