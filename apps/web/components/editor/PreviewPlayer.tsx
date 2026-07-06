@@ -1,6 +1,7 @@
 "use client";
 
 import { Loader2, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── PreviewPlayer — превью 9:16 с СОБСТВЕННЫМИ контролами ──
@@ -50,6 +51,7 @@ export function PreviewPlayer({
   aspectClass?: string;
   children?: React.ReactNode;
 }) {
+  const t = useTranslations("editor.preview");
   const containerRef = useRef<HTMLDivElement>(null);
   const auxARef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -380,7 +382,7 @@ export function PreviewPlayer({
         {!playing && !loading && (
           <button
             type="button"
-            aria-label="Play"
+            aria-label={t("play")}
             onClick={togglePlay}
             className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/60 p-4 text-white backdrop-blur transition hover:bg-accent"
           >
@@ -398,7 +400,7 @@ export function PreviewPlayer({
         >
           <button
             type="button"
-            aria-label={playing ? "Pause" : "Play"}
+            aria-label={playing ? t("pause") : t("play")}
             onClick={togglePlay}
             className="inline-flex min-h-[40px] min-w-[40px] sm:min-h-0 sm:min-w-0 items-center justify-center text-white/90 transition hover:text-white"
           >
@@ -415,13 +417,13 @@ export function PreviewPlayer({
             max={1000}
             value={Math.round((clipNow / clipDur) * 1000)}
             onChange={handleScrub}
-            aria-label="Scrub clip"
+            aria-label={t("scrubClip")}
             className="range-touch h-1.5 sm:h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-white/25 accent-accent"
           />
 
           <button
             type="button"
-            aria-label={muted ? "Unmute" : "Mute"}
+            aria-label={muted ? t("unmute") : t("mute")}
             onClick={toggleMute}
             className="inline-flex min-h-[40px] min-w-[40px] sm:min-h-0 sm:min-w-0 items-center justify-center text-white/80 transition hover:text-white"
           >
@@ -429,7 +431,7 @@ export function PreviewPlayer({
           </button>
           <button
             type="button"
-            aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            aria-label={isFullscreen ? t("exitFullscreen") : t("fullscreen")}
             onClick={toggleFullscreen}
             className="inline-flex min-h-[40px] min-w-[40px] sm:min-h-0 sm:min-w-0 items-center justify-center text-white/80 transition hover:text-white"
           >

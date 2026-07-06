@@ -1,6 +1,7 @@
 "use client";
 
 import { Loader2, Scissors } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { mmss } from "@/lib/format";
 import type { CropOverride, SourceInterval } from "@/lib/types";
@@ -101,21 +102,17 @@ function regionOverride(
   return null;
 }
 
-/** Лейбл режима кадра в терминах юзера. */
-function modeLabel(mode: string): string {
-  return mode === "fit" ? "Wide" : mode === "fill" ? "Tight" : mode === "split" ? "Split" : mode;
-}
-
 const MODE_TINT: Record<string, string> = {
   fill: "bg-quote/30", // tight crop (синий)
   fit: "bg-thought/30", // wide / horizontal (зелёный)
   split: "bg-peak/30", // split (фиолетовый)
 };
 
-const FORCE_OPTIONS: { value: ForceMode; label: string; hint: string }[] = [
-  { value: "fit", label: "Wide", hint: "show the whole frame" },
-  { value: "fill", label: "Tight", hint: "crop in on the speaker" },
-  { value: "auto", label: "Auto", hint: "let AI decide" },
+// Labels/hints resolve from editor.shots.<labelKey|hintKey> in the component.
+const FORCE_OPTIONS: { value: ForceMode; labelKey: string; hintKey: string }[] = [
+  { value: "fit", labelKey: "wide", hintKey: "wideHint" },
+  { value: "fill", labelKey: "tight", hintKey: "tightHint" },
+  { value: "auto", labelKey: "auto", hintKey: "autoHint" },
 ];
 
 export function FitTimeline({
@@ -128,6 +125,10 @@ export function FitTimeline({
   loading = false,
   onApplyRange,
 }: FitTimelineProps) {
+  const t = useTranslations("editor.shots");
+  // User-facing framing-mode label (fit→Wide, fill→Tight, split→Split; unknown → raw).
+  const mlabel = (m: string) =>
+    m === "fit" ? t("wide") : m === "fill" ? t("tight") : m === "split" ? t("split") : m;
   const trackRef = useRef<HTMLDivElement>(null);
   // выделенный диапазон БЛОКОВ [from, to] (индексы по отображаемым блокам, оба включительно) или null
   const [sel, setSel] = useState<{ from: number; to: number } | null>(null);
@@ -285,7 +286,7 @@ export function FitTimeline({
         </div>
         <p className="flex items-center justify-center gap-1.5 text-[11px] text-muted">
           <Loader2 className="size-3 animate-spin" />
-          Detecting the shots in this clip…
+          {t("detecting")}
         </p>
       </div>
     );
@@ -295,7 +296,7 @@ export function FitTimeline({
   if (!regions || regions.length === 0) {
     return (
       <div className="mt-2 rounded-lg border border-dashed border-line bg-surface-2 px-3 py-2 text-center text-[11px] text-muted">
-        Shot plan unavailable for this clip — framing follows the AI default.
+        {t("shotPlanUnavailable")}
       </div>
     );
   }
@@ -315,25 +316,28 @@ export function FitTimeline({
   // подблоки → нейтральное «part(s)», чтобы номера-блоков не путались с номерами шотов.
   const hasSplits = userSplits.length > 0;
   const selUnit = hasSplits ? "part" : unit;
+  const isShotUnit = selUnit === "shot";
   const selLabel = sel
     ? sel.from === sel.to
-      ? `${selUnit === "shot" ? "Shot" : "Part"} ${sel.from + 1} selected`
-      : `${selUnit === "shot" ? "Shots" : "Parts"} ${sel.from + 1}–${sel.to + 1} selected`
-    : `Drag across the bar to pick ${selUnit}s`;
+      ? t(isShotUnit ? "shotSelected" : "partSelected", { n: sel.from + 1 })
+      : t(isShotUnit ? "shotsRangeSelected" : "partsRangeSelected", {
+          from: sel.from + 1,
+          to: sel.to + 1,
+        })
+    : t(isShotUnit ? "dragToPickShots" : "dragToPickParts");
 
   return (
     <div className="mt-2 select-none">
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <span className="text-[11px] font-semibold text-ink">
-          {regions.length} {unit}
-          {regions.length === 1 ? "" : "s"}
+          {t(unit === "shot" ? "shotsCount" : "partsCount", { count: regions.length })}
           {hasSplits && (
             <span className="ml-1.5 font-normal text-muted">
-              · {blocks.length} part{blocks.length === 1 ? "" : "s"}
+              · {t("partsCount", { count: blocks.length })}
             </span>
           )}
           {variant === "manual" && (
-            <span className="ml-1.5 font-normal text-muted">· manual (no AI shot plan)</span>
+            <span className="ml-1.5 font-normal text-muted">· {t("manualNoAiPlan")}</span>
           )}
         </span>
         <span className="text-[10px] text-muted">{selLabel}</span>
@@ -361,15 +365,19 @@ export function FitTimeline({
           const tint = MODE_TINT[effMode] ?? "bg-surface-3";
           const widthPct = Math.max(widthFrac * 100, 1.5);
           const wide = widthPct > 7; // влезает ли подпись внутрь блока
-          const blockNoun = hasSplits ? "Part" : unit === "shot" ? "Shot" : "Part";
+          const blockNoun = !hasSplits && unit === "shot" ? t("shotNoun") : t("partNoun");
           return (
             <div
               key={i}
               className={`relative flex h-full flex-col items-center justify-center overflow-hidden ${tint} transition`}
               style={{ width: `${widthPct}%` }}
-              title={`${blockNoun} ${i + 1}${blk.split ? " (split)" : ""} · ${
-                ov ? `${modeLabel(ov.mode)} (forced)` : modeLabel(blk.mode)
-              } · ${mmss(blk.t0)}–${mmss(blk.t1)}`}
+              title={t("blockTitle", {
+                noun: blockNoun,
+                n: i + 1,
+                split: blk.split ? t("splitSuffix") : "",
+                mode: ov ? t("forcedMode", { mode: mlabel(ov.mode) }) : mlabel(blk.mode),
+                range: `${mmss(blk.t0)}–${mmss(blk.t1)}`,
+              })}
             >
               {wide && (
                 <>
@@ -377,7 +385,7 @@ export function FitTimeline({
                     {i + 1}
                   </span>
                   <span className="pointer-events-none mt-0.5 text-[8px] font-semibold uppercase leading-none tracking-wide text-ink/55">
-                    {modeLabel(effMode)}
+                    {mlabel(effMode)}
                   </span>
                 </>
               )}
@@ -421,16 +429,12 @@ export function FitTimeline({
           type="button"
           disabled={busy || !canSplit}
           onClick={splitHere}
-          title={
-            canSplit
-              ? "Split the shot under the playhead into two so you can force each half"
-              : "Move the playhead inside a shot to split it here"
-          }
-          aria-label="Split the shot at the playhead"
+          title={canSplit ? t("splitHereTitleCan") : t("splitHereTitleCant")}
+          aria-label={t("splitAtPlayheadAria")}
           className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-[11px] font-semibold text-muted transition enabled:hover:border-line-strong enabled:hover:text-ink disabled:opacity-40"
         >
           <Scissors className="size-3" aria-hidden />
-          Split here
+          {t("splitHere")}
         </button>
         {hasSplits && (
           <button
@@ -440,10 +444,10 @@ export function FitTimeline({
               setUserSplits([]);
               setSel(null);
             }}
-            title="Remove the manual split boundaries you added"
+            title={t("clearSplitsTitle")}
             className="rounded-md px-2 py-1 text-[11px] font-semibold text-muted transition enabled:hover:text-ink disabled:opacity-40"
           >
-            Clear splits
+            {t("clearSplits")}
           </button>
         )}
       </div>
@@ -453,7 +457,7 @@ export function FitTimeline({
         <div
           className="flex gap-0.5 rounded-md border border-line bg-surface p-0.5"
           role="radiogroup"
-          aria-label="Forced framing mode"
+          aria-label={t("forcedFramingMode")}
         >
           {FORCE_OPTIONS.map((opt) => (
             <button
@@ -462,13 +466,13 @@ export function FitTimeline({
               role="radio"
               aria-checked={mode === opt.value}
               disabled={busy}
-              title={opt.hint}
+              title={t(opt.hintKey)}
               onClick={() => setMode(opt.value)}
               className={`rounded px-2.5 py-1 text-[11px] font-semibold transition disabled:opacity-40 ${
                 mode === opt.value ? "bg-surface-3 text-accent" : "text-muted hover:text-ink"
               }`}
             >
-              {opt.label}
+              {t(opt.labelKey)}
             </button>
           ))}
         </div>
@@ -476,30 +480,31 @@ export function FitTimeline({
           type="button"
           disabled={busy || !sel}
           onClick={apply}
-          aria-label="Apply framing to selected shots"
+          aria-label={t("applyToSelectedAria")}
           className="ml-auto rounded-md border border-accent/60 bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent transition enabled:hover:bg-accent/20 disabled:border-line disabled:bg-transparent disabled:text-muted disabled:opacity-50"
         >
           {sel
-            ? `Apply ${FORCE_OPTIONS.find((o) => o.value === mode)?.label ?? ""} to ${
-                sel.from === sel.to ? "1" : sel.to - sel.from + 1
-              } ${selUnit}${sel && sel.from === sel.to ? "" : "s"}`
-            : `Select ${selUnit}s first`}
+            ? t(isShotUnit ? "applyToShots" : "applyToParts", {
+                mode: t(FORCE_OPTIONS.find((o) => o.value === mode)?.labelKey ?? "wide"),
+                count: sel.from === sel.to ? 1 : sel.to - sel.from + 1,
+              })
+            : t(isShotUnit ? "selectShotsFirst" : "selectPartsFirst")}
         </button>
       </div>
 
       {/* легенда */}
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted">
         <span className="inline-flex items-center gap-1">
-          <span className="size-2 rounded-sm bg-thought/40" /> Wide (full frame)
+          <span className="size-2 rounded-sm bg-thought/40" /> {t("wideFull")}
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="size-2 rounded-sm bg-quote/40" /> Tight (crop)
+          <span className="size-2 rounded-sm bg-quote/40" /> {t("tightCrop")}
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="size-2 rounded-sm bg-peak/40" /> Split
+          <span className="size-2 rounded-sm bg-peak/40" /> {t("legendSplit")}
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="h-0.5 w-3 bg-accent" /> Forced
+          <span className="h-0.5 w-3 bg-accent" /> {t("forced")}
         </span>
       </div>
     </div>

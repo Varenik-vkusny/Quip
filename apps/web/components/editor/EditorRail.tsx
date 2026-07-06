@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, memo } from "react";
+import { useTranslations } from "next-intl";
 import { Captions, Crop, Type, Wand2 } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -20,11 +21,13 @@ import { Captions, Crop, Type, Wand2 } from "lucide-react";
 
 export type Tab = "subtitles" | "hook" | "frame" | "agent";
 
-export const TABS: { id: Tab; label: string; icon: typeof Captions }[] = [
-  { id: "subtitles", label: "Subtitles", icon: Captions },
-  { id: "hook", label: "Hook", icon: Type },
-  { id: "frame", label: "Frame", icon: Crop },
-  { id: "agent", label: "Agent", icon: Wand2 },
+// Labels are NOT stored here — they resolve from the `editor.tabs` catalog (single source,
+// shared with Inspector's panel title) via useTranslations in the component below.
+export const TABS: { id: Tab; icon: typeof Captions }[] = [
+  { id: "subtitles", icon: Captions },
+  { id: "hook", icon: Type },
+  { id: "frame", icon: Crop },
+  { id: "agent", icon: Wand2 },
 ];
 
 // keyboard-shortcut digit per tab (1-based, matches dispatchShortcut → TABS[a.tab - 1]).
@@ -39,13 +42,15 @@ export const EditorRail = memo(function EditorRail({
   /** Inert this task — a seam for a later agent-activity badge. */
   agentActive?: boolean;
 }) {
+  const t = useTranslations("editor.tabs");
   return (
     <nav
       aria-label="Editor panels"
       className="flex shrink-0 gap-1 rounded-lg border border-line bg-surface p-1 lg:h-full lg:flex-col"
     >
-      {TABS.map(({ id, label, icon: Icon }, i) => {
+      {TABS.map(({ id, icon: Icon }, i) => {
         const isActive = active === id;
+        const label = t(id);
         return (
           <Fragment key={id}>
             {/* Agent is a different KIND of tool (AI chat) → set it apart with a divider. */}

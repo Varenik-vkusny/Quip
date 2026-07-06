@@ -1,6 +1,7 @@
 "use client";
 
 import { ZoomIn, ZoomOut } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getChapters } from "@/lib/api";
 import { Eyebrow } from "@/components/ui/Eyebrow";
@@ -37,11 +38,12 @@ const TYPE_COLOR: Record<ClipType, string> = {
   complete_thought: "var(--color-thought)",
 };
 
-const TYPE_LABEL: Record<ClipType, string> = {
-  hook: "Hook",
-  strong_quote: "Quote",
-  emotional_peak: "Emotional peak",
-  complete_thought: "Full thought",
+// Labels resolve from editor.timeline.<key> in the component (typeLabel helper).
+const TYPE_LABEL_KEY: Record<ClipType, string> = {
+  hook: "typeHook",
+  strong_quote: "typeQuote",
+  emotional_peak: "typePeak",
+  complete_thought: "typeThought",
 };
 
 const WAVE_BUCKETS = 160;
@@ -145,6 +147,9 @@ export function TimelineV2({
   onScrub,
   onIntervalChange,
 }: TimelineV2Props) {
+  const t = useTranslations("editor.timeline");
+  // User-facing clip-type label (hook→Hook, strong_quote→Quote, …) resolved from the catalog.
+  const typeLabel = (type: ClipType) => t(TYPE_LABEL_KEY[type]);
   const duration = Math.max(data.duration, 0.001);
   // На часовом видео клип 40с при 1× = ~1% дорожки → блок упирается в minWidth и «не
   // меняет размер при ресайзе». Разрешаем зумить сильнее; начальный зум кадрирует клип.
@@ -352,7 +357,7 @@ export function TimelineV2({
       <div className="mb-1.5 flex items-center justify-between gap-3">
         {/* the one anchor readout: the length of the clip you'll export. */}
         <div className="flex min-w-0 items-baseline gap-2.5">
-          <span className="font-mono text-eyebrow uppercase leading-none text-faint">Clip length</span>
+          <span className="font-mono text-eyebrow uppercase leading-none text-faint">{t("clipLength")}</span>
           <Numeral className="text-sm font-semibold leading-none text-accent">
             {mmss(segEnd - segStart)}
           </Numeral>
@@ -360,7 +365,7 @@ export function TimelineV2({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            aria-label="Zoom out"
+            aria-label={t("zoomOut")}
             disabled={zoom <= 1}
             onClick={() => setZoomAround(zoom / 1.5, viewStartClamped + viewLen / 2)}
             className="inline-flex size-9 sm:size-6 items-center justify-center rounded-md border border-line text-muted transition duration-150 ease-snappy enabled:hover:text-ink disabled:opacity-30"
@@ -370,7 +375,7 @@ export function TimelineV2({
           <Numeral className="w-9 text-center text-[10px] text-muted">{zoom.toFixed(1)}×</Numeral>
           <button
             type="button"
-            aria-label="Zoom in"
+            aria-label={t("zoomIn")}
             disabled={zoom >= maxZoom}
             onClick={() => setZoomAround(zoom * 1.5, segStart + (segEnd - segStart) / 2)}
             className="inline-flex size-9 sm:size-6 items-center justify-center rounded-md border border-line text-muted transition duration-150 ease-snappy enabled:hover:text-ink disabled:opacity-30"
@@ -382,27 +387,25 @@ export function TimelineV2({
 
       {/* ── chapters band — the GLOBAL themes of the whole video (clip = a slice of one) ── */}
       <Eyebrow tone="faint" className="mb-1.5 block leading-none">
-        Chapters
+        {t("chapters")}
       </Eyebrow>
       <div className="relative mb-2.5 h-8 w-full overflow-hidden rounded-md border border-line bg-surface-2/50">
         {chapters === null || chapters.status === "pending" ? (
           <div className="flex h-full items-center gap-2 px-3">
             <span className="size-2 animate-pulse rounded-full bg-accent" />
-            <span className="text-[11px] text-muted">
-              AI is describing the video’s moments… (you can keep working)
-            </span>
+            <span className="text-[11px] text-muted">{t("describingMoments")}</span>
           </div>
         ) : chapters.status === "failed" ? (
           <div className="flex h-full items-center gap-2 px-3">
             <span className="truncate text-[11px] text-muted">
-              AI map unavailable: {chapters.error ?? "error"}
+              {t("mapUnavailable", { error: chapters.error ?? "error" })}
             </span>
             <button
               type="button"
               onClick={retryChapters}
               className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] font-semibold text-muted transition duration-150 ease-snappy hover:border-line-strong hover:bg-surface-3 hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
-              Retry
+              {t("retry")}
             </button>
           </div>
         ) : (
@@ -485,8 +488,8 @@ export function TimelineV2({
                   e.stopPropagation();
                   jumpTo(s.start, s.end);
                 }}
-                title={`${TYPE_LABEL[s.type]} · ${s.score.toFixed(2)} · ${s.reason}`}
-                aria-label={`Go to moment: ${TYPE_LABEL[s.type]}`}
+                title={`${typeLabel(s.type)} · ${s.score.toFixed(2)} · ${s.reason}`}
+                aria-label={t("goToMoment", { type: typeLabel(s.type) })}
                 className="group/marker absolute bottom-1.5 z-[1] cursor-pointer rounded-full opacity-75 transition hover:opacity-100"
                 style={{
                   left: pct(s.start),
@@ -550,11 +553,11 @@ export function TimelineV2({
             </div>
             {/* длительность — пилюля сверху */}
             <span className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded-full bg-accent px-2 py-0.5 font-mono text-[10px] font-bold text-bg shadow">
-              {busy ? "saving…" : mmss(segEnd - segStart)}
+              {busy ? t("saving") : mmss(segEnd - segStart)}
             </span>
             {!busy && segEnd - segStart <= CLIP_MIN_SEC + 0.5 && (
               <span className="pointer-events-none absolute inset-x-0 bottom-1 text-center text-[9px] font-medium text-white/70">
-                min {CLIP_MIN_SEC}s
+                {t("minSec", { n: CLIP_MIN_SEC })}
               </span>
             )}
           </div>
@@ -595,11 +598,11 @@ export function TimelineV2({
             {/* GLOBAL — the chapter / where you are in the whole video */}
             <div className="border-b border-line bg-surface-2/60 px-3 py-2">
               <div className="flex items-center justify-between gap-2">
-                <Eyebrow tone="faint">{hoverChapter ? "Chapter" : "Position"}</Eyebrow>
+                <Eyebrow tone="faint">{hoverChapter ? t("chapter") : t("position")}</Eyebrow>
                 <Numeral className="text-[10px] text-faint">{mmss(hover.t)}</Numeral>
               </div>
               <p className="mt-0.5 truncate text-xs font-semibold text-ink">
-                {hoverChapter ? hoverChapter.title : "In this part of the video"}
+                {hoverChapter ? hoverChapter.title : t("inThisPart")}
               </p>
             </div>
             {/* SPECIFIC — the moment right here, or (off a moment) what's being said */}
@@ -615,10 +618,10 @@ export function TimelineV2({
                         className="size-1.5 rounded-pill"
                         style={{ background: TYPE_COLOR[hoverSeg.type] }}
                       />
-                      {TYPE_LABEL[hoverSeg.type]}
+                      {typeLabel(hoverSeg.type)}
                     </span>
                     <Numeral className="text-[10px] text-muted">
-                      {Math.round(hoverSeg.score * 100)}% match
+                      {t("pctMatch", { pct: Math.round(hoverSeg.score * 100) })}
                     </Numeral>
                   </div>
                   {hoverSeg.hook && (
@@ -630,13 +633,13 @@ export function TimelineV2({
                     {hoverSeg.why_works || hoverSeg.reason}
                   </p>
                   <p className="mt-1.5 text-[10px] font-medium text-accent">
-                    Click to move the clip here →
+                    {t("clickToMove")}
                   </p>
                 </>
               ) : hoverText ? (
                 <>
                   <Eyebrow tone="faint" className="block">
-                    Said here
+                    {t("saidHere")}
                   </Eyebrow>
                   <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">
                     “{hoverText}”
@@ -658,7 +661,7 @@ export function TimelineV2({
           onChange={(e) =>
             setViewStart((Number(e.target.value) / 1000) * (duration - viewLen))
           }
-          aria-label="Scroll timeline"
+          aria-label={t("scrollTimeline")}
           className="range-touch mt-1 h-1 w-full cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"
         />
       )}

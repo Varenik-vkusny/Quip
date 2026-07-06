@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronRight, Loader2, Send, Square, Wand2 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelAgentRun,
@@ -17,11 +18,9 @@ import { type ChatItem, groupEvents, processLiveFlags } from "@/lib/agentChat";
 // onAgentEdited() зовётся, когда агент изменил edit-state → редактор перечитывает edit/превью.
 
 const POLL_MS = 1200;
-const SUGGESTIONS = [
-  "Start a few seconds earlier",
-  "Make the hook punchier",
-  "Trim the slow ending",
-];
+// Suggestion CHIPS: keys into editor.agent.suggestions.* — the resolved (localized) text is
+// both the chip label AND what gets inserted into the input.
+const SUGGESTION_KEYS = ["earlier", "punchier", "trimEnding"] as const;
 
 function isTerminal(s: AgentRunStatus | "idle"): boolean {
   return s === "done" || s === "failed" || s === "cancelled";
@@ -33,8 +32,9 @@ function isTerminal(s: AgentRunStatus | "idle"): boolean {
 // Свёрнутая «работа агента»: муфта-строка «Working…/Готово · N шагов» + раскрытие в
 // человекочитаемые строки. Спиннер — ТОЛЬКО пока прогон живой (после терминала это история).
 function ProcessBlock({ steps, live }: { steps: AgentEvent[]; live: boolean }) {
+  const t = useTranslations("editor.agent");
   const [open, setOpen] = useState(false);
-  const summary = live ? "Working on it…" : `Done · ${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  const summary = live ? t("workingOnIt") : t("doneSteps", { count: steps.length });
   return (
     <div className="rounded-lg border border-line bg-surface-2/60 text-muted">
       <button
@@ -52,7 +52,7 @@ function ProcessBlock({ steps, live }: { steps: AgentEvent[]; live: boolean }) {
           />
         )}
         <span className="font-medium">{summary}</span>
-        {!live && <span className="ml-auto text-xs opacity-70">{open ? "Hide" : "Details"}</span>}
+        {!live && <span className="ml-auto text-xs opacity-70">{open ? t("hide") : t("details")}</span>}
       </button>
       {open && (
         <ul className="space-y-1 border-t border-line px-3 pb-2 pt-1.5">
@@ -116,6 +116,7 @@ export const AgentTab = memo(function AgentTab({
   busy: boolean;
   onAgentEdited: () => void;
 }) {
+  const t = useTranslations("editor.agent");
   const [events, setEvents] = useState<AgentEvent[]>([]);
   // Оптимистичные сообщения юзера: показываем МГНОВЕННО при отправке, до того как сервер
   // вернёт прогон с эхом этого же сообщения. Реконсиляция: как только в серверной ленте
@@ -228,11 +229,11 @@ export const AgentTab = memo(function AgentTab({
       // т.к. прогон не стартовал) + возвращаем текст в поле, чтобы можно было повторить.
       setPendingUser((prev) => prev.slice(0, -1));
       setInput(msg);
-      setError(e instanceof Error ? e.message : "Failed to start the agent");
+      setError(e instanceof Error ? e.message : t("failedStart"));
     } finally {
       setSending(false);
     }
-  }, [input, inFlight, busy, jobId, clipId, applyRun, startPolling]);
+  }, [input, inFlight, busy, jobId, clipId, applyRun, startPolling, t]);
 
   const stop = useCallback(async () => {
     if (!runId) return;
@@ -241,9 +242,9 @@ export const AgentTab = memo(function AgentTab({
       applyRun(run);
       stopPolling();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to stop the agent");
+      setError(e instanceof Error ? e.message : t("failedStop"));
     }
-  }, [runId, jobId, clipId, applyRun, stopPolling]);
+  }, [runId, jobId, clipId, applyRun, stopPolling, t]);
 
   // Лента = серверные события + ещё-не-подтверждённые оптимистичные эхо юзера, сгруппированные
   // (подряд идущие thinking/action → один свёрнутый блок «процесса»).
@@ -265,7 +266,7 @@ export const AgentTab = memo(function AgentTab({
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex items-center gap-2">
         <Wand2 className="size-4 text-muted" />
-        <Eyebrow tone="muted">Clip agent</Eyebrow>
+        <Eyebrow tone="muted">{t("clipAgent")}</Eyebrow>
       </div>
 
       {/* лента */}
@@ -273,21 +274,23 @@ export const AgentTab = memo(function AgentTab({
         {isEmpty ? (
           <div className="flex flex-col gap-2 py-2">
             <p className="text-xs leading-snug text-muted">
-              Ask me to fix this clip’s timing or hook. I can move the start/end, trim, or rewrite
-              the hook — I don’t change subtitles or framing.
+              {t("emptyHelp")}
             </p>
             <div className="flex flex-wrap gap-1.5">
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => setInput(s)}
-                  className="rounded-pill border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted transition duration-150 ease-snappy hover:border-line-strong hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
-                >
-                  {s}
-                </button>
-              ))}
+              {SUGGESTION_KEYS.map((k) => {
+                const s = t(`suggestions.${k}`);
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setInput(s)}
+                    className="rounded-pill border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted transition duration-150 ease-snappy hover:border-line-strong hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
+                  >
+                    {s}
+                  </button>
+                );
+              })}
             </div>
           </div>
         ) : (
@@ -295,7 +298,7 @@ export const AgentTab = memo(function AgentTab({
         )}
         {inFlight && !hasLiveProcess && (
           <p className="flex items-center gap-1.5 px-1 text-xs text-muted">
-            <Loader2 className="size-3 animate-spin" /> Working on it…
+            <Loader2 className="size-3 animate-spin" /> {t("workingOnIt")}
           </p>
         )}
       </div>
@@ -309,7 +312,7 @@ export const AgentTab = memo(function AgentTab({
           disabled={busy || inFlight}
           rows={2}
           maxLength={2000}
-          placeholder={inFlight ? "Agent is working…" : "Ask the agent to fix this clip…"}
+          placeholder={inFlight ? t("agentWorking") : t("askAgent")}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
@@ -324,7 +327,7 @@ export const AgentTab = memo(function AgentTab({
             type="button"
             onClick={() => void stop()}
             className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-bad/40 bg-bad/10 text-bad transition duration-150 ease-snappy hover:bg-bad/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-bad/40"
-            aria-label="Stop agent"
+            aria-label={t("stopAgent")}
           >
             <Square className="size-4" />
           </button>
@@ -334,7 +337,7 @@ export const AgentTab = memo(function AgentTab({
             disabled={busy || sending || !input.trim()}
             onClick={() => void send()}
             className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-bg transition duration-150 ease-snappy hover:bg-accent-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
-            aria-label="Send"
+            aria-label={t("send")}
           >
             {sending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
           </button>

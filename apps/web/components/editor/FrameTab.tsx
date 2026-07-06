@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Eyebrow } from "@/components/ui/Eyebrow";
@@ -8,11 +9,12 @@ import type { Aspect } from "@/lib/api";
 import type { ClipEdit, CropOverride, SourceInterval } from "@/lib/types";
 import { FitTimeline, type FitRegion, type ForceMode } from "./FitTimeline";
 
-const ASPECTS: { value: Aspect; label: string; hint: string }[] = [
-  { value: "9:16", label: "9:16", hint: "Reels / TikTok / Shorts" },
-  { value: "1:1", label: "1:1", hint: "Feed (square)" },
-  { value: "4:5", label: "4:5", hint: "Instagram post" },
-  { value: "16:9", label: "16:9", hint: "YouTube / landscape" },
+// label = brand token (kept as-is); hint text resolves from editor.frame.<hintKey>.
+const ASPECTS: { value: Aspect; label: string; hintKey: string }[] = [
+  { value: "9:16", label: "9:16", hintKey: "aspectHint916" },
+  { value: "1:1", label: "1:1", hintKey: "aspectHint11" },
+  { value: "4:5", label: "4:5", hintKey: "aspectHint45" },
+  { value: "16:9", label: "16:9", hintKey: "aspectHint169" },
 ];
 
 // ── Таб «Кадр»: режим кадрирования клипа вручную ──
@@ -22,17 +24,18 @@ const ASPECTS: { value: Aspect; label: string; hint: string }[] = [
 
 type FrameMode = "auto" | "fill" | "fit";
 
-const MODES: { value: FrameMode; title: string; desc: string }[] = [
-  { value: "auto", title: "Auto (AI)", desc: "Decides per shot: tight or wide" },
-  { value: "fill", title: "Tight", desc: "Vertical crop on the person, full-bleed" },
-  { value: "fit", title: "Wide", desc: "Full frame + blurred bars (landscape look)" },
+// Titles/descriptions resolve from editor.frame.<titleKey|descKey>.
+const MODES: { value: FrameMode; titleKey: string; descKey: string }[] = [
+  { value: "auto", titleKey: "modeAutoTitle", descKey: "modeAutoDesc" },
+  { value: "fill", titleKey: "modeFillTitle", descKey: "modeFillDesc" },
+  { value: "fit", titleKey: "modeFitTitle", descKey: "modeFitDesc" },
 ];
 
 const DEBOUNCE_MS = 250;
 
-const MOTION_OPTIONS: { value: boolean; label: string }[] = [
-  { value: true, label: "Lock" },
-  { value: false, label: "Follow" },
+const MOTION_OPTIONS: { value: boolean; labelKey: string }[] = [
+  { value: true, labelKey: "lock" },
+  { value: false, labelKey: "follow" },
 ];
 
 export function FrameTab({
@@ -71,6 +74,7 @@ export function FrameTab({
   shotLoading?: boolean;
   onApplyShotRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
 }) {
+  const t = useTranslations("editor.frame");
   const aspect = (edit.aspect as Aspect) ?? "9:16";
   const lockPerShot = edit.lock_per_shot ?? true;
   // текущий override на интервал (последний пересекающий) → стартовое состояние
@@ -131,7 +135,7 @@ export function FrameTab({
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
       {/* T5: соотношение сторон выхода */}
       <section className="space-y-2">
-        <Eyebrow tone="muted">Aspect ratio</Eyebrow>
+        <Eyebrow tone="muted">{t("aspectRatio")}</Eyebrow>
         <div className="grid grid-cols-4 gap-1.5">
           {ASPECTS.map((a) => (
             <button
@@ -139,7 +143,7 @@ export function FrameTab({
               type="button"
               disabled={busy}
               onClick={() => onAspectChange(a.value)}
-              title={a.hint}
+              title={t(a.hintKey)}
               className={`flex flex-col items-center gap-1 rounded-lg border py-2 transition duration-150 ease-snappy ${
                 aspect === a.value
                   ? "border-accent-line bg-surface-3 text-accent"
@@ -155,13 +159,13 @@ export function FrameTab({
 
       {/* T5-motion: Lock = static crop per shot · Follow = camera tracks the face */}
       <section className="space-y-2">
-        <Eyebrow tone="muted">Motion</Eyebrow>
-        <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Motion mode">
-          {MOTION_OPTIONS.map(({ value, label }) => {
+        <Eyebrow tone="muted">{t("motion")}</Eyebrow>
+        <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label={t("motionMode")}>
+          {MOTION_OPTIONS.map(({ value, labelKey }) => {
             const selected = lockPerShot === value;
             return (
               <button
-                key={label}
+                key={labelKey}
                 type="button"
                 role="radio"
                 aria-checked={selected}
@@ -173,22 +177,22 @@ export function FrameTab({
                     : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-ink"
                 }`}
               >
-                {label}
+                {t(labelKey)}
               </button>
             );
           })}
         </div>
         <p className="text-xs leading-snug text-muted">
-          Lock = steady crop per shot · Follow = camera tracks the face
+          {t("motionHint")}
         </p>
       </section>
 
       <section className="space-y-2">
-        <Eyebrow tone="muted">Frame mode</Eyebrow>
+        <Eyebrow tone="muted">{t("frameMode")}</Eyebrow>
         {/* Compact labeled tiles (segmented) — replaces 4 stacked full-width radio cards.
             Selected tile uses the shared pattern (border-accent-line + bg-surface-3); the
             description is shown ONCE for the selected mode below, not on every card. */}
-        <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Frame mode">
+        <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label={t("frameMode")}>
           {MODES.map((m) => {
             const selected = mode === m.value;
             return (
@@ -199,27 +203,27 @@ export function FrameTab({
                 aria-checked={selected}
                 disabled={busy}
                 onClick={() => handleModeChange(m.value)}
-                title={m.desc}
+                title={t(m.descKey)}
                 className={`rounded-lg border px-3 py-2.5 text-left text-sm font-semibold transition duration-150 ease-snappy disabled:opacity-50 ${
                   selected
                     ? "border-accent-line bg-surface-3 text-accent"
                     : "border-line bg-surface-2 text-muted hover:border-line-strong hover:text-ink"
                 }`}
               >
-                {m.title}
+                {t(m.titleKey)}
               </button>
             );
           })}
         </div>
         <p className="text-xs leading-snug text-muted">
-          {MODES.find((m) => m.value === mode)?.desc}
+          {t(MODES.find((m) => m.value === mode)?.descKey ?? "modeAutoDesc")}
         </p>
       </section>
 
       {mode === "fill" && (
         <section className="space-y-3">
           <CenterSlider
-            label="Crop center"
+            label={t("cropCenter")}
             value={center}
             disabled={busy}
             onChange={handleCenterChange}
@@ -229,7 +233,7 @@ export function FrameTab({
 
       <div className="flex items-start justify-between gap-3">
         <p className="text-xs leading-snug text-muted">
-          Framing updates live. Auto restores the AI&apos;s per-shot decision.
+          {t("framingUpdatesLive")}
         </p>
         <Button
           type="button"
@@ -239,21 +243,15 @@ export function FrameTab({
           onClick={handleResetToAuto}
           className="shrink-0 text-xs"
         >
-          Reset to Auto
+          {t("resetToAuto")}
         </Button>
       </div>
 
       {/* ── per-shot framing (was its own "Shots" tab) ── */}
       <section className="space-y-1 border-t border-line pt-4">
-        <h3 className="text-sm font-semibold text-ink">Per-shot framing</h3>
+        <h3 className="text-sm font-semibold text-ink">{t("perShotFraming")}</h3>
         <p className="text-xs leading-snug text-muted">
-          The mode above applies to the whole clip. Below, override individual{" "}
-          <span className="text-ink">shots</span> — the cuts between camera angles. Pick shots on
-          the bar (the white line shows where you are) and force{" "}
-          <span className="text-ink">Wide</span>, <span className="text-ink">Tight</span> or{" "}
-          <span className="text-ink">Auto</span>. Need a boundary the detector merged away? Use{" "}
-          <span className="text-ink">Split here</span> to cut a shot at the playhead, then force
-          either half.
+          {t.rich("perShotDesc", { b: (c) => <span className="text-ink">{c}</span> })}
         </p>
         <FitTimeline
           regions={shotRegions}
@@ -299,12 +297,13 @@ function CenterSlider({
   disabled: boolean;
   onChange: (v: number) => void;
 }) {
+  const t = useTranslations("editor.frame");
   return (
     <label className="flex flex-col gap-1 text-xs text-muted">
       <span className="flex items-center justify-between">
         {label}
         <span className="text-ink">
-          {value <= 0.35 ? "left" : value >= 0.65 ? "right" : "center"} ·{" "}
+          {value <= 0.35 ? t("cropLeft") : value >= 0.65 ? t("cropRight") : t("cropCentered")} ·{" "}
           <Numeral className="text-xs">{value.toFixed(2)}</Numeral>
         </span>
       </span>

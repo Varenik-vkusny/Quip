@@ -1,6 +1,7 @@
 "use client";
 
 import { Maximize2, Minimize2, X } from "lucide-react";
+import { useTranslations } from "next-intl";
 import type React from "react";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import type { Tab } from "./EditorRail";
@@ -18,22 +19,14 @@ import type { Tab } from "./EditorRail";
 //     width → the canvas does NOT resize/jump (invariant preserved).
 // ────────────────────────────────────────────────────────────────────────────
 
-const TAB_TITLE: Record<Tab, string> = {
-  agent: "Agent",
-  subtitles: "Subtitles",
-  hook: "Hook",
-  frame: "Frame",
-};
-
 // Demoted from a bordered card on every tab to a single hairline status line: a quiet
 // "preview is live" cue under the panel header, not a repeated callout box.
 function LiveStatusLine() {
+  const t = useTranslations("editor.inspector");
   return (
     <p className="flex shrink-0 items-center gap-1.5 text-xs leading-none text-muted">
       <span aria-hidden className="size-1.5 shrink-0 rounded-pill bg-accent" />
-      <span>
-        Preview is live — <span className="text-ink">Render</span> writes edits to the file.
-      </span>
+      <span>{t.rich("liveStatus", { span: (c) => <span className="text-ink">{c}</span> })}</span>
     </p>
   );
 }
@@ -55,12 +48,14 @@ export function Inspector({
   expanded?: boolean;
   onToggleExpand?: () => void;
 }) {
+  const tTabs = useTranslations("editor.tabs");
+  const ti = useTranslations("editor.inspector");
   const panel = (
     <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden" data-tab={active}>
       {/* Panel fascia header: instrument eyebrow on the left, live cue + expand on the right,
           separated from the body by a hairline. */}
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line pb-2.5">
-        <Eyebrow tone="ink">{TAB_TITLE[active]}</Eyebrow>
+        <Eyebrow tone="ink">{tTabs(active)}</Eyebrow>
         <div className="flex min-w-0 items-center gap-3">
           <span className="hidden min-w-0 truncate lg:block">
             <LiveStatusLine />
@@ -69,8 +64,8 @@ export function Inspector({
             <button
               type="button"
               onClick={onToggleExpand}
-              title={expanded ? "Collapse panel" : "Expand panel over the video"}
-              aria-label={expanded ? "Collapse panel" : "Expand panel over the video"}
+              title={expanded ? ti("collapsePanel") : ti("expandPanel")}
+              aria-label={expanded ? ti("collapsePanel") : ti("expandPanel")}
               className="shrink-0 rounded-lg border border-line p-1.5 text-muted transition duration-150 ease-snappy hover:bg-surface-2 hover:text-ink"
             >
               {expanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
@@ -99,7 +94,7 @@ export function Inspector({
         {/* backdrop — click to close; does not affect canvas layout (absolute over it) */}
         <button
           type="button"
-          aria-label="Close panel"
+          aria-label={ti("closePanel")}
           onClick={onClose}
           className="absolute inset-0 bg-black/40 backdrop-blur-sm"
         />
@@ -107,7 +102,7 @@ export function Inspector({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close panel"
+            aria-label={ti("closePanel")}
             className="absolute right-3 top-3 z-10 rounded-lg p-1 text-muted transition hover:bg-surface-2 hover:text-ink"
           >
             <X className="size-4" />
