@@ -123,6 +123,23 @@ class Settings(BaseSettings):
     clip_tail_pad_sec: float = 0.3
     caption_max_words_per_group: int = 5
     max_clips: int = 12  # D1: дефолт кандидатов (был 8 — скупо для длинных видео); UI Auto шлёт 30
+    # A (multimodal clip quality): аудио-осознанное уточнение границ в select
+    # (refine_boundaries_audio) — обрезка филлеров у краёв + снап конца к низко-энергетической
+    # впадине (вдоху) по RMS-кривой. Kill-switch SELECT_AUDIO_AWARE=false → чисто детерминированный
+    # снап (без аудио-слоя), мгновенный откат без передеплоя. Кривая громкости всё равно считается
+    # (энерго-маркеры превью) — тут только решаем, кормить ли ей refine.
+    select_audio_aware: bool = True
+    # A (chunked selection): ДЛИННЫЙ транскрипт режем на перекрывающиеся ВРЕМЕННЫ́Е окна, выбираем
+    # моменты В КАЖДОМ окне отдельным Gemini-вызовом, затем МЕРЖИМ кандидатов и гоняем ОДНУ
+    # postprocess над объединением (глобальный анти-overlap + spread top-N). Лечит коллапс recall
+    # одиночного вызова на гигантском входе: 86-мин интервью (15795 слов) возвращало 2 клипа, оба в
+    # первых 25 мин. Короткое видео (< select-порогов should_chunk: ~15 мин / ~3000 слов) остаётся
+    # на прежнем одиночном пути БАЙТ-В-БАЙТ. Kill-switch SELECT_CHUNK_ENABLED=false → всегда один
+    # вызов (мгновенный откат без передеплоя). n окон = n маленьких вызовов (~2000 слов каждый) ≈
+    # цена одного большого, но recall НЕ коллапсирует.
+    select_chunk_enabled: bool = True
+    select_chunk_target_sec: int = 720  # ~12 мин речи на окно (~2000 слов) — влезает в recall
+    select_chunk_overlap_sec: int = 75  # нахлёст соседних окон: момент на стыке виден целиком
 
     # transcript cache (content-addressed, data/_cache/transcripts/)
     transcript_cache_enabled: bool = True

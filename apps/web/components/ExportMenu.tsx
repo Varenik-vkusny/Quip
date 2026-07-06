@@ -1,6 +1,16 @@
 "use client";
 
-import { Captions, ChevronDown, Download, FileText, Film, Loader2 } from "lucide-react";
+import {
+  Captions,
+  ChevronDown,
+  Clapperboard,
+  Download,
+  FileText,
+  Film,
+  Loader2,
+  Package,
+  Table,
+} from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -117,6 +127,16 @@ export function ExportMenu({
   const cleanInstant = !!cleanBakedUrl;
   const cleanUrl = cleanBakedUrl ?? clipCleanExportUrl(WORKER_BASE, jobId, clipId);
   const srtUrl = clipSrtUrl(WORKER_BASE, jobId, clipId);
+  // "For your editor" handoff exports — all render on the fly (text/zip), so they use the
+  // fetch+blob path (instant=false) which sends the Authorization header; the ?mt= fallback in
+  // `pick` covers surfaces that can't. Project-scoped (EDL/FCPXML/markers/package) need only jobId;
+  // captions (.vtt) is per-clip. URLs inlined here (worker origin + ids) — same contract as the
+  // per-format worker endpoints.
+  const packageUrl = `${WORKER_BASE}/jobs/${jobId}/export/package.zip`;
+  const edlUrl = `${WORKER_BASE}/jobs/${jobId}/export.edl`;
+  const fcpxmlUrl = `${WORKER_BASE}/jobs/${jobId}/export.fcpxml`;
+  const markersUrl = `${WORKER_BASE}/jobs/${jobId}/export/markers.csv`;
+  const vttUrl = `${WORKER_BASE}/jobs/${jobId}/clips/${clipId}/export.vtt`;
   // С субтитрами: baked-рендер ТОЛЬКО когда нет невыданных правок (dirty=false). При dirty
   // (юзер сменил шрифт хука и т.п.) baked устарел → on-demand рендер текущего edit-state.
   const captionedUrl = captionedDownloadUrl(WORKER_BASE, jobId, clipId, bakedUrl, dirty);
@@ -275,6 +295,57 @@ export function ExportMenu({
             busyLabel={t("preparing")}
             disabled={!!busy && busy !== "srt"}
             onPick={() => pick("srt", srtUrl, `${clipId}.srt`, false)}
+          />
+          {/* ── "For your editor": hand off to a pro NLE (Premiere / Resolve / Final Cut / CapCut).
+                English labels are fine (editor UI is on the deferred-i18n list). ── */}
+          <div className="border-t border-line" />
+          <p className="px-3 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+            {t("handoff.section")}
+          </p>
+          <ExportItem
+            icon={<Package className="size-4" />}
+            title={t("handoff.package.title")}
+            sub={t("handoff.package.sub")}
+            busy={busy === "package"}
+            busyLabel={t("preparing")}
+            disabled={!!busy && busy !== "package"}
+            onPick={() => pick("package", packageUrl, `${jobId}-editor-package.zip`, false)}
+          />
+          <ExportItem
+            icon={<Clapperboard className="size-4" />}
+            title={t("handoff.edl.title")}
+            sub={t("handoff.edl.sub")}
+            busy={busy === "edl"}
+            busyLabel={t("preparing")}
+            disabled={!!busy && busy !== "edl"}
+            onPick={() => pick("edl", edlUrl, `${jobId}.edl`, false)}
+          />
+          <ExportItem
+            icon={<Clapperboard className="size-4" />}
+            title={t("handoff.fcpxml.title")}
+            sub={t("handoff.fcpxml.sub")}
+            busy={busy === "fcpxml"}
+            busyLabel={t("preparing")}
+            disabled={!!busy && busy !== "fcpxml"}
+            onPick={() => pick("fcpxml", fcpxmlUrl, `${jobId}.fcpxml`, false)}
+          />
+          <ExportItem
+            icon={<Table className="size-4" />}
+            title={t("handoff.markers.title")}
+            sub={t("handoff.markers.sub")}
+            busy={busy === "markers"}
+            busyLabel={t("preparing")}
+            disabled={!!busy && busy !== "markers"}
+            onPick={() => pick("markers", markersUrl, `${jobId}-markers.csv`, false)}
+          />
+          <ExportItem
+            icon={<Captions className="size-4" />}
+            title={t("handoff.vtt.title")}
+            sub={t("handoff.vtt.sub")}
+            busy={busy === "vtt"}
+            busyLabel={t("preparing")}
+            disabled={!!busy && busy !== "vtt"}
+            onPick={() => pick("vtt", vttUrl, `${clipId}.vtt`, false)}
           />
         </div>
       )}

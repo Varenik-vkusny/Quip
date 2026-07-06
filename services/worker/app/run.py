@@ -544,12 +544,17 @@ def run_pipeline(
     stages["download"] = round(time.perf_counter() - t0, 2)
     db.set_progress_detail(job_id, source_minutes=round(meta.duration / 60, 1))  # live narration
     # Энергетические co-watch-маркеры (Part 4) — БЕСТ-ЭФФОРТ, доступны РАНО (до transcribe), потому
-    # покрывают самый длинный кусок ожидания. ⚠️ ИНВАРИАНТ: НЕ идут в select_segments — отбор
-    # от них не зависит (качество не меняется). [] при любом сбое extract_loudness. Источник звука:
+    # покрывают самый длинный кусок ожидания. [] при любом сбое extract_loudness. Источник звука:
     # source.mp4 (yt/кэш), а для аплоада до отложенной нормализации mp4 ещё нет → берём source.wav
     # (тот же звук, что в mp4; loudness re-decode'ит в 8kHz mono в любом случае).
+    # ⚠️ ИНВАРИАНТ (уточнён Phase A, 2026-07-06): косметические МАРКЕРЫ (preview_moments)
+    # по-прежнему НЕ идут в select_segments — LLM-отбор моментов от них НЕ зависит. Но СЫРАЯ
+    # RMS-кривая `loudness` ТЕПЕРЬ дополнительно кормит аудио-осознанную чистку границ
+    # (refine_boundaries_audio) — это НЕ выбор моментов, а детерминированное уточнение уже-выбранных
+    # краёв (обрезка филлеров + снап к вдоху). Кривая провайдер-агностична (Deepgram и Groq/kk).
     _loud_src = out / "source.mp4" if (out / "source.mp4").exists() else out / "source.wav"
-    energy_moments = detect_energy_moments(extract_loudness(str(_loud_src)))
+    loudness = extract_loudness(str(_loud_src))
+    energy_moments = detect_energy_moments(loudness)
     if energy_moments:
         db.put_job_artifact(job_id, "preview_moments", [m.model_dump() for m in energy_moments])
 
@@ -636,7 +641,15 @@ def run_pipeline(
         ]
         print(f"[2] select: cached ({len(segments)} segments)")
     else:
-        segments = select_segments(transcript, meta.title, max_clips=max_clips, usage_sink=usage)
+        segments = select_segments(
+            transcript,
+            meta.title,
+            max_clips=max_clips,
+            # A3: сырая RMS-кривая → аудио-осознанная чистка границ. [] (сбой extract_loudness) →
+            # None (явная ветка «нет сигнала», не тихий фолбэк); гейт SELECT_AUDIO_AWARE — в select.
+            loudness=loudness or None,
+            usage_sink=usage,
+        )
         seg_path.write_text(
             json.dumps([s.model_dump() for s in segments], ensure_ascii=False, indent=2),
             encoding="utf-8",

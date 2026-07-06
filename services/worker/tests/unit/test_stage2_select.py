@@ -10,6 +10,7 @@ from app.errors import JobError
 from app.models import ClipType, Transcript, Word
 from app.pipeline.stage2_select import (
     _backoff_delay,
+    _is_filler,
     build_indexed_transcript,
     build_user_prompt,
     clamp_score,
@@ -17,6 +18,7 @@ from app.pipeline.stage2_select import (
     is_transient_gemini_error,
     pad_clip_end,
     postprocess,
+    refine_boundaries_audio,
     resolve_max_clips,
     resolve_overlaps,
     snap_end_index,
@@ -541,9 +543,10 @@ class TestPostprocess:
         assert s.score == 1.0  # клипнут
         assert s.reason == "concrete why"  # тримнут
         assert s.type is ClipType.hook
-        # Доверяем ИИ-индексам напрямую без snap (с учетом безопасного паддинга старта)
-        assert s.start == 2.85
-        assert s.end == 22.8
+        # A1 (снапперы восстановлены): старт уже чист (words[2]="w2." → clean start), но конец
+        # idx22 (не .?!) тянется вперёд к ближайшему .?! = words[25] (в окне max_extend=8).
+        assert s.start == 2.85  # words[3].start - 0.15
+        assert s.end == 25.8  # words[25].end после snap_end_index
 
     def test_drops_too_short(self) -> None:
         words = uniform(40)
@@ -692,8 +695,8 @@ class TestPostprocess:
         assert segs[0].hook is None and segs[0].why_works is None
 
     def test_applies_tail_padding(self) -> None:
-        # W1: tail_pad добивает конец тишиной (чистый луп). end = w22.end = 22.8; w23 старт = 23.0;
-        # pad 0.3 → min(23.1, 23.0) = 23.0.
+        # W1 + A1: snap_end_index тянет конец idx22 → words[25]="w25." (.?! в окне). end = w25.end
+        # = 25.8; w26 старт = 26.0; tail_pad 0.3 → min(26.1, 26.0) = 26.0.
         words = uniform(40, sentence_ends={2, 25})
         raw = [
             {
@@ -706,7 +709,7 @@ class TestPostprocess:
         ]
         segs = postprocess(raw, words, min_sec=15, max_sec=60, duration=100.0, tail_pad=0.3)
         assert len(segs) == 1
-        assert segs[0].end == pytest.approx(23.0)
+        assert segs[0].end == pytest.approx(26.0)
 
     def test_tail_padding_gate_uses_unpadded_length(self) -> None:
         # Гейт длины считается по РЕЧИ (без паддинга): клип ровно на max_sec проходит,
@@ -817,3 +820,194 @@ class TestIndicesToTimesClamping:
         # Должен зажаться на 1.9, а не уйти на 1.85 (2.0 - 0.15 = 1.85)
         assert start == 1.9
         assert end == 2.5
+
+
+class TestPostprocessSnappersRestored:
+    """A1 (регресс 18abe24): postprocess снова ДЕТЕРМИНИРОВАННО снапит границы к предложениям —
+    снапперы вызываются ДО indices_to_times (были молча удалены). Иначе клип кончается на фрагменте.
+    """
+
+    def _raw_idx(self, si: int, ei: int) -> list[dict]:  # type: ignore[type-arg]
+        return [
+            {
+                "start_word_index": si,
+                "end_word_index": ei,
+                "reason": "r",
+                "score": 0.9,
+                "type": "hook",
+            }
+        ]
+
+    def test_end_snaps_forward_to_sentence_end(self) -> None:
+        # конец LLM сел на idx22 (середина фразы); ближайший .?! = words[25] → снап тянет туда.
+        words = uniform(40, sentence_ends={2, 25})
+        segs = postprocess(self._raw_idx(3, 22), words, min_sec=15, max_sec=60)
+        assert len(segs) == 1
+        # end = words[25].end (снапнуто вперёд), а НЕ words[22].end=22.8 (без снапа)
+        assert segs[0].end == pytest.approx(25.8)
+
+    def test_start_snaps_off_dangling_tail(self) -> None:
+        # старт LLM сел на ХВОСТ предыдущей мысли (idx26 сразу после конца предложения idx25) —
+        # проверяем что снап-старт активен: idx26 уже чистый старт (words[25] завершает пред.).
+        words = uniform(60, sentence_ends={25, 50})
+        segs = postprocess(self._raw_idx(26, 48), words, min_sec=15, max_sec=60)
+        assert len(segs) == 1
+        # старт остаётся на words[26] (чистое начало), конец тянется к words[50]
+        assert segs[0].start == pytest.approx(25.85)  # words[26].start - 0.15
+        assert segs[0].end == pytest.approx(50.8)
+
+
+class TestIsFiller:
+    """A2: детекция слов-паразитов (Deepgram filler_words=true даёт им таймстемпы, но inline)."""
+
+    def test_english_fillers(self) -> None:
+        assert _is_filler("uh")
+        assert _is_filler("Um")
+        assert _is_filler("UH")
+
+    def test_russian_fillers(self) -> None:
+        assert _is_filler("э")
+        assert _is_filler("а")
+        assert _is_filler("ну")
+
+    def test_strips_surrounding_punctuation(self) -> None:
+        # ASR часто пунктуирует филлер («Uh,» / «um.»)
+        assert _is_filler("Uh,")
+        assert _is_filler("um.")
+
+    def test_real_words_are_not_fillers(self) -> None:
+        assert not _is_filler("money")
+        assert not _is_filler("думаю")
+        assert not _is_filler("")
+
+
+class TestRefineBoundariesAudio:
+    """A2: аудио-осознанное уточнение границ (чистые вдохи, обрезка филлеров у краёв).
+    Без кривой громкости (None/пусто) — строгий no-op (правило №8: явная ветка, не тихий фолбэк)."""
+
+    def _speech(self, texts: list[str]) -> list[Word]:
+        # непрерывная речь: word[k].end = k*0.5+0.4 → маппится в loudness[k] (hop_s=0.5);
+        # зазор между словами = 0.1с (< min_pause 0.35 → снап-паузой НЕ триггерится).
+        return [Word(text=t, start=k * 0.5, end=k * 0.5 + 0.4) for k, t in enumerate(texts)]
+
+    def test_none_loudness_is_noop(self) -> None:
+        words = self._speech([f"w{k}" for k in range(10)])
+        assert refine_boundaries_audio(words, None, 1, 5) == (1, 5)
+
+    def test_empty_loudness_is_noop(self) -> None:
+        words = self._speech([f"w{k}" for k in range(10)])
+        assert refine_boundaries_audio(words, [], 1, 5) == (1, 5)
+
+    def test_snaps_end_to_breath_trough(self) -> None:
+        # непрерывная речь, нет .?!/паузы → конец снапается к ближайшей низко-энергетич. впадине.
+        words = self._speech([f"w{k}" for k in range(10)])
+        loud = [-10.0] * 10
+        loud[7] = -42.0  # глубокая впадина (вдох) на word[7].end
+        assert refine_boundaries_audio(words, loud, 1, 5) == (1, 7)
+
+    def test_prefers_nearest_trough_on_ties(self) -> None:
+        words = self._speech([f"w{k}" for k in range(12)])
+        loud = [-10.0] * 12
+        loud[3] = -40.0  # впадина слева (расстояние 2 от ei=5)
+        loud[8] = -40.0  # впадина справа (расстояние 3 от ei=5)
+        # обе равной глубины → ближайшая к ei (idx3, дистанция 2) выигрывает
+        assert refine_boundaries_audio(words, loud, 1, 5) == (1, 3)
+
+    def test_keeps_end_when_sentence_final(self) -> None:
+        # words[5]=".": конец уже чист → впадину игнорируем (лестница: .?! приоритетнее аудио).
+        words = self._speech(["w0", "w1", "w2", "w3", "w4", "done.", "w6", "w7", "w8", "w9"])
+        loud = [-10.0] * 10
+        loud[7] = -42.0
+        assert refine_boundaries_audio(words, loud, 1, 5) == (1, 5)
+
+    def test_keeps_end_when_pause_after(self) -> None:
+        # естественная пауза ≥ min_pause сразу после ei → аудио-снап конца пропускаем.
+        words = [Word(text=f"w{k}", start=k * 0.5, end=k * 0.5 + 0.4) for k in range(10)]
+        words[6] = Word(text="w6", start=3.5, end=3.9)  # зазор words[5].end=2.9 → 3.5 = 0.6 ≥ 0.35
+        loud = [-10.0] * 10
+        loud[8] = -42.0
+        assert refine_boundaries_audio(words, loud, 1, 5) == (1, 5)
+
+    def test_flat_loudness_no_trough_keeps_index(self) -> None:
+        # ровная громкость (нет впадины глубже margin) → конец не двигаем.
+        words = self._speech([f"w{k}" for k in range(10)])
+        assert refine_boundaries_audio(words, [-10.0] * 10, 1, 5) == (1, 5)
+
+    def test_trims_trailing_filler(self) -> None:
+        # конец сел на филлер «uh» → отрезаем к предыдущему настоящему слову (words[4]="real.").
+        words = self._speech(["w0", "w1", "w2", "w3", "real.", "uh", "w6", "w7"])
+        loud = [-10.0] * 8
+        # ei=5 (uh) → триммится к 4; words[4]=".", аудио-снап конца НЕ триггерится
+        assert refine_boundaries_audio(words, loud, 1, 5) == (1, 4)
+
+    def test_trims_leading_filler(self) -> None:
+        # старт сел на филлер → сдвигаем вперёд к настоящему слову.
+        words = self._speech(["w0", "um", "real", "w3", "w4", "done.", "w6"])
+        loud = [-10.0] * 7
+        si, ei = refine_boundaries_audio(words, loud, 1, 5)
+        assert si == 2  # off "um"
+
+    def test_does_not_collapse_clip(self) -> None:
+        # оба края — филлеры и клип крошечный → не схлопываем si за ei.
+        words = self._speech(["uh", "um"])
+        si, ei = refine_boundaries_audio(words, [-10.0, -10.0], 0, 1)
+        assert si <= ei
+
+
+class TestPostprocessAudioAware:
+    """A2/A3: postprocess прокидывает кривую громкости в refine_boundaries_audio; None → детерм."""
+
+    def test_loudness_none_matches_deterministic(self) -> None:
+        words = uniform(40, sentence_ends={2, 25})
+        raw = [
+            {
+                "start_word_index": 3,
+                "end_word_index": 22,
+                "reason": "r",
+                "score": 0.9,
+                "type": "hook",
+            }
+        ]
+        segs = postprocess(raw, words, min_sec=15, max_sec=60, loudness=None)
+        assert len(segs) == 1
+        assert segs[0].end == pytest.approx(25.8)  # чисто детерминированный снап
+
+    def test_trailing_filler_trimmed_with_loudness(self) -> None:
+        # непрерывная речь без .?!/пауз, конец на филлере «uh» → с кривой громкости он отрезается.
+        words = [Word(text=f"w{k}", start=k * 0.5, end=k * 0.5 + 0.4) for k in range(60)]
+        words[40] = Word(text="uh", start=20.0, end=20.4)  # филлер на конце-кандидате
+        loud = [-10.0] * 60
+        raw = [
+            {
+                "start_word_index": 0,
+                "end_word_index": 40,
+                "reason": "r",
+                "score": 0.9,
+                "type": "hook",
+            }
+        ]
+        # без громкости: конец остаётся на «uh» (words[40].end=20.4)
+        no_audio = postprocess(raw, words, min_sec=15, max_sec=60, loudness=None)
+        assert no_audio[0].end == pytest.approx(20.4)
+        # с громкостью: филлер отрезан → конец на words[39].end=19.9
+        with_audio = postprocess(raw, words, min_sec=15, max_sec=60, loudness=loud)
+        assert with_audio[0].end == pytest.approx(19.9)
+
+
+class TestSelectAudioAwareConfig:
+    """A4: конфиг-тумблер SELECT_AUDIO_AWARE (env), дефолт включён."""
+
+    def test_default_is_true(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from app.config import Settings
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "x")  # провайдер-гейт (иначе ValidationError)
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.select_audio_aware is True
+
+    def test_env_can_disable(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from app.config import Settings
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "x")
+        monkeypatch.setenv("SELECT_AUDIO_AWARE", "false")
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.select_audio_aware is False

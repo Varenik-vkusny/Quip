@@ -7,10 +7,12 @@ CORS открыт для web (localhost:3000). Логика пайплайна �
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 import uuid
+import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,6 +44,16 @@ if "pytest" not in sys.modules:
 from app.editor import presets as presets_mod
 from app.editor import store, style_prefs
 from app.editor.captions_v2 import compile_ass, compile_srt
+from app.editor.interchange import (
+    HandoffClip,
+    HandoffInterval,
+    HandoffMarker,
+    build_edl,
+    build_fcpxml,
+    build_manifest_json,
+    build_markers_csv,
+    build_vtt,
+)
 from app.editor.ops import (
     add_section,
     apply_extend,
@@ -1110,6 +1122,306 @@ def export_clip_captioned_mp4(
     if not path.exists():
         raise HTTPException(status_code=500, detail="render produced no captioned mp4")
     return _no_referrer(FileResponse(str(path), media_type="video/mp4", filename=f"{clip_id}.mp4"))
+
+
+# ──────────────── Editor handoff (EDL / FCPXML / markers / VTT / package.zip) ────────────────
+# «Скачать для редактора»: пользователь уносит нарезку Quip в pro-NLE (Premiere/Resolve/FCP/CapCut)
+# как SOURCE-таймкод-таймлайн (пере-нарезка из оригинала) + самодостаточные субтитры/манифест.
+# Pure-билдеры — в app.editor.interchange (тайм-математика в app.editor.timecode); здесь только I/O
+# (чтение артефактов + сборка zip) и гейт доступа (как SRT-экспорт). Гейт: _require_media_access
+# (header ЛИБО scoped ?mt=) + Content-Disposition: attachment + Referrer-Policy: no-referrer.
+
+# Цвет маркера DaVinci Resolve по типу момента карты видео (косметика; неизвестный тип → Green).
+_MOMENT_COLORS = {
+    "tension": "Red",
+    "quote": "Cyan",
+    "emotional": "Purple",
+    "insight": "Yellow",
+    "funny": "Green",
+}
+
+
+def _build_handoff(
+    job_id: str,
+) -> tuple[
+    Any,
+    dict[str, Any],
+    list[HandoffClip],
+    dict[str, Any],
+    list[HandoffMarker],
+    list[dict[str, Any]],
+    list[HandoffMarker],
+]:
+    """Собрать intermediate хендофа джоба. Возвращает
+    ``(meta, edits, clips, edits_by_id, markers_all, chapters, moment_markers)``.
+
+    Core-артефакты (meta/segments/transcript) отсутствуют → JobError (наверх → 404; правило №8:
+    явно, а не тихий пустой пакет). Карта видео (главы/моменты) — ОПЦИОНАЛЬНОЕ обогащение: нет
+    (или ещё pending) → пустые chapters/markers (это не ошибка). Интервалы берём из edit-state
+    (реальная правка юзера), падая на сегмент, если правок ещё нет.
+    """
+    from app import artifacts
+    from app.editor.video_map import load_video_map
+
+    meta = artifacts.load_meta(job_id)  # JobError → 404
+    segments = artifacts.load_segments(job_id)  # JobError → 404
+    artifacts.load_transcript_words(job_id)  # fail-fast: транскрипт обязателен для субтитров
+
+    clips: list[HandoffClip] = []
+    clip_markers: list[HandoffMarker] = []
+    edits_by_id: dict[str, Any] = {}
+    for i, seg in enumerate(segments, start=1):
+        clip_id = f"clip_{i:02d}"
+        edit = store.ensure_edit(job_id, clip_id)
+        edits_by_id[clip_id] = edit
+        ivs = list(edit.source_intervals) or [
+            SourceInterval(source_start=seg.start, source_end=seg.end)
+        ]
+        clips.append(
+            HandoffClip(
+                name=clip_id,
+                source_in_s=ivs[0].source_start,
+                source_out_s=ivs[-1].source_end,
+                reason=seg.reason,
+                hook=seg.hook,
+                why_works=seg.why_works,
+                score=seg.score,
+                type=seg.type.value,
+                tone=seg.tone,
+                key_quote=seg.key_quote,
+                intervals=[
+                    HandoffInterval(source_in_s=iv.source_start, source_out_s=iv.source_end)
+                    for iv in ivs
+                ],
+            )
+        )
+        clip_markers.append(
+            HandoffMarker(
+                t_s=ivs[0].source_start,
+                name=seg.hook or clip_id,
+                note=seg.reason,
+                color="Blue",
+                kind="clip",
+            )
+        )
+
+    chapters: list[dict[str, Any]] = []
+    chapter_markers: list[HandoffMarker] = []
+    moment_markers: list[HandoffMarker] = []
+    vm = load_video_map(job_id)
+    if vm is not None and vm.status == "done":
+        for ch in vm.chapters:
+            chapters.append(
+                {"start": ch.start, "end": ch.end, "title": ch.title, "summary": ch.summary}
+            )
+            chapter_markers.append(
+                HandoffMarker(
+                    t_s=ch.start, name=ch.title, note=ch.summary, color="Purple", kind="chapter"
+                )
+            )
+            for mo in ch.moments:
+                moment_markers.append(
+                    HandoffMarker(
+                        t_s=mo.start,
+                        name=mo.label,
+                        note=mo.why,
+                        color=_MOMENT_COLORS.get(mo.kind, "Green"),
+                        kind="moment",
+                    )
+                )
+    markers_all = clip_markers + chapter_markers + moment_markers
+    return meta, meta.model_dump(), clips, edits_by_id, markers_all, chapters, moment_markers
+
+
+def _handoff_readme(meta: Any, n_clips: int, include_clips: bool) -> str:
+    """Человекочитаемый README.txt пакета (что внутри + как импортировать). English (editor-UI)."""
+    df = "drop-frame" if abs(meta.fps - round(meta.fps)) > 0.001 else "non-drop"
+    lines = [
+        "Quip — Editor Handoff Package",
+        "=============================",
+        "",
+        f"Source: {meta.title}",
+        f"Frame rate: {meta.fps:.6f} fps ({df})",
+        f"Resolution: {meta.width}x{meta.height}",
+        f"Clips: {n_clips}",
+        "",
+        "Contents",
+        "--------",
+        "  manifest.json   Everything Quip knows: every clip's in/out (source timecode AND",
+        "                  seconds), hook, why-it-works, score, type, tone, key quote, plus",
+        "                  chapters and markers. The durable source of truth for this package.",
+        "  timeline.edl    CMX3600 EDL in SOURCE timecode — re-cut from your original media.",
+        "  timeline.fcpxml FCPXML timeline (DaVinci Resolve / Final Cut) with frame-accurate",
+        "                  rational times, drop-frame flag, hook + chapter markers.",
+        "  markers.csv     DaVinci Resolve markers (Timecode In, Name, Comment, Color).",
+        "  captions/       Per-clip .srt and .vtt subtitles in CLIP time (import into CapCut,",
+        "                  Premiere, Resolve, or a web player).",
+    ]
+    if include_clips:
+        lines.append("  clips/          The rendered vertical clips (self-contained).")
+    lines += [
+        "",
+        "How to import",
+        "-------------",
+        "  DaVinci Resolve : File > Import > Timeline > Pre-Conform, pick timeline.edl or",
+        "                    timeline.fcpxml, then relink to your source file. Or import",
+        "                    markers.csv onto a clip's timeline.",
+        "  Premiere Pro    : File > Import, choose timeline.edl (interpret footage to match fps).",
+        "  Final Cut Pro   : File > Import > XML, choose timeline.fcpxml.",
+        "  CapCut / others : Drop the captions/*.srt onto your clip.",
+        "",
+        "All timecodes in the EDL / FCPXML / markers are in the ORIGINAL source's timecode,",
+        "so a re-cut lands exactly where Quip cut. Subtitles are in per-clip time.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_package_zip(job_id: str, include_clips: bool) -> bytes:
+    """Собрать editor-handoff пакет в in-memory zip (bytes). JobError, если нет core-артефактов.
+
+    include_clips=True добавляет УЖЕ ОТРЕНДЕРЕННЫЕ клипы С ДИСКА (captioned → clean), НЕ рендерит
+    заново (эндпоинт дешёвый, денег/пайплайна не тратит; отсутствующие на диске клипы просто
+    пропускаются — в облаке они в R2, скачивание тут не делаем)."""
+    meta, meta_d, clips, edits_by_id, markers_all, chapters, moment_markers = _build_handoff(job_id)
+    fps = meta.fps
+    words = store.load_transcript_words(job_id)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(
+            "manifest.json",
+            build_manifest_json({"id": job_id}, clips, markers_all, meta_d, chapters=chapters),
+        )
+        z.writestr("timeline.edl", build_edl(clips, fps, meta.title))
+        # FCPXML: hook-маркеры идут ИЗ клипов, поэтому в аргумент markers кладём только моменты
+        # (иначе clip-старт-маркеры продублировали бы hook-маркеры). Главы → chapter-marker.
+        z.writestr(
+            "timeline.fcpxml", build_fcpxml(clips, moment_markers, meta_d, chapters=chapters)
+        )
+        z.writestr("markers.csv", build_markers_csv(markers_all, fps))
+        for c in clips:
+            edit = edits_by_id[c.name]
+            cmap = ClipTimeMap(edit.source_intervals)
+            z.writestr(f"captions/{c.name}.srt", compile_srt(edit.captions, words, cmap))
+            z.writestr(f"captions/{c.name}.vtt", build_vtt(edit.captions, words, cmap))
+        if include_clips:
+            clips_dir = store.data_root() / job_id / "clips"
+            for c in clips:
+                for cand in (f"{c.name}_captioned.mp4", f"{c.name}.mp4"):
+                    p = clips_dir / cand
+                    if p.exists():
+                        z.write(str(p), f"clips/{c.name}.mp4")
+                        break
+        z.writestr("README.txt", _handoff_readme(meta, len(clips), include_clips))
+    return buf.getvalue()
+
+
+def _text_attachment(content: str, filename: str, media_type: str) -> Response:
+    """Текстовый экспорт как attachment. Referrer-Policy no-referrer (как media-экспорт)."""
+    return _no_referrer(
+        Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    )
+
+
+@app.get("/jobs/{job_id}/export.edl")
+def export_edl(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
+    """CMX3600 EDL проекта в SOURCE-таймкоде (пере-нарезка из оригинала). Owner-only (IDOR)."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
+    try:
+        meta, _md, clips, *_ = _build_handoff(job_id)
+    except JobError as e:
+        raise HTTPException(status_code=404, detail="job artifacts not found") from e
+    edl = build_edl(clips, meta.fps, meta.title)
+    return _text_attachment(edl, f"{job_id}.edl", "application/octet-stream; charset=utf-8")
+
+
+@app.get("/jobs/{job_id}/export.fcpxml")
+def export_fcpxml(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
+    """FCPXML-таймлайн (DaVinci Resolve / Final Cut) в SOURCE-времени. Owner-only (IDOR)."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
+    try:
+        _meta, meta_d, clips, _edits, _markers, chapters, moment_markers = _build_handoff(job_id)
+    except JobError as e:
+        raise HTTPException(status_code=404, detail="job artifacts not found") from e
+    xml = build_fcpxml(clips, moment_markers, meta_d, chapters=chapters)
+    return _text_attachment(xml, f"{job_id}.fcpxml", "application/xml; charset=utf-8")
+
+
+@app.get("/jobs/{job_id}/export/markers.csv")
+def export_markers_csv(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
+    """Маркеры проекта (клипы + главы + моменты) как DaVinci-CSV. Owner-only (IDOR)."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
+    try:
+        meta, _md, _clips, _edits, markers_all, *_ = _build_handoff(job_id)
+    except JobError as e:
+        raise HTTPException(status_code=404, detail="job artifacts not found") from e
+    csv_text = build_markers_csv(markers_all, meta.fps)
+    return _text_attachment(csv_text, f"{job_id}_markers.csv", "text/csv; charset=utf-8")
+
+
+@app.get("/jobs/{job_id}/clips/{clip_id}/export.vtt")
+def export_clip_vtt(
+    job_id: str,
+    clip_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
+    """WebVTT субтитров клипа (сиблинг SRT, клип-время). Owner-only (IDOR): header ЛИБО ?mt=."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
+    try:
+        edit = store.ensure_edit(job_id, clip_id)
+    except (FileNotFoundError, KeyError, JobError) as e:
+        raise HTTPException(status_code=404, detail="clip/segment not found") from e
+    words = store.load_transcript_words(job_id)
+    cmap = ClipTimeMap(edit.source_intervals)
+    vtt = build_vtt(edit.captions, words, cmap)
+    return _text_attachment(vtt, f"{clip_id}.vtt", "text/vtt; charset=utf-8")
+
+
+@app.get("/jobs/{job_id}/export/package.zip")
+def export_package_zip(
+    job_id: str,
+    include_clips: bool = False,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+    mt: str | None = None,
+) -> Response:
+    """Весь editor-handoff пакет одним zip: manifest + EDL + FCPXML + markers.csv + per-clip
+    SRT/VTT + README (+ отрендеренные клипы при ``include_clips=true``). Owner-only (IDOR):
+    header ЛИБО scoped ``?mt=``. 404, если нет core-артефактов джоба."""
+    _require_media_access(job_id, authorization, x_user_id, mt)
+    try:
+        data = _build_package_zip(job_id, include_clips)
+    except JobError as e:
+        raise HTTPException(status_code=404, detail="job artifacts not found") from e
+    return _no_referrer(
+        Response(
+            content=data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="quip_{job_id}_editor_package.zip"'
+            },
+        )
+    )
 
 
 @app.patch("/jobs/{job_id}/clips/{clip_id}/edit")

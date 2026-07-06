@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,39 @@ _FALLBACK_MODELS = ("gemini-2.5-flash-lite",)
 # ─────────────────────────── pure-постобработка (unit-тесты) ───────────────────────────
 
 _SENT_END = (".", "!", "?")
+
+# A2: слова-паразиты (filler). Deepgram `filler_words=true` (stage1_transcribe) отдаёт им реальные
+# таймстемпы, но inline в транскрипте — их ничто детерминированно не срезает у краёв клипа. Набор
+# язык-нейтральный (EN + RU + KK), сверяемся по нормализованному тексту (см. _is_filler). Держим
+# ТОЛЬКО однозначные филлеры — режем их лишь на самом КРАЮ клипа (start/end), не внутри, поэтому
+# риск задеть омоним-союз («а»/«и») ограничен одним словом у границы.
+#
+# ⚠️ Провайдеры: Deepgram (EN/RU/…) реально ВЫДЕЛЯЕТ филлеры в отдельные токены (filler_words=true).
+# Groq/Whisper (казахский kk-путь, stage1_transcribe авто-роут) filler_words НЕ поддерживает и
+# обычно НЕ транскрибирует «э-э/мм» словами → filler-обрезка чаще всего no-op (безопасно, без ложных
+# срабатываний). Зато аудио-снап конца к вдоху (по RMS-кривой loudness) работает НА ЛЮБОМ провайдере
+# — это и есть главный аудио-рычаг чистых границ для kk.
+_FILLERS: frozenset[str] = frozenset(
+    {
+        # English (Deepgram filler set + распространённые)
+        "uh", "uhh", "um", "umm", "uhm", "er", "err", "ah", "ahh", "eh", "hmm", "hm",
+        "mm", "mmm", "mhmm", "mhm", "uh-huh", "uh-uh",
+        # Russian (вкл. одиночные «э»/«а» — симптом фаундера; «а» омонимичен союзу, но режем
+        # ТОЛЬКО у самого края клипа и лишь при аудио-слое → риск ограничен одним словом)
+        "э", "ээ", "эм", "эмм", "а", "а-а", "аа", "ну", "мда", "эх",
+        # Kazakh (вокализованные хезитации; редкость в Whisper-выводе, но на всякий)
+        "ә", "әә", "әм", "мм-м", "əм",
+    }
+)  # fmt: skip
+
+
+def _is_filler(text: str) -> bool:
+    """Слово-паразит ли (после нормализации: trim, lower, снятие окаймляющей пунктуации). PURE.
+
+    ASR часто пунктуирует филлер («Uh,» / «um.») — сравниваем очищенную форму с _FILLERS.
+    """
+    t = text.strip().lower().strip(".,!?;:—–-\"'»«…()").strip()
+    return t in _FILLERS
 
 
 def clamp_score(x: float) -> float:
@@ -171,6 +205,83 @@ def snap_start_index(
     return start_idx
 
 
+def _loudness_at(loudness: list[float], t: float, hop_s: float) -> float | None:
+    """Значение RMS-кривой (dB) в момент t сек (окно hop_s). None, если кривая пуста. PURE."""
+    if not loudness:
+        return None
+    idx = int(t / hop_s) if hop_s > 0 else 0
+    idx = max(0, min(len(loudness) - 1, idx))
+    return loudness[idx]
+
+
+def refine_boundaries_audio(
+    words: list[Word],
+    loudness: list[float] | None,
+    start_idx: int,
+    end_idx: int,
+    *,
+    hop_s: float = 0.5,
+    min_pause: float = 0.35,
+    trough_window: int = 4,
+    trough_margin_db: float = 3.0,
+    max_filler_trim: int = 2,
+) -> tuple[int, int]:
+    """A2: аудио-осознанное уточнение уже-снапнутых границ (start_idx, end_idx) → (si, ei). PURE.
+
+    Работает ПОВЕРХ детерминированных snap_start_index/snap_end_index — только когда доступна
+    RMS-кривая громкости `loudness` (dB по окнам hop_s сек, из preview_moments.extract_loudness):
+
+      1) обрезка слов-паразитов у КРАЁВ: хвостовой филлер («…real. uh») → назад к настоящему
+         слову; ведущий филлер («uh, real…») → вперёд;
+      2) снап конца к «вдоху»: если конец НЕ на .?! и после него НЕТ паузы ≥ min_pause (снапперы
+         уже это исчерпали), тянем ei к БЛИЖАЙШЕЙ глубокой низко-энергетической впадине кривой
+         (тихий вдох между фразами) в окне ±trough_window слов, глубиной ≥ trough_margin_db ниже
+         текущего уровня. Нет такой впадины → конец не двигаем.
+
+    Деградирует в СТРОГИЙ no-op, когда `loudness` is None/пусто (правило №8: это явная ветка
+    «нет аудио-сигнала → оставляем детерминированный результат», НЕ тихий фолбэк). Границы
+    остаются в [0, len(words)); si ≤ ei гарантируется (не схлопываем клип).
+    """
+    si, ei = start_idx, end_idx
+    # Нет аудио-сигнала → строгий no-op (оставляем детерминированный снап как есть).
+    if not loudness:
+        return si, ei
+    # Защита от битых индексов (снап в патологии мог инвертировать) — не падаем, отдаём как есть.
+    n = len(words)
+    if not (0 <= si <= ei < n):
+        return si, ei
+
+    # 1a) хвостовой филлер у самого конца → отрезаем к предыдущему настоящему слову
+    trimmed = 0
+    while ei > si and trimmed < max_filler_trim and _is_filler(words[ei].text):
+        ei -= 1
+        trimmed += 1
+    # 1b) ведущий филлер у самого начала → сдвигаем вперёд к настоящему слову
+    trimmed = 0
+    while si < ei and trimmed < max_filler_trim and _is_filler(words[si].text):
+        si += 1
+        trimmed += 1
+
+    # 2) снап конца к вдоху — ТОЛЬКО если конец не чист (не .?! и после него нет паузы).
+    if _is_sentence_end(words[ei].text):
+        return si, ei
+    if ei + 1 < n and (words[ei + 1].start - words[ei].end) >= min_pause:
+        return si, ei
+
+    cur_db = _loudness_at(loudness, words[ei].end, hop_s)
+    if cur_db is None:
+        return si, ei
+    lo = max(si, ei - trough_window)
+    hi = min(n - 1, ei + trough_window)
+    best_j, best_db = ei, cur_db
+    # обходим кандидатов от БЛИЖАЙШЕГО к ei → при равной глубине побеждает ближний край.
+    for j in sorted(range(lo, hi + 1), key=lambda x: (abs(x - ei), x)):
+        db = _loudness_at(loudness, words[j].end, hop_s)
+        if db is not None and db < best_db - trough_margin_db:
+            best_db, best_j = db, j
+    return si, best_j
+
+
 def indices_to_times(words: list[Word], start_idx: int, end_idx: int) -> tuple[float, float]:
     """Индексы слов → (start_sec, end_sec) с безопасным сдвигом начала назад на 150мс.
     JobError при выходе за диапазон или start>end.
@@ -221,6 +332,41 @@ def resolve_overlaps(segments: list[Segment]) -> list[Segment]:
     return chosen
 
 
+def select_spread(chosen: list[Segment], max_clips: int) -> list[Segment]:
+    """Обрезать `chosen` (уже непересекающиеся) до `max_clips`, отдавая приоритет РАСПРЕДЕЛЕНИЮ
+    по таймлайну, а не чистому топ-N по score (который может СКУЧИВАТЬ клипы в одном участке). PURE.
+
+    Chunked-отбор поднимает много сильных непересекающихся кандидатов из РАЗНЫХ окон; голый топ-N
+    по score мог бы собрать их в первой трети (обратная сторона той же болезни, что мы лечим). Тут:
+    делим таймспан кандидатов на `max_clips` равных ВРЕМЕННЫ́Х корзин; каждая корзина оставляет свой
+    ОДИН максимум по score; пустые корзины добиваем следующими по score «остатками». Результат —
+    max_clips клипов, размазанных по всему видео (а не в начале), отсортированных по start.
+
+    len(chosen) <= max_clips → просто сортировка по start (нечего резать).
+    """
+    if len(chosen) <= max_clips:
+        return sorted(chosen, key=lambda s: s.start)
+    lo = min(s.start for s in chosen)
+    hi = max(s.end for s in chosen)
+    span = (hi - lo) or 1.0
+    by_score = sorted(chosen, key=lambda s: s.score, reverse=True)
+    picked: dict[int, Segment] = {}
+    for seg in by_score:
+        mid = (seg.start + seg.end) / 2.0
+        bucket = min(max_clips - 1, int((mid - lo) / span * max_clips))
+        picked.setdefault(bucket, seg)  # первый (=макс. score) в корзине побеждает
+    result = list(picked.values())
+    if len(result) < max_clips:
+        chosen_ids = {id(s) for s in result}
+        for seg in by_score:  # добиваем пустые корзины лучшими по score остатками
+            if id(seg) not in chosen_ids:
+                result.append(seg)
+                if len(result) >= max_clips:
+                    break
+    result.sort(key=lambda s: s.start)
+    return result
+
+
 def postprocess(
     raw: list[dict[str, Any]],
     words: list[Word],
@@ -230,10 +376,21 @@ def postprocess(
     max_clips: int = 8,
     duration: float | None = None,
     tail_pad: float = 0.0,
+    loudness: list[float] | None = None,
+    spread: bool = False,
 ) -> list[Segment]:
     """Сырые сегменты LLM → валидные Segment: snap, маппинг в секунды, длительность-гейт,
     клиппинг score, валидация type, анти-overlap, обрезка до max_clips (топ по score).
     Битый/невалидный сегмент пропускаем, а не роняем весь прогон.
+
+    spread (chunked-отбор): при обрезке до max_clips использовать распределение по таймлайну
+    (`select_spread`) вместо голого топ-N по score — чтобы кандидаты из разных окон не скучивались
+    в первой трети. По умолчанию False → прежнее поведение (одиночный вызов байт-в-байт).
+
+    A1: границы ДЕТЕРМИНИРОВАННО снапаются к предложениям (snap_start_index/snap_end_index) ДО
+    маппинга в секунды — иначе клип кончается на фрагменте / начинается с хвоста мысли (регресс
+    18abe24 их молча удалил). A2: при наличии `loudness` (RMS-кривая) поверх снапа работает
+    refine_boundaries_audio (обрезка филлеров у краёв + снап конца к вдоху); None → чистый снап.
 
     W1: длительность-гейт считается по РЕЧИ (до паддинга) — клип ровно на max_sec не дропается;
     `tail_pad`>0 → конец добивается тишиной (`pad_clip_end`) для чистого лупа (нужен `duration`).
@@ -266,10 +423,17 @@ def postprocess(
         tone = str(tone_raw).strip().lower() or None if tone_raw else None
         key_quote = str(key_quote_raw).strip() or None if key_quote_raw else None
         try:
+            # A1: детерминированный снап к границам предложений (start первым — от него зависит
+            # speaker-aware логика конца). A2: аудио-слой поверх (no-op без loudness).
+            si = snap_start_index(words, si)
+            ei = snap_end_index(words, ei, start_idx=si)
+            if loudness:
+                si, ei = refine_boundaries_audio(words, loudness, si, ei)
             start, end = indices_to_times(words, si, ei)
         except (JobError, IndexError):
             continue
         # Гейт по РЕЧИ (до паддинга): иначе клип у границы max_sec дропнется из-за тишины.
+        # si/ei — уже СНАПНУТЫЕ индексы (гейт считаем по реальной длине выбранной речи).
         raw_dur = words[ei].end - words[si].start
         if not (min_sec <= raw_dur <= max_sec):
             continue
@@ -291,9 +455,97 @@ def postprocess(
         )
     chosen = resolve_overlaps(candidates)
     if len(chosen) > max_clips:
-        top = sorted(chosen, key=lambda s: s.score, reverse=True)[:max_clips]
-        chosen = sorted(top, key=lambda s: s.start)
+        if spread:
+            chosen = select_spread(chosen, max_clips)
+        else:
+            top = sorted(chosen, key=lambda s: s.score, reverse=True)[:max_clips]
+            chosen = sorted(top, key=lambda s: s.start)
     return chosen
+
+
+# ─────────────────────────── chunked selection (pure, unit-тесты) ───────────────────────────
+
+
+def should_chunk(
+    transcript: Transcript, *, min_duration_sec: float = 900.0, min_words: int = 3000
+) -> bool:
+    """Резать ли транскрипт на окна для отбора моментов (chunked selection). PURE.
+
+    True только для ДЛИННЫХ входов (по умолчанию > 15 мин ИЛИ > 3000 слов): там одиночный
+    Gemini-вызов теряет recall — на 86-мин интервью (15795 слов) вернулось 2 клипа, оба в первых
+    25 мин. Короткий вход → False → одиночный вызов, прежний путь БАЙТ-В-БАЙТ.
+    """
+    return transcript.duration > min_duration_sec or len(transcript.words) > min_words
+
+
+def make_windows(
+    words: list[Word], *, target_sec: float = 720.0, overlap_sec: float = 75.0
+) -> list[tuple[int, int]]:
+    """Разбить `words` на перекрывающиеся ВРЕМЕННЫ́Е окна → список АБСОЛЮТНЫХ (start_idx, end_idx),
+    обе границы ВКЛЮЧИТЕЛЬНЫ, покрывающих ВЕСЬ транскрипт БЕЗ пропусков с нахлёстом overlap_sec
+    (момент на стыке окон виден целиком хотя бы в одном окне). PURE.
+
+    Каждое окно ≈ target_sec речи по word-таймингам; следующее окно стартует через
+    (target_sec − overlap_sec) секунд → соседи делят ~overlap_sec контента. Инварианты:
+      • старт след. окна ≤ (конец текущего + 1) → НЕТ дыр в покрытии;
+      • продвижение ≥ 1 слово за итерацию → нет зацикливания;
+      • первое окно стартует с 0, последнее кончается на n−1.
+    total ≤ target_sec → одно окно (0, n−1). Пустой вход → []. overlap_sec ≥ target_sec —
+    конфиг-ошибка (ValueError, не тихий фолбэк): окно не сдвинулось бы вперёд.
+    """
+    n = len(words)
+    if n == 0:
+        return []
+    if overlap_sec >= target_sec:
+        raise ValueError(f"overlap_sec ({overlap_sec}) must be < target_sec ({target_sec})")
+    total = words[-1].end - words[0].start
+    if total <= target_sec:
+        return [(0, n - 1)]
+    stride = target_sec - overlap_sec
+    windows: list[tuple[int, int]] = []
+    start_i = 0
+    while True:
+        start_t = words[start_i].start
+        end_limit = start_t + target_sec
+        end_i = start_i
+        while end_i + 1 < n and words[end_i + 1].start < end_limit:
+            end_i += 1
+        windows.append((start_i, end_i))
+        if end_i >= n - 1:  # окно достало до конца транскрипта → готово
+            break
+        next_start_t = start_t + stride
+        new_start = start_i + 1  # гарантируем продвижение минимум на 1 слово
+        while new_start < n and words[new_start].start < next_start_t:
+            new_start += 1
+        start_i = new_start
+    return windows
+
+
+def dedup_raw_segments(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Слить сырые сегменты LLM из перекрывающихся окон: убрать ТОЧНЫЕ дубли по диапазону
+    (start_word_index, end_word_index) — один и тот же момент, увиденный в нахлёсте двух соседних
+    окон, — оставляя копию с БÓЛЬШИМ score. Порядок = первое появление уникального диапазона.
+    Элементы без валидных индексов сохраняем как есть (их отбраковывает postprocess). PURE.
+    """
+    seen: dict[tuple[int, int], int] = {}  # диапазон → позиция в out
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        try:
+            key = (int(item["start_word_index"]), int(item["end_word_index"]))
+        except (KeyError, TypeError, ValueError):
+            out.append(item)  # битый → пусть postprocess решает (тут не роняем дедуп)
+            continue
+        if key not in seen:
+            seen[key] = len(out)
+            out.append(item)
+        else:
+            pos = seen[key]
+            try:
+                if float(item.get("score", 0.0)) > float(out[pos].get("score", 0.0)):
+                    out[pos] = item
+            except (TypeError, ValueError):
+                pass
+    return out
 
 
 # Перманентные HTTP-коды Gemini: ключ/доступ/модель/запрос — ретрай их не вылечит.
@@ -397,9 +649,16 @@ class _LlmSelection(BaseModel):
     segments: list[_LlmSegment]
 
 
-def build_indexed_transcript(words: list[Word], per_line: int = 15) -> str:
+def build_indexed_transcript(words: list[Word], per_line: int = 15, *, start_index: int = 0) -> str:
     """Пронумерованный по словам транскрипт с разметкой пауз и спикеров.
     Каждое слово идет в формате '[индекс]слово'.
+
+    start_index (chunked selection): АБСОЛЮТНЫЙ индекс первого слова слайса `words` в ПОЛНОМ
+    транскрипте. Печатаем '[i + start_index]слово', поэтому при подаче ОКНА `words[a:b+1]` с
+    start_index=a возвращаемые LLM start_word_index/end_word_index по-прежнему адресуют ГЛОБАЛЬНЫЙ
+    words[idx] (postprocess работает над полным списком слов) — это КРИТИЧНО для мержа окон.
+    Пауза-детекция внутри слайса (words[i-1]) корректна: слайс непрерывен. Default 0 → прежнее
+    поведение байт-в-байт (полный транскрипт, индексы с 0).
     """
     lines: list[str] = []
     current_speaker: int | None = -999  # Сентинел
@@ -423,8 +682,9 @@ def build_indexed_transcript(words: list[Word], per_line: int = 15) -> str:
                     lines.append(" ".join(current_line))
                     current_line = []
 
-        # 3) Слово с индексом
-        current_line.append(f"[{i}]{w.text}")
+        # 3) Слово с АБСОЛЮТНЫМ индексом (i + start_index): при подаче окна индексы остаются
+        # глобальными → LLM-выбор адресует полный words[idx] после мержа окон.
+        current_line.append(f"[{i + start_index}]{w.text}")
 
         # Перенос длинных строк
         if len(current_line) >= per_line:
@@ -562,40 +822,116 @@ def select_segments(
     title: str,
     *,
     max_clips: int | None = None,
+    loudness: list[float] | None = None,
     usage_sink: dict[str, int] | None = None,
 ) -> list[Segment]:
     """Gemini structured output → сырые сегменты → постобработка → list[Segment].
 
     max_clips (опц.) — запрошенное юзером число клипов (UI-степпер); None → дефолт из настроек.
+    loudness (опц., A3) — RMS-кривая громкости источника (dB, из preview_moments.extract_loudness):
+      скармливается refine_boundaries_audio в postprocess для аудио-осознанной чистки границ.
+      None / выключенный SELECT_AUDIO_AWARE → чисто детерминированный снап (провайдер-агностик:
+      работает и на Deepgram, и на Groq/kk — filler-набор язык-нейтральный, вдох-снап по аудио).
     usage_sink (опц.) заполняется токенами (prompt/output/thoughts) для лога стоимости.
+
+    Chunked (длинное видео, SELECT_CHUNK_ENABLED + should_chunk): транскрипт режется на
+    перекрывающиеся временны́е окна (make_windows), КАЖДОЕ окно отбирается отдельным Gemini-вызовом
+    по тому же промпту (индексы АБСОЛЮТНЫ через build_indexed_transcript(start_index=…)), кандидаты
+    мержатся (dedup_raw_segments) и ОДИН раз прогоняются через postprocess (глобальный анти-overlap
+    + spread top-N). Лечит коллапс recall одиночного вызова на гигантском входе. Короткое видео —
+    прежний одиночный путь БАЙТ-В-БАЙТ.
     """
     s = get_settings()
     n_clips = resolve_max_clips(max_clips, s.max_clips)
-    indexed = build_indexed_transcript(transcript.words)
-    user_prompt = build_user_prompt(
-        title, transcript, indexed, n_clips, min_sec=s.clip_min_sec, max_sec=s.clip_max_sec
-    )
+    words = transcript.words
+    system_prompt = load_system_prompt()
+    # A3/A4: аудио-слой границ — только при включённом тумблере и наличии кривой.
+    audio = loudness if s.select_audio_aware else None
 
-    text = call_gemini_structured(
-        user_prompt,
-        system_prompt=load_system_prompt(),
-        response_schema=_LlmSelection,
-        stage=_STAGE,
-        usage_sink=usage_sink,
-    )
-    try:
-        raw = json.loads(text).get("segments", [])
-    except json.JSONDecodeError as e:
-        raise JobError(_STAGE, f"Gemini returned non-JSON: {e}") from e
+    if not (s.select_chunk_enabled and should_chunk(transcript)):
+        # ── одиночный вызов (короткое видео): прежний путь, байт-в-байт ──
+        indexed = build_indexed_transcript(words)
+        user_prompt = build_user_prompt(
+            title, transcript, indexed, n_clips, min_sec=s.clip_min_sec, max_sec=s.clip_max_sec
+        )
+        text = call_gemini_structured(
+            user_prompt,
+            system_prompt=system_prompt,
+            response_schema=_LlmSelection,
+            stage=_STAGE,
+            usage_sink=usage_sink,
+        )
+        try:
+            raw = json.loads(text).get("segments", [])
+        except json.JSONDecodeError as e:
+            raise JobError(_STAGE, f"Gemini returned non-JSON: {e}") from e
+        return postprocess(
+            raw,
+            words,
+            min_sec=s.clip_min_sec,
+            max_sec=s.clip_max_sec,
+            max_clips=n_clips,
+            duration=transcript.duration,
+            tail_pad=s.clip_tail_pad_sec,
+            loudness=audio,
+        )
 
+    # ── chunked selection (длинное видео): окна → per-window Gemini → merge → 1× postprocess ──
+    windows = make_windows(
+        words,
+        target_sec=float(s.select_chunk_target_sec),
+        overlap_sec=float(s.select_chunk_overlap_sec),
+    )
+    combined_raw: list[dict[str, Any]] = []
+    failures = 0
+    for a, b in windows:
+        w_slice = words[a : b + 1]
+        indexed = build_indexed_transcript(w_slice, start_index=a)  # индексы ОСТАЮТСЯ глобальными
+        # Метаданные промпта (язык/длина/число слов) — по ОКНУ (совпадают с поданным срезом).
+        win_tr = Transcript(
+            language=transcript.language,
+            duration=w_slice[-1].end - w_slice[0].start,
+            words=w_slice,
+        )
+        user_prompt = build_user_prompt(
+            title, win_tr, indexed, n_clips, min_sec=s.clip_min_sec, max_sec=s.clip_max_sec
+        )
+        win_usage: dict[str, int] | None = {} if usage_sink is not None else None
+        try:
+            text = call_gemini_structured(
+                user_prompt,
+                system_prompt=system_prompt,
+                response_schema=_LlmSelection,
+                stage=_STAGE,
+                usage_sink=win_usage,
+            )
+            raw = json.loads(text).get("segments", [])
+        except (JobError, json.JSONDecodeError) as e:
+            # Правило №8: НЕ проглатываем окно в 0 клипов — логируем и продолжаем с остальными
+            # окнами (сбой одного окна не должен обнулить весь отбор).
+            failures += 1
+            print(f"[2] select: window words[{a}:{b}] failed, skipping: {e}", file=sys.stderr)
+            continue
+        combined_raw.extend(raw)
+        if usage_sink is not None and win_usage:  # суммируем токены окон в общий счётчик стоимости
+            for k, v in win_usage.items():
+                usage_sink[k] = usage_sink.get(k, 0) + v
+
+    # Правило №8: ВСЕ окна упали → это НЕ «0 моментов найдено», а сбой отбора → роняем джобу явно.
+    if failures == len(windows):
+        raise JobError(_STAGE, f"all {len(windows)} selection windows failed (see logs above)")
+
+    combined_raw = dedup_raw_segments(combined_raw)
     return postprocess(
-        raw,
-        transcript.words,
+        combined_raw,
+        words,
         min_sec=s.clip_min_sec,
         max_sec=s.clip_max_sec,
         max_clips=n_clips,
         duration=transcript.duration,
         tail_pad=s.clip_tail_pad_sec,
+        loudness=audio,
+        spread=True,  # кандидаты из разных окон → распределяем по таймлайну, не скучиваем
     )
 
 

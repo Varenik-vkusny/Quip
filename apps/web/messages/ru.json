@@ -264,6 +264,29 @@
     "srt": {
       "title": "Субтитры (.SRT)",
       "sub": "Для CapCut / Premiere / Resolve"
+    },
+    "handoff": {
+      "section": "Для вашего редактора",
+      "package": {
+        "title": "Пакет для монтажа (.zip)",
+        "sub": "Таймлайн + субтитры + манифест"
+      },
+      "edl": {
+        "title": "Таймлайн (.edl)",
+        "sub": "Пере-нарезка из оригинала · Premiere / Resolve"
+      },
+      "fcpxml": {
+        "title": "FCPXML",
+        "sub": "Таймлайн для Resolve / Final Cut"
+      },
+      "markers": {
+        "title": "Маркеры (.csv)",
+        "sub": "Маркеры клипов и глав для Resolve"
+      },
+      "vtt": {
+        "title": "Субтитры (.VTT)",
+        "sub": "WebVTT для веб-плееров и редакторов"
+      }
     }
   },
   "editor": {

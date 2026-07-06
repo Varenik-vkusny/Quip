@@ -264,6 +264,29 @@
     "srt": {
       "title": "Captions (.SRT)",
       "sub": "For CapCut / Premiere / Resolve"
+    },
+    "handoff": {
+      "section": "For your editor",
+      "package": {
+        "title": "Editor package (.zip)",
+        "sub": "Timeline + captions + manifest"
+      },
+      "edl": {
+        "title": "Timeline (.edl)",
+        "sub": "Re-cut from source · Premiere / Resolve"
+      },
+      "fcpxml": {
+        "title": "FCPXML",
+        "sub": "Timeline for Resolve / Final Cut"
+      },
+      "markers": {
+        "title": "Markers (.csv)",
+        "sub": "Clip + chapter markers for Resolve"
+      },
+      "vtt": {
+        "title": "Captions (.VTT)",
+        "sub": "WebVTT for web players / editors"
+      }
     }
   },
   "editor": {
