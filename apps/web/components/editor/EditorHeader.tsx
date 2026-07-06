@@ -12,6 +12,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { memo, useEffect, useRef, useState } from "react";
 import { ExportMenu } from "@/components/ExportMenu";
 import { Button } from "@/components/ui/Button";
@@ -99,6 +100,7 @@ export const EditorHeader = memo(function EditorHeader({
   onError: (msg: string) => void;
 }) {
   const router = useRouter();
+  const t = useTranslations("editor.header");
   const idx = clipIds.indexOf(clipId);
   const prevId = idx > 0 ? clipIds[idx - 1] : null;
   const nextId = idx >= 0 && idx < clipIds.length - 1 ? clipIds[idx + 1] : null;
@@ -139,11 +141,11 @@ export const EditorHeader = memo(function EditorHeader({
         <button
           type="button"
           onClick={() => leaveTo(`/dashboard?job=${jobId}`)}
-          aria-label="All clips"
+          aria-label={t("allClips")}
           className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-sm text-muted transition hover:border-accent/50 hover:text-ink focus:outline-none focus:ring-2 focus:ring-accent/40 sm:px-3 sm:py-1.5"
         >
           <ArrowLeft className="size-4" />
-          <span className="hidden sm:inline">All clips</span>
+          <span className="hidden sm:inline">{t("allClips")}</span>
         </button>
 
         <div className="flex items-center gap-1">
@@ -151,8 +153,8 @@ export const EditorHeader = memo(function EditorHeader({
             type="button"
             disabled={!prevId || busy}
             onClick={() => prevId && onSwitchClip(prevId)}
-            title="Previous clip"
-            aria-label="Previous clip"
+            title={t("prevClip")}
+            aria-label={t("prevClip")}
             className="inline-flex size-9 items-center justify-center rounded-lg border border-line text-muted transition enabled:hover:border-accent/50 enabled:hover:text-ink disabled:opacity-30 sm:size-8"
           >
             <ChevronLeft className="size-4" />
@@ -161,7 +163,9 @@ export const EditorHeader = memo(function EditorHeader({
             {idx >= 0 ? (
               <>
                 <span className="sm:hidden">{`${idx + 1}/${clipIds.length}`}</span>
-                <span className="hidden sm:inline">{`Clip ${idx + 1} of ${clipIds.length}`}</span>
+                <span className="hidden sm:inline">
+                  {t("clipOf", { idx: idx + 1, len: clipIds.length })}
+                </span>
               </>
             ) : (
               clipId
@@ -171,8 +175,8 @@ export const EditorHeader = memo(function EditorHeader({
             type="button"
             disabled={!nextId || busy}
             onClick={() => nextId && onSwitchClip(nextId)}
-            title="Next clip"
-            aria-label="Next clip"
+            title={t("nextClip")}
+            aria-label={t("nextClip")}
             className="inline-flex size-9 items-center justify-center rounded-lg border border-line text-muted transition enabled:hover:border-accent/50 enabled:hover:text-ink disabled:opacity-30 sm:size-8"
           >
             <ChevronRight className="size-4" />
@@ -185,8 +189,8 @@ export const EditorHeader = memo(function EditorHeader({
             type="button"
             disabled={!canUndo || busy}
             onClick={onUndo}
-            title="Undo (Ctrl+Z)"
-            aria-label="Undo"
+            title={t("undoTitle")}
+            aria-label={t("undo")}
             className="inline-flex size-9 items-center justify-center rounded-lg border border-line text-muted transition enabled:hover:border-accent/50 enabled:hover:text-ink disabled:opacity-30 sm:size-8"
           >
             <Undo2 className="size-4" />
@@ -195,8 +199,8 @@ export const EditorHeader = memo(function EditorHeader({
             type="button"
             disabled={!canRedo || busy}
             onClick={onRedo}
-            title="Redo (Ctrl+Shift+Z)"
-            aria-label="Redo"
+            title={t("redoTitle")}
+            aria-label={t("redo")}
             className="inline-flex size-9 items-center justify-center rounded-lg border border-line text-muted transition enabled:hover:border-accent/50 enabled:hover:text-ink disabled:opacity-30 sm:size-8"
           >
             <Redo2 className="size-4" />
@@ -214,33 +218,33 @@ export const EditorHeader = memo(function EditorHeader({
             row of mono readouts — the "click Render" nudge is informative, not shouty. */}
         {saving && (
           <span
-            title="Saving your edits…"
+            title={t("savingTitle")}
             className="inline-flex items-center gap-1.5 text-xs text-muted"
           >
             <Loader2 className="size-3 animate-spin" />
-            <span className="hidden sm:inline">Saving…</span>
+            <span className="hidden sm:inline">{t("saving")}</span>
           </span>
         )}
         {dirty && renderState.kind !== "rendering" && (
           <span
-            title="The preview already shows your edits live. The downloadable file is still the old one. Click “Render” to write edits to the file."
+            title={t("editsNotSavedTitle")}
             className="inline-flex items-center gap-1.5 text-xs text-warn"
           >
             <span className="size-1.5 rounded-pill bg-warn" />
-            <span className="hidden sm:inline">Edits not yet in the file</span>
-            <span className="sm:hidden">not saved</span>
+            <span className="hidden sm:inline">{t("editsNotInFile")}</span>
+            <span className="sm:hidden">{t("notSaved")}</span>
           </span>
         )}
         {renderState.kind === "rendering" && (
           <span className="inline-flex items-center gap-1.5 font-mono text-xs tabular-nums text-accent">
             <Loader2 className="size-3.5 animate-spin" />
-            Rendering… {renderState.elapsed}s
+            {t("rendering", { elapsed: renderState.elapsed })}
           </span>
         )}
         {renderState.kind === "done" && (
           <span className="inline-flex items-center gap-1.5 text-xs text-ok">
             <CheckCircle className="size-3.5" />
-            Done
+            {t("done")}
           </span>
         )}
         {/* Style templates: a GLOBAL look (captions + highlight + hook + position/size/timing)
@@ -252,16 +256,16 @@ export const EditorHeader = memo(function EditorHeader({
             aria-haspopup="dialog"
             aria-expanded={tplOpen}
             onClick={() => setTplOpen((v) => !v)}
-            title="Style templates — save a look, reuse it on any clip"
+            title={t("styleTemplatesTitle")}
             className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-sm text-muted transition hover:border-accent/50 hover:text-ink focus:outline-none focus:ring-2 focus:ring-accent/40 sm:py-1.5"
           >
             <Palette className="size-4" />
-            <span className="hidden sm:inline">Style templates</span>
+            <span className="hidden sm:inline">{t("styleTemplates")}</span>
           </button>
           {tplOpen && (
             <div
               role="dialog"
-              aria-label="Style templates"
+              aria-label={t("styleTemplates")}
               className="absolute right-0 top-full z-50 mt-2 w-[22rem] max-w-[calc(100vw-1.5rem)] rounded-xl border border-line bg-surface p-3 shadow-xl"
             >
               <TemplatesPanel
@@ -287,7 +291,7 @@ export const EditorHeader = memo(function EditorHeader({
           onClick={onRender}
         >
           <Film className="size-4" />
-          Render
+          {t("render")}
         </Button>
         <ExportMenu
           jobId={jobId}

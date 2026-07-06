@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useTranslations } from "next-intl";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -199,6 +200,7 @@ export default function ClipEditorScreen({
 }) {
   // clipId is STATE — switching clips re-runs the load effect (keyed on clipId)
   // WITHOUT a route remount. The route only provides the initial clip (deep-link/F5).
+  const t = useTranslations("editor.shell");
   const [clipId, setActiveClipId] = useState(initialClipId);
   const [phase, setPhase] = useState<Phase>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -455,9 +457,9 @@ export default function ClipEditorScreen({
       setAssText(ass);
     } catch (e) {
       if (seq === assSeq.current)
-        setError(`Couldn’t refresh caption preview: ${String(e)}`);
+        setError(t("errRefreshPreview", { error: String(e) }));
     }
-  }, [jobId, clipId]);
+  }, [jobId, clipId, t]);
 
   // ── Undo/redo (Ctrl+Z / Ctrl+Shift+Z) over the whole edit CONTENT ──
   // Snapshots store CONTENT only (stripVersion); the version stays live. The stacks live in a
@@ -573,7 +575,7 @@ export default function ClipEditorScreen({
             setWords(analysisData.words);
             setAssText(ass);
           }
-          if (!ass) setError("Couldn’t load caption preview — showing a simplified mode.");
+          if (!ass) setError(t("errLoadPreview"));
           setPhase("ready");
           getTimeline(jobId)
             .then((t) => !cancelled && setTimeline(t))
@@ -645,12 +647,12 @@ export default function ClipEditorScreen({
       cancelled = true;
       stopPoll();
     };
-  }, [jobId, clipId, loadKey, stopPoll, prefetchNeighbors]);
+  }, [jobId, clipId, loadKey, stopPoll, prefetchNeighbors, t]);
 
   const handleConflict = useCallback(() => {
-    setError("Data changed — reloading the editor…");
+    setError(t("errDataChanged"));
     setLoadKey((k) => k + 1);
-  }, []);
+  }, [t]);
 
   const failOr409 = useCallback(
     (e: unknown) => {
@@ -1507,13 +1509,13 @@ export default function ClipEditorScreen({
         } else if (st.status === "failed") {
           stopPoll();
           setRenderState({ kind: "idle" });
-          setError(st.error ?? "Render failed");
+          setError(st.error ?? t("renderFailed"));
         }
       } catch {
         /* keep polling */
       }
     }, 2000);
-  }, [edit, jobId, clipId, stopPoll, flushPending]);
+  }, [edit, jobId, clipId, stopPoll, flushPending, t]);
 
   // ── keyboard shortcuts (Task 5): Space play/pause · R render · 1-5 rail · Esc close ──
   // prevClip/nextClip → in-page clip switch (Task 7). Compute neighbors from clipIds.
@@ -1904,13 +1906,13 @@ export default function ClipEditorScreen({
             onClick={() => setLoadKey((k) => k + 1)}
             className="rounded-lg border border-line px-4 py-2 text-sm text-muted transition hover:text-ink"
           >
-            Try again
+            {t("tryAgain")}
           </button>
           <a
             href={`/dashboard?job=${jobId}`}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-bg transition hover:bg-accent-2"
           >
-            ← All clips
+            ← {t("allClips")}
           </a>
         </div>
       </div>
@@ -1957,7 +1959,7 @@ export default function ClipEditorScreen({
             size="sm"
             tone="ink"
             meterTone="ok"
-            label="Confidence"
+            label={t("confidence")}
             value={Math.round(clipMeta.score * 100)}
             suffix="/100"
             meter={clipMeta.score}
@@ -1991,7 +1993,7 @@ export default function ClipEditorScreen({
       {phase === "loading" ? (
         <div className="flex items-center justify-center gap-2 text-sm text-muted">
           <Spinner size="sm" />
-          Loading editor…
+          {t("loadingEditor")}
         </div>
       ) : (
         <main
@@ -2051,7 +2053,7 @@ export default function ClipEditorScreen({
                   {/* видимый бейдж деградации (не тихий фолбэк) */}
                   {!useLibass && (
                     <span className="absolute left-2 top-2 z-30 rounded border border-warn/40 bg-warn/15 px-1.5 py-0.5 font-mono text-eyebrow uppercase text-warn backdrop-blur-sm">
-                      simplified preview
+                      {t("simplifiedPreview")}
                     </span>
                   )}
 
@@ -2070,7 +2072,7 @@ export default function ClipEditorScreen({
                         size={captionSize}
                         sizeMin={CAPTION_SIZE_MIN}
                         sizeMax={CAPTION_SIZE_MAX}
-                        label="Captions"
+                        label={t("captionsLabel")}
                         posX={capPosX}
                         posY={capPosY}
                         onMoveCommit={onCaptionMove}
@@ -2095,7 +2097,7 @@ export default function ClipEditorScreen({
                         size={hookSize}
                         sizeMin={HOOK_SIZE_MIN}
                         sizeMax={HOOK_SIZE_MAX}
-                        label="Hook"
+                        label={t("hookLabel")}
                         posX={hookPosX}
                         posY={hookPosY}
                         onMoveCommit={onHookMove}
@@ -2124,11 +2126,11 @@ export default function ClipEditorScreen({
                           }
                         }}
                         rows={2}
-                        placeholder="Caption text…"
+                        placeholder={t("captionPlaceholder")}
                         className="w-full resize-none rounded-lg border border-accent/60 bg-black/80 p-2 text-center text-sm font-semibold text-ink outline-none focus:ring-2 focus:ring-accent/50"
                       />
                       <p className="mt-1 text-center text-xs text-muted">
-                        Enter to save · Esc to cancel
+                        {t("enterToSave")}
                       </p>
                     </div>
                   )}
@@ -2140,7 +2142,7 @@ export default function ClipEditorScreen({
                     <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center">
                       <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2/90 px-3 py-2 text-xs font-semibold text-ink shadow-lg backdrop-blur-sm">
                         <Spinner size="sm" />
-                        Recomputing framing…
+                        {t("recomputingFraming")}
                       </div>
                     </div>
                   )}
@@ -2155,8 +2157,8 @@ export default function ClipEditorScreen({
             <div
               role="separator"
               aria-orientation="vertical"
-              aria-label="Resize panel"
-              title="Drag to resize"
+              aria-label={t("resizePanel")}
+              title={t("dragToResize")}
               onPointerDown={onInspectorResizeDown}
               onPointerMove={onInspectorResizeMove}
               onPointerUp={onInspectorResizeUp}
@@ -2201,7 +2203,7 @@ export default function ClipEditorScreen({
           />
         ) : (
           <div className="rounded-lg border border-dashed border-line bg-surface-2 px-4 py-5 text-center text-xs text-muted">
-            {phase === "loading" ? "Loading timeline…" : "Timeline unavailable for this clip."}
+            {phase === "loading" ? t("loadingTimeline") : t("timelineUnavailable")}
           </div>
         )}
       </footer>
