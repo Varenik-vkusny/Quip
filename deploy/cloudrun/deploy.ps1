@@ -67,27 +67,40 @@ $SECRETS = "SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest," +
 # ЖИВОЙ конфиг: 8 vCPU/32Gi. Клипы НЕ рендерятся здесь: координатор спавнит контейнер-на-клип
 # (quip-render, §6b) — CLOUDRUN_JOB/REGION/RENDER_JOB это включают (cloudrun_fanout_enabled).
 # RENDER_FANOUT_MAX=6 — сколько клип-контейнеров держим параллельно (потолок под квоту CPU региона).
-# RENDER_CONCURRENCY=1 = фолбэк in-process рендер (если фан-аут упал: квота/API). Ephemeral-disk volume
-# НЕ ставим (GA gcloud не умеет; нужен beta) → source.mp4 на tmpfs=RAM; для 2ч/1440p следи за памятью.
-gcloud run jobs create quip-pipeline `
+# RENDER_CONCURRENCY=1 = фолбэк in-process рендер (если фан-аут упал: квота/API).
+# Ephemeral-disk (Part C, 2026-07-07): source.mp4 качается на ДИСК (`type=ephemeral-disk`, gen2 beta,
+# mount=/root/data/tmp=TMPDIR), НЕ на tmpfs=RAM → большой source больше не давит на память (был OOM на
+# 2ч/1440p / много клипов). size=32Gi требует quota-increase сверх дефолтных 10Gi (Cloud Run → Quotas);
+# без квоты ставь size=10Gi (хватает source'у ≲9 ГБ). Применить к СУЩЕСТВУЮЩИМ job'ам — §6c (update, не create).
+gcloud beta run jobs create quip-pipeline `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=python --args="-m,app.cloudrun_job" `
   --task-timeout=10800s --max-retries=1 --tasks=1 --parallelism=1 `
   --cpu=8 --memory=32Gi --execution-environment=gen2 `
+  --add-volume=name=tmp,type=ephemeral-disk,size=32Gi `
+  --add-volume-mount=volume=tmp,mount-path=/root/data/tmp `
   --set-env-vars=("$ENVVARS,TMPDIR=/root/data/tmp,CLOUDRUN_JOB=quip-pipeline,CLOUDRUN_REGION=$REGION," +
                   "CLOUDRUN_RENDER_JOB=quip-render,RENDER_FANOUT_MAX=6,RENDER_FANOUT_TIMEOUT=2600,RENDER_CONCURRENCY=1") `
   --set-secrets="$SECRETS"
 
 # ─────────────────── 6b. JOB-РЕНДЕР (контейнер-на-клип, ФАН-АУТ) — параллелизм как на Modal ───────────────────
 # Координатор спавнит ПО ОДНОМУ execution на клип (JOB_KIND=fanout_render_clip); каждый качает source
-# из R2, рендерит СВОЙ клип (stages 3–5), пишет result-dict в R2. cpu=4 (Modal тоже 4); mem=16Gi под
-# крупный source на tmpfs. НЕ ставим CLOUDRUN_* (рендер ничего не диспатчит). task-timeout 20м + 1 ретрай.
-gcloud run jobs create quip-render `
+# из R2, рендерит СВОЙ клип (stages 3–5), пишет result-dict в R2. cpu=4 (Modal тоже 4). Source теперь на
+# ephemeral-DISK (§6, не tmpfs=RAM) → mem=16Gi снова хватает (была заплатка 16→32Gi под OOM; с диском
+# память освобождается). ⚠️ Свериться с ЖИВЫМ значением памяти render (могло остаться 32Gi). task-timeout 20м + 1 ретрай.
+gcloud beta run jobs create quip-render `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=python --args="-m,app.cloudrun_job" `
   --task-timeout=1200s --max-retries=1 --tasks=1 --parallelism=1 `
   --cpu=4 --memory=16Gi --execution-environment=gen2 `
+  --add-volume=name=tmp,type=ephemeral-disk,size=32Gi `
+  --add-volume-mount=volume=tmp,mount-path=/root/data/tmp `
   --set-env-vars="$ENVVARS,TMPDIR=/root/data/tmp" --set-secrets="$SECRETS"
+
+# ─────────────────── 6c. Применить ephemeral-disk к СУЩЕСТВУЮЩИМ job'ам (Part C, 2026-07-07) ───────────────────
+# Job'ы уже созданы (§6/§6b одноразовые) → не пересоздавать, а ОБНОВИТЬ (нужен beta; для size>10Gi — quota-increase).
+# gcloud beta run jobs update quip-pipeline --region=$REGION --add-volume=name=tmp,type=ephemeral-disk,size=32Gi --add-volume-mount=volume=tmp,mount-path=/root/data/tmp
+# gcloud beta run jobs update quip-render   --region=$REGION --add-volume=name=tmp,type=ephemeral-disk,size=32Gi --add-volume-mount=volume=tmp,mount-path=/root/data/tmp
 
 # ─────────────────────────── 7. SERVICE (FastAPI API) — знает имя Job'а для триггера ───────────────────────────
 # CLOUDRUN_JOB/REGION → dispatch.spawn триггерит Job. GOOGLE_CLOUD_PROJECT Cloud Run ставит сам.
