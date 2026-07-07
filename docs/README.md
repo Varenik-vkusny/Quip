@@ -265,15 +265,19 @@
   `xhr.timeout` + stall-watchdog, retry-with-backoff+jitter, presigned-URL renewal, and **resume**
   from already-uploaded parts via `POST /jobs/{id}/upload-parts` (`storage.list_parts` = R2 ListParts
   + fresh URLs) + an IndexedDB checkpoint keyed by file fingerprint → a dropped connection or page
-  reload continues the tail instead of restarting from 0%; honest "reconnecting… / retrying part N"
-  UX with a real **Resume** button (the `File` is held through the error screen). `upload-complete`
-  assembles → `/jobs/{id}/upload-abort` cleans up on user-cancel. Client resilience is TDD-covered
-  (`lib/uploadResilience.ts`); backbone verified against real R2.
+  reload continues the tail instead of restarting from 0%; a calm banner ("connection dropped —
+  restoring your upload…", **no internal part numbers**) + a **monotonic** progress bar (freezes on a
+  retry, never rolls backwards) + a real **Resume** button (the `File` is held through the error screen).
+  `upload-complete` assembles → `/jobs/{id}/upload-abort` cleans up on user-cancel. Client resilience is
+  TDD-covered (`lib/uploadResilience.ts`); backbone verified against real R2. **SHIPPED to prod 2026-07-07.**
   **Cap = 10 GB** (client `SourceForm.MAX_UPLOAD_MB` + server `main.MAX_UPLOAD_BYTES` → 413); real
-  length limit is **3 h** (`billing.MAX_VIDEO_MINUTES`, enforced at probe). Cloud Run `quip-pipeline`
-  runs **task-timeout 10800s (3 h) / 8 vCPU / 32Gi**; `quip-render` **4 vCPU / 16Gi** per clip. R2
-  CORS must allow the web origin + **expose `ETag`** (multipart). ⚠️ source downloads to **tmpfs=RAM**
-  → a very large source can OOM the pipeline (Part C follow-up: ephemeral-disk / streaming).
+  length limit is **3 h** (`billing.MAX_VIDEO_MINUTES`, enforced at probe). **Memory/OOM (2026-07-07):**
+  `quip-pipeline` (**8 vCPU / 32Gi**, task-timeout 10800s) + `quip-render` (**4 vCPU / 16Gi** per clip)
+  now mount a **32Gi `ephemeral-disk`** at `TMPDIR=/root/data/tmp` (Part C) → source+temp live on DISK,
+  not tmpfs=RAM (OOM ceiling removed; >10Gi needed a Cloud Run ephemeral-storage quota bump). The
+  **`quip-api` service = 4Gi** (bumped from 2Gi after an OOM: it transitively imports torch/cv2/mediapipe
+  and runs `export/captioned.mp4` on-demand render + `export/package.zip` BytesIO **in-process** — future
+  fix = move those to a Job). R2 CORS must allow the web origin + **expose `ETag`** (multipart).
 - **R2 retention:** daily Modal Cron `cleanup_stale_sources` deletes `source.mp4`/`preview.mp4`
   older than **60 days** (clips kept forever) — source is 70–90 % of storage; without this R2 grows
   unbounded (one-time payment, perpetual storage). Egress is free; only GB-month bills (>10 GB tier).

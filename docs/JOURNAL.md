@@ -22,8 +22,19 @@ retrying part N» + реальная кнопка Resume (`File` держитс�
 web **176** vitest, mypy/tsc/ruff/eslint/anti-drift). Верификация: **real-R2 backbone-тест** (create→presign→
 PUT частей 1&3 (2 пропущена)→`list_parts`=[1,3]→resume части 2→complete 48 МБ→cleanup) — все ассерты PASS на
 боевом бакете. Спека/план: `docs/superpowers/{specs,plans}/2026-07-07-resilient-upload-and-real-energy*`.
-⚠️ **НЕ задеплоено** (деплой по кнопке фаундера); полный E2E в браузере (offline-toggle) и OOM-потолок
-(source на tmpfs=RAM → Часть C: ephemeral-disk/стриминг) — открытые пункты.
+**ОТГРУЖЕНО В ПРОД 2026-07-07** (merge → `main` @0d0b7f7, push `cloud`): worker образ `sha256:427c2ff6`
+запинен на quip-pipeline/quip-render/quip-api, фронт `vercel --prod` → quip.ink. Прод-проверка: OpenAPI
+содержит `upload-parts`, unauth POST → 401. **Part C (OOM) ЗАКРЫТ:** `type=ephemeral-disk` **32Gi**
+смонтирован на `/root/data/tmp`(=TMPDIR) обеих джоб → source+temp с tmpfs=RAM ушли на ДИСК (32Gi
+отклонялся дефолтным капом 10 GiB, пока фаундер не поднял квоту ephemeral-storage; `gcloud beta` ставился
+через `CLOUDSDK_PYTHON`=системный питон). **Пост-фиксы (тоже в проде):** (1) UX индикатора загрузки —
+прогресс сделан МОНОТОННЫМ (не откатывался назад при перезаливке части) + убран внутренний жаргон «часть
+N/попытка K» → человечный текст (`@58522fd`); (2) **quip-api 2Gi→4Gi** (rev 00018) — сервис ловил OOM
+(2057/2048 MiB, rev 00015): `main.py` тянет torch/cv2/mediapipe (~1.5Gi baseline) + `export/captioned.mp4`
+(on-demand рендер в FastAPI BackgroundTask, в ЭТОМ же процессе) и `export/package.zip` (BytesIO в память)
+при concurrency 80 (`@0d0b7f7`; `deploy.ps1` дрейфил 1Gi-скрипт vs 2→4Gi-live — сверяться с live).
+**Открытый пункт:** браузерный offline-E2E — за фаундером (нельзя автоматизировать DevTools-offline).
+Долгосрочно: вынести on-demand рендер из API в Job + стримить zip (тогда quip-api станет реально лёгким).
 
 ### 2026-07-07 (ОТГРУЖЕНО В ПРОД + editor-export UX + OOM-фикс) — фаундер-сессия
 Вся дневная работа сессии ЗАДЕПЛОЕНА в прод (полный отчёт: `docs/archive/2026-07-07-reframe-b1-deploy-session.md`).
