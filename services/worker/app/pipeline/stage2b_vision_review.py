@@ -281,16 +281,22 @@ def clamp_edges_to_words(
 # ─────────────────────────── pure: apply + rerank ───────────────────────────
 
 
-def apply_review(seg: Segment, review: VisionReview, words: list[Word]) -> Segment:
+def apply_review(
+    seg: Segment, review: VisionReview, words: list[Word], *, trim_edges: bool = True
+) -> Segment:
     """PURE. Наложить один VisionReview на сегмент → новый Segment.
 
     ok=False (нейтральный/сбойный) → сегмент БЕЗ изменений. Иначе: score := hook_strength (REUSE
-    поля score — оно и сортирует, и видно в карточке; НЕ добавляем модель-поле → без codegen);
-    края = clamp_edges_to_words(...) от window-relative trim'ов (0 = seg.start). Прочие поля
-    (reason/type/hook/...) сохраняются.
+    поля score — оно и сортирует, и видно в карточке; НЕ добавляем модель-поле → без codegen).
+    trim_edges=True → края = clamp_edges_to_words(...) от window-relative trim'ов (0 = seg.start).
+    trim_edges=False (прод-дефолт через config.vision_review_trim_edges) → края НЕ трогаем: vision
+    клампит к ±1 ЛЮБОГО слова (не к .?!) и мог увести чистую snap_end_index-границу на запятую →
+    оставляем детерминистические края, применяем ТОЛЬКО ре-ранк по score. Прочие поля сохраняются.
     """
     if not review.ok:
         return seg
+    if not trim_edges:
+        return seg.model_copy(update={"score": clamp_score(review.hook_strength)})
     new_start_abs = (
         seg.start + review.trimmed_start_sec if review.trimmed_start_sec is not None else None
     )
@@ -315,6 +321,7 @@ def apply_vision_reviews_full(
     words: list[Word],
     *,
     max_clips: int,
+    trim_edges: bool = True,
 ) -> tuple[list[Segment], list[float | None], list[tuple[VisionShot, ...]]]:
     """PURE. Как apply_vision_reviews, но ДОПОЛНИТЕЛЬНО возвращает per-clip subject_cx (B2) И
     per-clip shots (Layer A), ВЫРОВНЕННЫЕ по ре-ранкнутым сегментам — оба сигнала должны ехать
@@ -326,7 +333,12 @@ def apply_vision_reviews_full(
     """
     applied: list[tuple[Segment, float | None, tuple[VisionShot, ...]]] = [
         (
-            apply_review(seg, reviews[i] if i < len(reviews) else neutral_review(), words),
+            apply_review(
+                seg,
+                reviews[i] if i < len(reviews) else neutral_review(),
+                words,
+                trim_edges=trim_edges,
+            ),
             reviews[i].subject_cx if i < len(reviews) else None,
             reviews[i].shots if i < len(reviews) else (),
         )

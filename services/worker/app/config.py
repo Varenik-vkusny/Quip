@@ -148,10 +148,16 @@ class Settings(BaseSettings):
     # (no-op); весь проход упал / нет ключа / нет source.mp4 → пропуск, детерминированный отбор
     # сохраняется (правило №8: явная ветка + лог, джоб доходит до done). Kill-switch
     # VISION_REVIEW_ENABLED=false → мгновенный откат без передеплоя.
-    vision_review_enabled: bool = False  # B1 unverified E2E → OFF in prod; enable via env
+    # B1 ON: переранжирует моменты по мультимодальной виральности. Края чистые
+    # (vision_review_trim_edges=False). Layer A/B2 на своих флагах OFF, reframe детерминистический.
+    vision_review_enabled: bool = True
     # Пин версии (как llm_model): -latest/gemini-3* могут молча уехать на ×10 стоимости → coerce.
     vision_review_model: str = "gemini-2.5-flash"
     vision_review_media_res: str = "low"  # low | medium | high (Gemini media_resolution окна)
+    # B1 edge-trim: применять ли vision-подрезку краёв. OFF: vision клампит край к ±1 ЛЮБОГО слова
+    # (не к .?!) → мог увести чистую snap_end_index-границу на запятую (Cardi B clip 3). OFF → B1
+    # ТОЛЬКО ре-ранкует, края остаются детерминистическими/чистыми.
+    vision_review_trim_edges: bool = False
     # B2 (multimodal clip quality, exploratory): vision-подсказка центра субъекта (Gemini-box →
     # centre-x) как ТАЙ-БРЕЙКЕР `_pick_target` в reframe — выбрать ПРАВИЛЬНОЕ лицо в multi-face
     # шоте, переопределяя speak/width. НЕ трогает границы/fill-vs-fit/Δ=0 сетку — только ВЫБОР

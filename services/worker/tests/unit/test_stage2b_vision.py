@@ -255,6 +255,21 @@ class TestApplyReview:
         assert out.start == 4.0
         assert out.end == 10.8
 
+    def test_trim_edges_false_keeps_deterministic_edges(self) -> None:
+        # trim_edges=False (прод-дефолт): B1 переранжирует (score), но края НЕ трогает — чистая
+        # snap_end_index-граница сохраняется (vision мог увести на запятую). Cardi B clip 3.
+        w = uniform(20)
+        seg = mkseg(5.0, 10.8, score=0.4)
+        rev = VisionReview(
+            hook_strength=0.9, hook_reason="x", is_complete_thought=True,
+            edge_issue_start=True, edge_issue_end=True,
+            trimmed_start_sec=-0.9, trimmed_end_sec=-0.5,
+            subject_hint=None, fill_vs_fit_hint=None, ok=True,
+        )  # fmt: skip
+        out = apply_review(seg, rev, w, trim_edges=False)
+        assert out.score == 0.9  # ре-ранк применён
+        assert (out.start, out.end) == (5.0, 10.8)  # края НЕ тронуты, несмотря на trimmed_*_sec
+
 
 # ─────────────────────────── rerank_and_cap ───────────────────────────
 

@@ -766,8 +766,9 @@ def run_pipeline(
                     out / "source.mp4", segments, meta, settings=s, usage_sink=vis_usage
                 )
                 segments, reviewed_subject_cxs, reviewed_shots = apply_vision_reviews_full(
-                    segments, reviews, transcript.words, max_clips=len(segments)
-                )
+                    segments, reviews, transcript.words, max_clips=len(segments),
+                    trim_edges=s.vision_review_trim_edges,
+                )  # fmt: skip
                 # B2: subject_cx в reframe ТОЛЬКО под флагом (иначе byte-identical).
                 if s.reframe_vision_subject:
                     subject_cxs = reviewed_subject_cxs
