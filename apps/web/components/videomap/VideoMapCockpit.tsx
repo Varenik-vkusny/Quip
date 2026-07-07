@@ -14,16 +14,17 @@ import { MapTimeline } from "./MapTimeline";
 import { NarrativeCollapse } from "./NarrativeCollapse";
 import { SourcePreview } from "./SourcePreview";
 
-// The Video Map cockpit: source preview + whole-video timeline + clickable outline + demoted
-// narrative, all sharing ONE playhead. `initialMap` (fixture harness) short-circuits the poll;
-// otherwise it keeps the old VideoMap poll (getVideoMap every 2500ms while pending, error+Retry).
+// The Video Map cockpit: whole-video timeline (the map) on top, then a sticky media rail (source
+// preview + a contextual you-are-here / extract panel) beside the clickable outline, then the
+// demoted narrative. Everything shares ONE playhead. `initialMap` (fixture harness) short-circuits
+// the poll; otherwise it keeps the old VideoMap poll (getVideoMap every 2500ms while pending).
 
 function PendingSkeleton() {
   return (
     <div className="space-y-3 py-4" role="status" aria-label="AI is reading the video…">
       <p className="text-sm text-muted">
-        Reading the whole video to map its strongest moments
-        <span className="text-faint"> — usually under a minute.</span>
+        Reading the whole video to map its strongest moments.
+        <span className="text-faint"> Usually under a minute.</span>
       </p>
       <Skeleton className="h-4 w-full" />
       <Skeleton className="h-4 w-5/6" />
@@ -58,9 +59,6 @@ export function VideoMapCockpit({
   const pollRef = useRef<(retry?: boolean) => void>(() => {});
   const poll = useCallback(
     (retry = false) => {
-      // No synchronous setState here (this runs inside the mount effect) — the error is cleared in
-      // the Retry handler, an event where setState is allowed. Success/failure set state async in
-      // the promise callbacks, which the effect lint permits.
       getVideoMap(jobId, retry)
         .then((data) => {
           setMap(data);
@@ -107,20 +105,23 @@ export function VideoMapCockpit({
   );
 
   const clipCount = clips.length;
-  const momentCount = allMoments.length;
   const untappedCount = allMoments.filter(
     (m) => classifyMoment(clipList, m) === "untapped",
   ).length;
 
   const ready = map?.status === "done" && (chapters.length > 0 || !!map.narrative);
+
+  // Calm summary — no middot chain, no uppercase. The two numbers an editor acts on.
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const summaryLine = ready
-    ? [
-        `${chapters.length} chapter${chapters.length === 1 ? "" : "s"}`,
-        `${momentCount} moment${momentCount === 1 ? "" : "s"}`,
-        `${clipCount} clip${clipCount === 1 ? "" : "s"}`,
-        `${untappedCount} untapped`,
-      ].join(" · ")
+    ? untappedCount > 0
+      ? `${plural(clipCount, "clip")}, ${plural(untappedCount, "untapped moment")}`
+      : plural(clipCount, "clip")
     : null;
+
+  // The chapter under the playhead — a quiet "you are here" for the media rail.
+  const nowChapter =
+    chapters.find((c) => playheadSec >= c.start && playheadSec < c.end) ?? chapters[0];
 
   return (
     <section className="mb-6 space-y-4">
@@ -132,7 +133,7 @@ export function VideoMapCockpit({
           <Numeral className="mt-1 block text-xs text-muted">{summaryLine}</Numeral>
         ) : (
           <p className="mt-1 text-xs text-muted">
-            The full picture of your video — and where every clip came from.
+            The full picture of your video, and where every clip came from.
           </p>
         )}
       </header>
@@ -165,31 +166,7 @@ export function VideoMapCockpit({
       {/* Cockpit */}
       {ready && (
         <>
-          <div className="grid gap-4 lg:grid-cols-2">
-            {/* Source preview (left). Only defaulted from a real previewUrl — for a real job with no
-                preview wired yet we show a calm placeholder rather than guess a 404-prone URL. */}
-            <div>
-              {previewUrl ? (
-                <SourcePreview previewUrl={previewUrl} onTime={setPlayheadSec} seekRef={seekRef} />
-              ) : (
-                <div className="flex aspect-video w-full items-center justify-center rounded-lg border border-dashed border-line bg-surface-2 px-4 text-center">
-                  <p className="text-xs text-faint">
-                    Source preview isn’t available for this project yet.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Outline (right) */}
-            <MapOutline
-              chapters={chapters}
-              clips={clipList}
-              jobId={jobId}
-              onSeek={seek}
-            />
-          </div>
-
-          {/* Whole-video timeline (full width) */}
+          {/* Whole-video timeline — the map. Full width, on top. */}
           <div className="rounded-lg border border-line bg-surface px-4 py-4">
             <MapTimeline
               chapters={chapters}
@@ -199,17 +176,48 @@ export function VideoMapCockpit({
               onSeek={seek}
               onSelectRange={setSelection}
             />
-            {selection && (
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
-                <span className="text-xs text-muted">
-                  Selected{" "}
-                  <Numeral className="text-ink">
-                    {mmss(selection.start)}–{mmss(selection.end)}
-                  </Numeral>
-                </span>
-                <ExtractButton state="coming" disabled />
+          </div>
+
+          {/* Media rail (sticky) + outline */}
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,400px)_1fr] lg:items-start">
+            <div className="space-y-3 lg:sticky lg:top-4">
+              {previewUrl ? (
+                <SourcePreview previewUrl={previewUrl} onTime={setPlayheadSec} seekRef={seekRef} />
+              ) : (
+                <div className="flex aspect-video w-full items-center justify-center rounded-lg border border-dashed border-line bg-surface-2 px-4 text-center">
+                  <p className="text-xs text-faint">
+                    Source preview is not available for this project yet.
+                  </p>
+                </div>
+              )}
+
+              {/* Contextual panel: a drag-selection becomes an extract target; otherwise a quiet
+                  you-are-here so the rail never reads as empty space. */}
+              <div className="rounded-lg border border-line bg-surface px-4 py-3">
+                {selection ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-muted">
+                      Selected{" "}
+                      <Numeral className="tabular-nums text-ink">
+                        {mmss(selection.start)}-{mmss(selection.end)}
+                      </Numeral>
+                    </span>
+                    <ExtractButton state="coming" disabled />
+                  </div>
+                ) : nowChapter ? (
+                  <p className="text-xs leading-relaxed">
+                    <Numeral className="tabular-nums text-faint">{mmss(playheadSec)}</Numeral>{" "}
+                    <span className="text-muted">{nowChapter.title}</span>
+                  </p>
+                ) : (
+                  <p className="text-xs leading-relaxed text-muted">
+                    Click a moment to jump here, or drag the timeline to pull a new clip.
+                  </p>
+                )}
               </div>
-            )}
+            </div>
+
+            <MapOutline chapters={chapters} clips={clipList} jobId={jobId} onSeek={seek} />
           </div>
 
           {/* Demoted narrative */}
