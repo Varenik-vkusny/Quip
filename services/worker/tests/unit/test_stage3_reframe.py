@@ -560,17 +560,30 @@ class TestPlanRegions:
         assert abs(regions[0].points[0].cx - 0.2) < 1e-9
         assert abs(regions[1].points[0].cx - 0.8) < 1e-9
 
-    def test_single_silent_face_goes_wide(self) -> None:
-        """Одно НЕ-говорящее лицо (speak сильно <0 = B-roll/establishing/реклайн) → fit (wide),
-        НЕ вертикальный strip на теле/ногах. Репро Tom Holland: legs-шоты speak −1.68/−2.03,
-        face-fill шоты ≥ ~0 — речь и есть дискриминатор «широкий план vs говорящая голова»."""
+    def test_small_silent_face_goes_wide(self) -> None:
+        """Одно МЕЛКОЕ молчащее лицо (speak сильно <0 И width < _SILENCE_MIN_FILL_FACE=0.12) =
+        настоящий широкий/establishing/legs-план → fit (wide), НЕ strip на теле/ногах. Мелкое лицо
+        = человек далёк/мал в кадре = реально широкий план (речь тут не единственный сигнал)."""
         from app.pipeline.stage3_reframe import plan_regions
 
-        # лицо нормального размера (0.16), но молчит (speak −1.7) → широкий план
-        tracks = [self._track(0, 50, 0.4, 0.16, -1.7)]
+        # мелкое лицо (0.09 < 0.12) + молчит (−1.7) → широкий план
+        tracks = [self._track(0, 50, 0.4, 0.09, -1.7)]
         regions = plan_regions([(0, 50)], tracks, fps=25.0, crop_w_frac=0.3167, speak_threshold=0.0)
         assert regions[0].mode == "fit"
         assert regions[0].points == ()
+
+    def test_large_silent_reaction_fills(self) -> None:
+        """Одно КРУПНОЕ лицо (width ≥ _SILENCE_MIN_FILL_FACE=0.12), пусть и уверенно МОЛЧИТ
+        (speak −1.7) → fill (наводимся на лицо). Молчащая реакция слушателя крупным планом
+        (интервьюер Cardi B, лицо ~0.15) — в кадре ОДИН человек, кропим его, не wide. Фаундер-QA."""
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 50, 0.6, 0.15, -1.7)]
+        regions = plan_regions(
+            [(0, 50)], tracks, fps=25.0, crop_w_frac=0.3167, smoothing=1.0, speak_threshold=0.0
+        )
+        assert regions[0].mode == "fill"
+        assert abs(regions[0].points[0].cx - 0.6) < 1e-9
 
     def test_single_face_no_asd_score_is_fill(self) -> None:
         """speak == _SILENT(-9) = ASD ПРОПУЩЕН (одна дорожка в сегменте, perf) = «скор не считался»,
@@ -929,11 +942,11 @@ class TestPlanRegionsVisionLayout:
         return VisionShot(start_sec=start, mode=mode, subject_cx=cx)
 
     def test_vision_fill_forces_fill_over_silence_gate(self) -> None:
-        # single face, confidently SILENT (speak −1.5 < _SILENCE_WIDE_MAX) → heuristic would fit;
-        # vision says fill → FORCE fill (the Cardi B listener-closeup bug). This is the crux.
+        # small face (0.09 < _SILENCE_MIN_FILL_FACE) + confidently SILENT (−1.5): heuristic fits
+        # (small+silent = wide); vision says fill → FORCE fill (bypasses the silence gate).
         from app.pipeline.stage3_reframe import plan_regions
 
-        tracks = [self._track(0, 50, 0.5, 0.16, -1.5)]
+        tracks = [self._track(0, 50, 0.5, 0.09, -1.5)]
         heuristic = plan_regions([(0, 50)], tracks, fps=25.0, crop_w_frac=0.3167)
         assert heuristic[0].mode == "fit"  # confirm the heuristic would widen it
         vis = plan_regions(
