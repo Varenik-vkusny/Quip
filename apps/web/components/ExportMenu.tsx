@@ -9,7 +9,6 @@ import {
   Film,
   Loader2,
   Package,
-  Table,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -135,8 +134,6 @@ export function ExportMenu({
   const packageUrl = `${WORKER_BASE}/jobs/${jobId}/export/package.zip`;
   const edlUrl = `${WORKER_BASE}/jobs/${jobId}/export.edl`;
   const fcpxmlUrl = `${WORKER_BASE}/jobs/${jobId}/export.fcpxml`;
-  const markersUrl = `${WORKER_BASE}/jobs/${jobId}/export/markers.csv`;
-  const vttUrl = `${WORKER_BASE}/jobs/${jobId}/clips/${clipId}/export.vtt`;
   // С субтитрами: baked-рендер ТОЛЬКО когда нет невыданных правок (dirty=false). При dirty
   // (юзер сменил шрифт хука и т.п.) baked устарел → on-demand рендер текущего edit-state.
   const captionedUrl = captionedDownloadUrl(WORKER_BASE, jobId, clipId, bakedUrl, dirty);
@@ -313,8 +310,8 @@ export function ExportMenu({
           />
           <ExportItem
             icon={<Clapperboard className="size-4" />}
-            title={t("handoff.edl.title")}
-            sub={t("handoff.edl.sub")}
+            title={t("handoff.premiere.title")}
+            sub={t("handoff.premiere.sub")}
             busy={busy === "edl"}
             busyLabel={t("preparing")}
             disabled={!!busy && busy !== "edl"}
@@ -322,30 +319,12 @@ export function ExportMenu({
           />
           <ExportItem
             icon={<Clapperboard className="size-4" />}
-            title={t("handoff.fcpxml.title")}
-            sub={t("handoff.fcpxml.sub")}
+            title={t("handoff.fcp.title")}
+            sub={t("handoff.fcp.sub")}
             busy={busy === "fcpxml"}
             busyLabel={t("preparing")}
             disabled={!!busy && busy !== "fcpxml"}
             onPick={() => pick("fcpxml", fcpxmlUrl, `${jobId}.fcpxml`, false)}
-          />
-          <ExportItem
-            icon={<Table className="size-4" />}
-            title={t("handoff.markers.title")}
-            sub={t("handoff.markers.sub")}
-            busy={busy === "markers"}
-            busyLabel={t("preparing")}
-            disabled={!!busy && busy !== "markers"}
-            onPick={() => pick("markers", markersUrl, `${jobId}-markers.csv`, false)}
-          />
-          <ExportItem
-            icon={<Captions className="size-4" />}
-            title={t("handoff.vtt.title")}
-            sub={t("handoff.vtt.sub")}
-            busy={busy === "vtt"}
-            busyLabel={t("preparing")}
-            disabled={!!busy && busy !== "vtt"}
-            onPick={() => pick("vtt", vttUrl, `${clipId}.vtt`, false)}
           />
         </div>
       )}
