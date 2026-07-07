@@ -198,6 +198,10 @@ Desktop-раскладка (mobile — стек: плеер → таймлайн
   `ExtractButton`, `NarrativeCollapse`. (Файл сейчас 477 строк — растащить по назначению.)
 - `api.ts`: `createClipFromRange(jobId, {start,end})`.
 - Демотировать нарратив; чинить ложь `○`-момента.
+- **Dev-харнесс `/dev/video-map` (fixture-driven, БЕЗ реобработки).** Роут монтирует кокпит на
+  сохранённом фикстур-джобе (Cardi B: `video_map.json` + `clips[]` + локальный/CDN `preview.mp4`),
+  чтобы смотреть/итерировать UI мгновенно, не гоняя pipeline. Реальный pipeline — только для теста
+  ЖИВОЙ добычи (M3). Паттерн — как существующий `/dev/cowatch`.
 
 ## 10. i18n (обязательно, CLAUDE.md)
 
@@ -213,6 +217,9 @@ RU — настоящий, не машинный. (Редактор пока а�
 - **TDD (billing):** гейт `plan ∈ {pro,studio}`; счётчик <30 бесплатно / ≥30 требует оплату;
   идемпотентность per clip_id. (Учесть persistent tmp jobs.db — свежий uid + уникальные job_id, см.
   memory «worker test-DB persist gotcha».)
+- **Локальный превью-харнесс (без реобработки):** `/dev/video-map` на фикстуре → открыть на
+  localhost, смотреть/итерировать кокпит без прогона pipeline (запрос founder'а). Demo-выдача идёт
+  через него.
 - **Локальный E2E:** реальный source (Cardi B из скрина) → добыть `○`-момент → проверить ГЛАЗАМИ
   чистоту края + что клип встал в грид. (Локально: uvicorn воркер + inline-рендер; PATH refresh;
   `clip_edits` DELETE если stale — см. memory harness-паттерны.)
