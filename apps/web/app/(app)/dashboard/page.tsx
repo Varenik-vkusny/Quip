@@ -120,12 +120,7 @@ function UploadProgress({ info }: { info: UploadProgressInfo }) {
   const retrying = info.phase === "retrying" || info.phase === "stalled";
   const retryMsg = !retrying
     ? null
-    : info.part != null && info.attempt != null
-      ? t(info.phase === "stalled" ? "uploadStalled" : "uploadRetrying", {
-          part: info.part,
-          attempt: info.attempt,
-        })
-      : t("uploadReconnecting");
+    : t(info.phase === "stalled" ? "uploadStalled" : "uploadRetrying");
 
   return (
     <div className="mx-auto w-full max-w-2xl">

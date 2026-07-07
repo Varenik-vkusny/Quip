@@ -395,10 +395,16 @@ async function uploadPartsResilient(
   let retryDepth = 0; // how many parts are currently backing off
   let lastRetry: { part: number; attempt: number } | null = null;
   let lastStalled = false;
+  // Monotonic guard: a retried part resets its byte contribution (backoff sets loaded[i]=0), which
+  // would otherwise make the displayed % visibly roll BACKWARDS. Clamp the reported total to its
+  // running max so the bar freezes during a re-upload instead of regressing (confusing to users).
+  let reportedSum = 0;
 
   const report = () => {
     if (!opts.onProgress) return;
-    const sum = preCompletedBytes + loaded.reduce((a, b) => a + b, 0);
+    const raw = preCompletedBytes + loaded.reduce((a, b) => a + b, 0);
+    const sum = Math.max(reportedSum, raw);
+    reportedSum = sum;
     const active = retryDepth > 0;
     opts.onProgress({
       pct: Math.min(100, Math.round((sum / opts.total) * 100)),
