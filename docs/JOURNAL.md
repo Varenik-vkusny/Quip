@@ -4,6 +4,27 @@
 > «как и почему так сделано». Актуальное состояние проекта = docs/README.md. Правила = CLAUDE.md.
 > Новые заметные решения дописывай СЮДА (не в CLAUDE.md).
 
+### 2026-07-07 (resilient upload + реальная энергия клипа + паспорт лимитов) — фаундер-сессия
+Диагностика 3 read-only агентами → фикс двух проблем. **Загрузка больших видео (нестабильность):** корень —
+`putPart` без `xhr.timeout`/вотчдога (застрявший сокет → `Promise.all` вечно висит на ~99%, без ошибки),
+без ретраев (одна часть 5xx/403/null-ETag рвала всю ~320-частную multipart-загрузку), presigned-URL все
+выписаны на t=0 с TTL 6ч без обновления, без resume (обрыв = заливка 5 ГБ заново). Сделано (вариант
+«максимум», resumable): клиент — таймаут+stall-вотчдог на part-PUT, ретрай с бэкоффом+jitter, обновление
+protухшей ссылки, чекпоинт в IndexedDB по отпечатку файла (пережидает reload), честный «reconnecting…/
+retrying part N» + реальная кнопка Resume (`File` держится через экран ошибки); сервер — `storage.list_parts`
+(R2 ListParts) + `POST /jobs/{id}/upload-parts` (resume + renewal одной ссылки) + серверный size-cap
+`MAX_UPLOAD_BYTES` 10 ГБ (413). Порог multipart 32 МБ, части 16 МБ. Чистая логика под TDD
+(`lib/uploadResilience.ts`: fingerprint/remainingParts/backoff/classifyPartError). **Реальная энергия клипа:**
+`ClipOut.energy` (0..1) из `clip_energy` по кривой `extract_loudness` — раньше полоска «энергия» фейково
+считалась из `tone` и ВСЕГДА падала в минимум (свободнотекстовый tone не совпадал с 7 словами UI); тот же
+корень молча ломал эмодзи/подсветку → `normalize_tone` (сервер) + замкнутый промпт чинят и их. Контракт:
+`models.py` (`Segment.energy`/`ClipOut.energy`) → `just types`. `just check` зелёный (worker **1338** pytest,
+web **176** vitest, mypy/tsc/ruff/eslint/anti-drift). Верификация: **real-R2 backbone-тест** (create→presign→
+PUT частей 1&3 (2 пропущена)→`list_parts`=[1,3]→resume части 2→complete 48 МБ→cleanup) — все ассерты PASS на
+боевом бакете. Спека/план: `docs/superpowers/{specs,plans}/2026-07-07-resilient-upload-and-real-energy*`.
+⚠️ **НЕ задеплоено** (деплой по кнопке фаундера); полный E2E в браузере (offline-toggle) и OOM-потолок
+(source на tmpfs=RAM → Часть C: ephemeral-disk/стриминг) — открытые пункты.
+
 ### 2026-07-07 (ОТГРУЖЕНО В ПРОД + editor-export UX + OOM-фикс) — фаундер-сессия
 Вся дневная работа сессии ЗАДЕПЛОЕНА в прод (полный отчёт: `docs/archive/2026-07-07-reframe-b1-deploy-session.md`).
 - **Деплой:** ветка `feat/clip-quality-recall-and-editor-export` → merge в `main` (cloud, FF) → **Vercel автодеплой** фронта; worker образ `sha256:7953d37c` собран (`gcloud builds submit`) + запинен на `quip-pipeline`/`quip-render`/`quip-api`; `quip-api` Ready. ⚠️ После деплоя нужен ручной `update public.job_artifacts set reframe_regions = null;` (Supabase) — иначе старое кадрирование на готовых клипах.

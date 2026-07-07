@@ -411,6 +411,14 @@ async def create_upload_job(
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
 
+# Part C1: серверный потолок веса аплоада (defense-in-depth). Клиентский guard (SourceForm)
+# обходится (прямой POST), а гигантский source давит пайплайн по памяти (download в tmpfs=RAM на
+# Cloud Run). 10 ГБ — честный поддерживаемый предел операционного «конверта» (см. limits-отчёт);
+# выше — 413 с понятным сообщением, а не молчаливый OOM на обработке. Держим в синхроне с
+# клиентским SourceForm.MAX_UPLOAD_MB.
+MAX_UPLOAD_BYTES = 10 * 1024**3
+
+
 class UploadUrlBody(BaseModel):
     filename: str = "upload.mp4"
     max_clips: int | None = Field(default=None, ge=1, le=30)
@@ -443,6 +451,15 @@ def create_upload_url(
     """
     user_id = _resolve_user(authorization, x_user_id)
     _enforce_quota(user_id)
+    # Part C1: серверный потолок веса (до минтинга URL, любой backend) — fail-fast, а не OOM позже.
+    if body.size is not None and body.size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File too large: the maximum supported upload size is "
+                f"{MAX_UPLOAD_BYTES // 1024**3} GB. Please trim or compress the video and retry."
+            ),
+        )
     if get_settings().storage_backend != "r2":
         return {"local": True}
     job_id = f"job_{uuid.uuid4().hex[:12]}"
@@ -563,6 +580,57 @@ def abort_upload(
     except Exception:  # noqa: BLE001 — cleanup best-effort; незавершённые части подберёт lifecycle R2
         return {"ok": False}
     return {"ok": True}
+
+
+class UploadPartsBody(BaseModel):
+    upload_id: str
+    # Явный список нужных частей (renewal ОДНОЙ протухшей URL) → mint'им ровно их. Опущен (resume) →
+    # mint'им ВСЕ части 1..plan_part_count(size), КРОМЕ уже завершённых (из R2 ListParts).
+    part_numbers: list[int] | None = None
+    # Размер файла — вывести число частей на resume-пути (клиент знает его из исходного плана).
+    size: int | None = Field(default=None, ge=0)
+
+
+@app.post("/jobs/{job_id}/upload-parts")
+def upload_parts(
+    job_id: str,
+    body: UploadPartsBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Resume + presigned-URL renewal для прямой browser→R2 multipart-загрузки.
+
+    Браузер зовёт этот эндпоинт, когда (а) часть протухла (403 → нужна свежая URL) или (б) загрузка
+    возобновляется после обрыва/перезагрузки страницы. Отвечаем:
+      • ``completed`` — части, УЖЕ лежащие в R2 (authoritative, из ``storage.list_parts``);
+      • ``parts`` — СВЕЖИЕ presigned PUT-URL: для ``part_numbers`` (если заданы — точечный renewal),
+        иначе для всех ещё-НЕ-завершённых частей ``1..plan_part_count(size)`` (resume «хвоста»);
+      • ``part_size`` — эхо размера части (``plan_part_size(size)``) для сверки клиентом.
+
+    Auth — как upload-complete (``_resolve_user``: 401 при включённом auth без валидного токена).
+    Квоту тут НЕ списываем и НЕ гейтим — джоб ещё не спавнится (строка джобы появляется только в
+    upload-complete), resume живёт на R2 через ListParts. Гоняемый ``job_id`` — серверный uuid из
+    upload-url, залить в ``job_id/source.mp4`` можно лишь по per-job presigned PUT оттуда же.
+    """
+    _resolve_user(authorization, x_user_id)  # 401 при включённом auth без валидного токена
+    completed = storage.list_parts(job_id, body.upload_id)
+    done = {p["part_number"] for p in completed}
+    size = body.size or 0
+    part_size = storage.plan_part_size(size)
+    if body.part_numbers is not None:
+        target = body.part_numbers
+    else:
+        n_parts = storage.plan_part_count(size, part_size)
+        target = [n for n in range(1, n_parts + 1) if n not in done]
+    parts = [
+        {"part_number": n, "url": storage.presigned_upload_part_url(job_id, body.upload_id, n)}
+        for n in target
+    ]
+    return {
+        "part_size": part_size,
+        "completed": [{"part_number": p["part_number"], "etag": p["etag"]} for p in completed],
+        "parts": parts,
+    }
 
 
 @app.post("/webhooks/polar")

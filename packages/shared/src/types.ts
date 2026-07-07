@@ -235,6 +235,7 @@ export interface CropWindow {
  */
 export interface Segment {
   end: number;
+  energy?: number | null;
   hook?: string | null;
   hook_style?: string | null;
   key_quote?: string | null;
@@ -283,6 +284,7 @@ export interface SourceInterval {
 export interface ClipOut {
   duration: number;
   end: number;
+  energy?: number | null;
   hook?: string | null;
   hook_style?: string | null;
   id: string;

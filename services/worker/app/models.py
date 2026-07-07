@@ -91,6 +91,9 @@ class Segment(BaseModel):
     hook_style: str | None = None
     tone: str | None = None  # эмоциональный тон (shocking/funny/touching/…); None = не определён
     key_quote: str | None = None  # самая сильная дословная цитата из клипа (для карточки)
+    # Реальная энергия клипа: 0..1 нормализованная громкость (RMS) по окну клипа относительно
+    # распределения громкости всего видео. None = нет кривой loudness (напр. Groq-путь без RMS).
+    energy: float | None = None
 
 
 class CropWindow(BaseModel):
@@ -140,6 +143,8 @@ class ClipOut(BaseModel):
     hook_style: str | None = None  # W2: стиль хука (pov/relatable/informative/shock/…)
     tone: str | None = None  # эмоциональный тон клипа (shocking/funny/touching/…)
     key_quote: str | None = None  # самая сильная дословная цитата из клипа
+    # Реальная энергия клипа 0..1 (нормализованная RMS-громкость); None = нет кривой loudness.
+    energy: float | None = None
 
 
 class RefreshClipBody(BaseModel):

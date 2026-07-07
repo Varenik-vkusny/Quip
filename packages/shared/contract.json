@@ -490,6 +490,17 @@
         "end": {
           "type": "number"
         },
+        "energy": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "hook": {
           "anyOf": [
             {
@@ -976,6 +987,17 @@
       "properties": {
         "end": {
           "type": "number"
+        },
+        "energy": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "hook": {
           "anyOf": [

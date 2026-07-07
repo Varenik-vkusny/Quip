@@ -288,6 +288,42 @@ def presigned_upload_part_url(job_id: str, upload_id: str, part_number: int) -> 
         raise JobError("storage", f"R2 presign part {job_id}#{part_number} failed: {e}") from e
 
 
+def list_parts(job_id: str, upload_id: str) -> list[dict[str, Any]]:
+    """Части multipart-загрузки, УЖЕ залитые в R2 (ListParts). Resume/renewal. JobError при сбое.
+
+    Возвращает ``[{"part_number": int, "etag": str, "size": int}, …]``, отсортированный по
+    ``part_number``. R2/S3 отдаёт части СТРАНИЦАМИ (``IsTruncated`` + ``NextPartNumberMarker``) —
+    собираем ВСЕ (крупная загрузка = сотни частей). Нормализуем S3-имена ключей (PartNumber/ETag/
+    Size) в наш wire-регистр. Любой сбой R2 → JobError (правило №8): resume НЕ должен молча «терять»
+    залитые части и грузить их заново (или, хуже, собрать объект без них).
+    """
+    s = get_settings()
+    key = source_object_key(job_id)
+    client = _r2_client()
+    parts: list[dict[str, Any]] = []
+    marker = 0
+    try:
+        while True:
+            resp = client.list_parts(
+                Bucket=s.r2_bucket, Key=key, UploadId=upload_id, PartNumberMarker=marker
+            )
+            for p in resp.get("Parts", []):
+                parts.append(
+                    {
+                        "part_number": int(p["PartNumber"]),
+                        "etag": str(p["ETag"]),
+                        "size": int(p.get("Size", 0)),
+                    }
+                )
+            if not resp.get("IsTruncated"):
+                break
+            marker = int(resp.get("NextPartNumberMarker") or 0)
+    except Exception as e:  # noqa: BLE001 — оборачиваем в JobError, не глотаем
+        raise JobError("storage", f"R2 list parts {job_id} failed: {e}") from e
+    parts.sort(key=lambda p: p["part_number"])
+    return parts
+
+
 def complete_multipart_upload(job_id: str, upload_id: str, parts: list[dict[str, Any]]) -> None:
     """Собрать объект из частей. ``parts`` = [{"PartNumber": n, "ETag": "..."}]. JobError при сбое.
 

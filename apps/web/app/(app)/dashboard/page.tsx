@@ -17,7 +17,13 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import { Spinner } from "@/components/ui/Spinner";
 import { Split } from "@/components/ui/Split";
-import { cancelJob, createJob, createUploadJob, type UploadProgressInfo } from "@/lib/api";
+import {
+  cancelJob,
+  clearUploadCheckpoint,
+  createJob,
+  createUploadJob,
+  type UploadProgressInfo,
+} from "@/lib/api";
 import { etaSeconds, formatRate } from "@/lib/format";
 import { markReviewed, noteRecentCreated } from "@/lib/recent";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -108,6 +114,19 @@ function UploadProgress({ info }: { info: UploadProgressInfo }) {
         : t("uploadEtaMinutes", { value: Math.round(etaSec / 60) });
   const rateEtaLine = [rateLabel, etaLabel].filter(Boolean).join(" · ") || null;
 
+  // Non-fatal recovery narration: a part timed out / stalled / errored and the client is retrying it
+  // with backoff (the upload is NOT dead — it keeps going once the network recovers). Honest, calm,
+  // and distinct from the red ErrorPanel (which only appears after retries are exhausted).
+  const retrying = info.phase === "retrying" || info.phase === "stalled";
+  const retryMsg = !retrying
+    ? null
+    : info.part != null && info.attempt != null
+      ? t(info.phase === "stalled" ? "uploadStalled" : "uploadRetrying", {
+          part: info.part,
+          attempt: info.attempt,
+        })
+      : t("uploadReconnecting");
+
   return (
     <div className="mx-auto w-full max-w-2xl">
       <div className="flex items-end justify-between gap-4 border-b border-line pb-4">
@@ -142,6 +161,15 @@ function UploadProgress({ info }: { info: UploadProgressInfo }) {
           style={preparing ? undefined : { width: `${Math.max(2, pct)}%` }}
         />
       </div>
+      {retryMsg && (
+        <div
+          className="mt-3 flex items-center gap-2 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2"
+          aria-live="polite"
+        >
+          <Spinner size="sm" className="text-amber-400" />
+          <span className="text-xs text-amber-300">{retryMsg}</span>
+        </div>
+      )}
       {rateEtaLine && (
         <p className="mt-3 text-xs tabular-nums text-muted" aria-live="polite">
           {rateEtaLine}
@@ -161,6 +189,14 @@ function DashboardInner() {
   const [submitting, setSubmitting] = useState(false);
   const [upload, setUpload] = useState<UploadProgressInfo | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // The last file upload we attempted — retained through the error screen so "Resume" can re-enter
+  // createUploadJob (which short-circuits to the remaining parts via the IndexedDB checkpoint) without
+  // making the user re-pick a multi-GB file. Cleared on success and on a clean "Start over".
+  const [pendingUpload, setPendingUpload] = useState<{
+    file: File;
+    maxClips: number;
+    language: string | null;
+  } | null>(null);
   // Requested clip count (from the form) → drives the reserved skeleton count while processing.
   const [requestedClips, setRequestedClips] = useState(3);
   const error = submitError ?? pollError;
@@ -234,16 +270,20 @@ function DashboardInner() {
     // Show the uploading screen immediately, before bytes move (0%). Real bytes + a real elapsedSec
     // (measured at event time in lib/api) overwrite this on the first progress event.
     setUpload({ pct: 0, loadedBytes: 0, totalBytes: file.size, elapsedSec: 0 });
+    // Remember this attempt so the error screen can offer "Resume" (checkpoint-backed).
+    setPendingUpload({ file, maxClips, language });
     try {
       const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language);
       if (ctrl.signal.aborted) return; // отменена/вытеснена — не трогаем стейт
       setUpload(null);
+      setPendingUpload(null); // fully uploaded → nothing to resume
       noteRecentCreated({ id, label: file.name, at: Date.now() });
       start(id);
     } catch (e) {
       // намеренная отмена (reset/unmount/новый сабмит) → НЕ показываем ошибку
       if (ctrl.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
       setUpload(null);
+      // Keep pendingUpload so the ErrorPanel's "Resume" can pick the transfer back up.
       setSubmitError(e instanceof Error ? e.message : t("errors.upload"));
     } finally {
       if (uploadCtrl.current === ctrl) {
@@ -251,6 +291,14 @@ function DashboardInner() {
         setSubmitting(false);
       }
     }
+  }
+
+  // Resume an interrupted upload: re-enter createUploadJob with the SAME file. The IndexedDB
+  // checkpoint short-circuits it to only the parts still missing (no restart from 0%).
+  function handleResume() {
+    const p = pendingUpload;
+    if (!p) return;
+    void handleSubmitFile(p.file, p.maxClips, p.language);
   }
 
   async function handleStop() {
@@ -268,6 +316,10 @@ function DashboardInner() {
   function handleReset() {
     uploadCtrl.current?.abort(); // отменить незавершённую загрузку — иначе она позже войдёт в tracking
     uploadCtrl.current = null;
+    // Start over means "forget the interrupted transfer": drop its resume checkpoint so re-uploading
+    // the same file begins fresh (not resumes) — the deliberate clean-slate path.
+    if (pendingUpload) void clearUploadCheckpoint(pendingUpload.file);
+    setPendingUpload(null);
     reset();
     setSubmitError(null);
     setSubmitting(false);
@@ -393,7 +445,17 @@ function DashboardInner() {
             <p className="mt-2 text-sm leading-relaxed text-muted">{t("projectStoppedBody")}</p>
           </div>
         ) : phase === "error" && error ? (
-          <ErrorPanel message={error} onRetry={handleReset} />
+          // A resumable upload error → Resume (primary) + Start over (secondary). Any other error
+          // (YouTube import / status poll) → a single "Try again" that resets.
+          <ErrorPanel
+            message={error}
+            onRetry={handleReset}
+            retryLabel={pendingUpload ? t("startOver") : t("tryAgain")}
+            onResume={pendingUpload ? handleResume : undefined}
+            resumeLabel={t("resumeUpload")}
+            eyebrow={t("runStopped")}
+            title={t("somethingWrong")}
+          />
         ) : null}
       </main>
     </div>

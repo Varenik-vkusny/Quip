@@ -13,6 +13,14 @@ import type {
   VideoMap,
   Word,
 } from "./types";
+import {
+  clearCheckpoint,
+  loadCheckpoint,
+  saveCheckpoint,
+  type UploadCheckpoint,
+  updatePart,
+} from "./uploadCheckpoint";
+import { backoffDelay, classifyPartError, fileFingerprint } from "./uploadResilience";
 
 // База воркера: реальный worker через env, иначе встроенный мок (/api/mock).
 const BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "/api/mock";
@@ -160,6 +168,14 @@ export type UploadProgressInfo = {
   loadedBytes: number;
   totalBytes: number;
   elapsedSec: number;
+  // Narrates the resilient multipart path so the UI can distinguish "bytes moving" from a transient
+  // recovery. `uploading` = normal; `retrying` = a part failed and we're backing off before another
+  // try; `stalled` = a part stopped sending bytes and the watchdog aborted it (also retried). During
+  // retry/stall, `part`/`attempt` identify what's being re-tried (1-indexed attempt). Optional so the
+  // single-PUT / local paths and the pre-flight `{pct:0}` seed stay valid without a phase.
+  phase?: "uploading" | "retrying" | "stalled";
+  part?: number;
+  attempt?: number;
 };
 
 /** XHR с upload-progress + abort. Резолвит {status, responseText}. (fetch не даёт upload-progress.) */
@@ -209,8 +225,56 @@ function xhrRequest(
   });
 }
 
+// ── Resilient multipart tuning ──
+// Hard per-part ceiling: even with a live socket a single part shouldn't take longer than this
+// (a 5 GB source with ~8 MB parts on a 2 Mbps floor uplinks one part in ~30s; 120s is generous).
+const PART_TIMEOUT_MS = 120_000;
+// Stall watchdog: no upload-progress bytes for this long on a flaky socket that fired neither
+// onload nor onerror → abort + retry (this is the "frozen at 99% forever" bug, killed).
+const STALL_MS = 30_000;
+const STALL_TICK_MS = 2_000; // how often the watchdog checks for silence
+const PART_MAX_ATTEMPTS = 6; // total tries per part before a hard failure (then resume takes over)
+
+/** A part transfer that failed at the transport layer (no HTTP status). `kind` feeds
+ *  classifyPartError so the retry loop can decide retry vs refresh vs fatal. */
+class UploadPartError extends Error {
+  kind: "timeout" | "stall" | "network";
+  constructor(kind: "timeout" | "stall" | "network") {
+    super(`upload part ${kind}`);
+    this.name = "UploadPartError";
+    this.kind = kind;
+  }
+}
+
+/** Abortable delay used between retries. Rejects with AbortError if `signal` fires first so a
+ *  cancelled / fatally-failed upload doesn't sit in a backoff sleep. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Upload aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timer);
+        reject(new DOMException("Upload aborted", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
 /** PUT одной части в R2 по presigned URL; резолвит её ETag (нужен для сборки объекта).
- *  ETag читается из заголовка ответа — требует CORS `ExposeHeaders: ["ETag"]` на бакете. */
+ *  ETag читается из заголовка ответа — требует CORS `ExposeHeaders: ["ETag"]` на бакете.
+ *  Adds a hard `timeout` + a stall watchdog: a socket that stops sending bytes (but fires no
+ *  onload/onerror) is aborted and rejected with a retryable `stall`/`timeout`/`network` kind, so a
+ *  single hung part can never freeze the whole upload. A non-2xx HTTP answer RESOLVES with its
+ *  status (the retry loop classifies it); only transport failures reject. */
 function putPart(
   url: string,
   blob: Blob,
@@ -219,26 +283,64 @@ function putPart(
 ): Promise<{ status: number; etag: string | null }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    let lastProgressTs = Date.now();
+    let watchdog: ReturnType<typeof setInterval> | null = null;
+
+    const cleanup = () => {
+      if (watchdog !== null) {
+        clearInterval(watchdog);
+        watchdog = null;
+      }
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const settleResolve = (v: { status: number; etag: string | null }) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(v);
+    };
+    const settleReject = (e: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(e);
+    };
+    function onAbort() {
+      try {
+        xhr.abort();
+      } catch {
+        /* already gone */
+      }
+      settleReject(new DOMException("Upload aborted", "AbortError"));
+    }
+
     xhr.open("PUT", url);
+    xhr.timeout = PART_TIMEOUT_MS;
     if (signal) {
       if (signal.aborted) {
-        xhr.abort();
-        return reject(new DOMException("Upload aborted", "AbortError"));
+        settleReject(new DOMException("Upload aborted", "AbortError"));
+        return;
       }
-      signal.addEventListener(
-        "abort",
-        () => {
-          xhr.abort();
-          reject(new DOMException("Upload aborted", "AbortError"));
-        },
-        { once: true },
-      );
+      signal.addEventListener("abort", onAbort, { once: true });
     }
     xhr.upload.onprogress = (e) => {
+      lastProgressTs = Date.now();
       if (e.lengthComputable) onProgress(e.loaded);
     };
-    xhr.onload = () => resolve({ status: xhr.status, etag: xhr.getResponseHeader("ETag") });
-    xhr.onerror = () => reject(new Error("Upload failed — check your connection and try again"));
+    xhr.ontimeout = () => settleReject(new UploadPartError("timeout"));
+    xhr.onerror = () => settleReject(new UploadPartError("network"));
+    xhr.onload = () => settleResolve({ status: xhr.status, etag: xhr.getResponseHeader("ETag") });
+    watchdog = setInterval(() => {
+      if (Date.now() - lastProgressTs > STALL_MS) {
+        try {
+          xhr.abort();
+        } catch {
+          /* already gone */
+        }
+        settleReject(new UploadPartError("stall"));
+      }
+    }, STALL_TICK_MS);
     xhr.send(blob);
   });
 }
@@ -250,59 +352,286 @@ function putPart(
 // whatever size the worker picks.
 const UPLOAD_PART_CONCURRENCY = 6;
 
-/** Залить файл частями (параллельно, с ограничением concurrency) и вернуть [{part_number, etag}]
- *  для сборки объекта. Прогресс — сумма загруженного по всем частям / общий размер. */
-async function uploadParts(
+/** Bytes contributed by a single part number given the plan's part_size and the file total (the
+ *  last part is short). Used to seed the progress baseline from already-completed (resumed) parts. */
+function partBytes(partNumber: number, partSize: number, total: number): number {
+  const start = (partNumber - 1) * partSize;
+  return Math.max(0, Math.min(partSize, total - start));
+}
+
+type ResilientUploadOpts = {
+  total: number; // file.size — the progress denominator
+  preCompleted: { part_number: number; etag: string }[]; // already in R2 (resume) — progress baseline
+  jobId: string; // for the upload-parts URL-refresh endpoint
+  uploadId: string;
+  headers: Record<string, string>;
+  fingerprint: string; // resume-checkpoint key — each landed ETag is persisted here
+  onProgress?: (p: UploadProgressInfo) => void;
+  signal?: AbortSignal; // external (user) cancel
+  rand?: () => number; // jitter seed (tests)
+};
+
+/** Upload `parts` (the REMAINING part plan) to R2 with per-part timeout+watchdog+retry+URL-refresh,
+ *  persisting each ETag to the resume checkpoint as it lands. Progress = (resumed bytes + in-flight
+ *  bytes) / total, carrying a `phase` so the UI can narrate retries. An internal AbortController fans
+ *  a fatal part out to its siblings (blast-radius containment); the ORIGINAL error is surfaced (not
+ *  the sibling AbortErrors it triggers). Returns the newly-completed [{part_number, etag}]. */
+async function uploadPartsResilient(
   file: File,
   parts: { part_number: number; url: string }[],
   partSize: number,
-  onProgress?: (p: UploadProgressInfo) => void,
-  signal?: AbortSignal,
+  opts: ResilientUploadOpts,
 ): Promise<{ part_number: number; etag: string }[]> {
-  const total = file.size;
+  const rand = opts.rand ?? Math.random;
   const startTime = Date.now(); // anchor for the client-side rate/ETA math (all parts share it)
   const loaded = new Array<number>(parts.length).fill(0);
-  const result = new Array<{ part_number: number; etag: string }>(parts.length);
+  const results = new Array<{ part_number: number; etag: string }>(parts.length);
+  const preCompletedBytes = opts.preCompleted.reduce(
+    (sum, p) => sum + partBytes(p.part_number, partSize, opts.total),
+    0,
+  );
+
+  // Retry-phase state, shared across the concurrent workers → drives the progress `phase`.
+  let retryDepth = 0; // how many parts are currently backing off
+  let lastRetry: { part: number; attempt: number } | null = null;
+  let lastStalled = false;
+
   const report = () => {
-    if (onProgress) {
-      const sum = loaded.reduce((a, b) => a + b, 0);
-      onProgress({
-        pct: Math.min(100, Math.round((sum / total) * 100)),
-        loadedBytes: Math.min(total, sum),
-        totalBytes: total,
-        elapsedSec: (Date.now() - startTime) / 1000,
-      });
+    if (!opts.onProgress) return;
+    const sum = preCompletedBytes + loaded.reduce((a, b) => a + b, 0);
+    const active = retryDepth > 0;
+    opts.onProgress({
+      pct: Math.min(100, Math.round((sum / opts.total) * 100)),
+      loadedBytes: Math.min(opts.total, sum),
+      totalBytes: opts.total,
+      elapsedSec: (Date.now() - startTime) / 1000,
+      phase: active ? (lastStalled ? "stalled" : "retrying") : "uploading",
+      part: active ? lastRetry?.part : undefined,
+      attempt: active ? lastRetry?.attempt : undefined,
+    });
+  };
+
+  // A fatal part aborts its siblings via this controller; it's also chained off the external
+  // (user-cancel) signal so a cancel tears everything down.
+  const internal = new AbortController();
+  const onExtAbort = () => internal.abort();
+  if (opts.signal) {
+    if (opts.signal.aborted) internal.abort();
+    else opts.signal.addEventListener("abort", onExtAbort, { once: true });
+  }
+
+  const refreshPartUrl = async (n: number): Promise<string> => {
+    const r = await fetch(`${BASE}/jobs/${opts.jobId}/upload-parts`, {
+      method: "POST",
+      headers: { ...opts.headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ upload_id: opts.uploadId, part_numbers: [n] }),
+      signal: internal.signal,
+    });
+    if (!r.ok) throw new Error(`Couldn’t refresh upload URL for part ${n}: ${r.status}`);
+    const d = (await r.json()) as { parts?: { part_number: number; url: string }[] };
+    const url = d.parts?.find((p) => p.part_number === n)?.url;
+    if (!url) throw new Error(`Upload URL refresh for part ${n} returned no URL`);
+    return url;
+  };
+
+  // Enter a backoff wait: reset this part's byte contribution (the failed attempt didn't land),
+  // flip the phase, sleep, then restore the phase. retryDepth counts concurrently-retrying parts.
+  const backoff = async (i: number, part: number, attempt: number, stalled: boolean) => {
+    loaded[i] = 0;
+    retryDepth += 1;
+    lastRetry = { part, attempt: attempt + 1 };
+    lastStalled = stalled;
+    report();
+    try {
+      await sleep(backoffDelay(attempt, rand), internal.signal);
+    } finally {
+      retryDepth -= 1;
+      if (retryDepth === 0) {
+        lastRetry = null;
+        lastStalled = false;
+      }
+      report();
     }
   };
 
-  let next = 0;
-  async function worker(): Promise<void> {
-    for (let i = next++; i < parts.length; i = next++) {
-      const p = parts[i];
-      const start = (p.part_number - 1) * partSize;
-      const chunk = file.slice(start, Math.min(start + partSize, total));
-      const { status, etag } = await putPart(
-        p.url,
-        chunk,
-        (l) => {
-          loaded[i] = l;
+  const uploadOne = async (i: number): Promise<void> => {
+    const p = parts[i];
+    const start = (p.part_number - 1) * partSize;
+    const chunk = file.slice(start, Math.min(start + partSize, opts.total));
+    let url = p.url;
+    for (let attempt = 0; ; attempt++) {
+      if (internal.signal.aborted) throw new DOMException("Upload aborted", "AbortError");
+      try {
+        const { status, etag } = await putPart(
+          url,
+          chunk,
+          (l) => {
+            loaded[i] = l;
+            report();
+          },
+          internal.signal,
+        );
+        if (status >= 200 && status < 300) {
+          if (!etag) throw new Error("Upload part missing ETag (R2 CORS must expose the ETag header)");
+          loaded[i] = chunk.size;
           report();
-        },
-        signal,
-      );
-      if (status < 200 || status >= 300) throw new Error(`Upload part ${p.part_number} failed: ${status}`);
-      if (!etag) throw new Error("Upload part missing ETag (R2 CORS must expose the ETag header)");
-      loaded[i] = chunk.size;
-      report();
-      // ETag верстаем как вернул R2 (в кавычках) — complete_multipart_upload ждёт ровно его.
-      result[i] = { part_number: p.part_number, etag };
+          // ETag верстаем как вернул R2 (в кавычках) — complete_multipart_upload ждёт ровно его.
+          results[i] = { part_number: p.part_number, etag };
+          void updatePart(opts.fingerprint, { part_number: p.part_number, etag }); // persist for resume
+          return;
+        }
+        // Non-2xx HTTP → classify by status (403 → refresh URL, 5xx/408/429 → retry, other 4xx → fatal).
+        const action = classifyPartError(status, "http");
+        if (action === "fatal") throw new Error(`Upload part ${p.part_number} failed: ${status}`);
+        if (attempt + 1 >= PART_MAX_ATTEMPTS) {
+          throw new Error(`Upload part ${p.part_number} failed after ${PART_MAX_ATTEMPTS} attempts: ${status}`);
+        }
+        if (action === "refresh") url = await refreshPartUrl(p.part_number);
+        await backoff(i, p.part_number, attempt, false);
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") throw e;
+        if (e instanceof UploadPartError) {
+          if (attempt + 1 >= PART_MAX_ATTEMPTS) {
+            throw new Error(`Upload part ${p.part_number} failed after ${PART_MAX_ATTEMPTS} attempts (${e.kind})`);
+          }
+          await backoff(i, p.part_number, attempt, e.kind === "stall");
+          continue;
+        }
+        throw e; // missing ETag / URL-refresh failure / anything else → fatal
+      }
     }
+  };
+
+  // Bounded concurrency. Workers catch their own error (recording the FIRST fatal one) and abort
+  // internally so a sibling failure stops the rest deterministically — we then throw the real error.
+  let nextIdx = 0;
+  let fatal: unknown = null;
+  const worker = async (): Promise<void> => {
+    for (let i = nextIdx++; i < parts.length; i = nextIdx++) {
+      if (internal.signal.aborted) return;
+      try {
+        await uploadOne(i);
+      } catch (e) {
+        if (!(e instanceof DOMException && e.name === "AbortError") && fatal === null) fatal = e;
+        internal.abort();
+        return;
+      }
+    }
+  };
+
+  try {
+    report(); // initial paint incl. any resumed baseline
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_PART_CONCURRENCY, parts.length) }, worker));
+  } finally {
+    opts.signal?.removeEventListener("abort", onExtAbort);
   }
 
-  await Promise.all(
-    Array.from({ length: Math.min(UPLOAD_PART_CONCURRENCY, parts.length) }, worker),
+  if (fatal !== null) throw fatal; // the real transfer error wins over the AbortErrors it triggered
+  if (opts.signal?.aborted) throw new DOMException("Upload aborted", "AbortError");
+  return results;
+}
+
+/** POST /jobs/{id}/upload-complete — assemble the R2 object from the collected part ETags + spawn
+ *  the job. Shared by the fresh and resume multipart paths. */
+async function completeMultipart(
+  id: string,
+  uploadId: string,
+  parts: { part_number: number; etag: string }[],
+  file: File,
+  maxClips: number | undefined,
+  language: string | null | undefined,
+  headers: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      max_clips: maxClips ?? null,
+      language: language ?? null,
+      upload_id: uploadId,
+      parts,
+    }),
+    signal,
+  });
+  if (!done.ok) throw new Error(`Couldn’t finalize upload: ${done.status}`);
+}
+
+/** Resume an interrupted multipart upload from its IndexedDB checkpoint. The parts already sit in R2
+ *  under the checkpoint's upload_id (the job row doesn't exist until upload-complete), so we ask the
+ *  server (ListParts) what's really there, reconcile with the local checkpoint, upload only the
+ *  remainder, then finalize. Throws if the checkpoint is unusable (expired multipart) — the caller
+ *  clears it and restarts fresh. */
+async function resumeMultipart(
+  file: File,
+  cp: UploadCheckpoint,
+  fingerprint: string,
+  maxClips: number | undefined,
+  language: string | null | undefined,
+  headers: Record<string, string>,
+  onProgress?: (p: UploadProgressInfo) => void,
+  signal?: AbortSignal,
+  rand?: () => number,
+): Promise<{ id: string }> {
+  const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    // No part_numbers ⇒ server returns fresh URLs for every not-yet-completed part (the resume case).
+    body: JSON.stringify({ upload_id: cp.upload_id, size: file.size }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`resume upload-parts failed: ${res.status}`);
+  const data = (await res.json()) as {
+    part_size?: number;
+    completed?: { part_number: number; etag: string }[];
+    parts?: { part_number: number; url: string }[];
+  };
+  const partSize = data.part_size || cp.part_size;
+  // Reconcile: server ListParts is authoritative; union with the local checkpoint (belt + braces).
+  const completedMap = new Map<number, string>();
+  for (const p of cp.completed) completedMap.set(p.part_number, p.etag);
+  for (const p of data.completed ?? []) completedMap.set(p.part_number, p.etag);
+  const preCompleted = [...completedMap.entries()]
+    .map(([part_number, etag]) => ({ part_number, etag }))
+    .sort((a, b) => a.part_number - b.part_number);
+  const toUpload = (data.parts ?? []).filter((p) => !completedMap.has(p.part_number));
+
+  // Rewrite the checkpoint with the reconciled state (part_size may have been echoed back).
+  await saveCheckpoint(fingerprint, {
+    job_id: cp.job_id,
+    upload_id: cp.upload_id,
+    part_size: partSize,
+    completed: preCompleted,
+  });
+
+  const newly = await uploadPartsResilient(file, toUpload, partSize, {
+    total: file.size,
+    preCompleted,
+    jobId: cp.job_id,
+    uploadId: cp.upload_id,
+    headers,
+    fingerprint,
+    onProgress,
+    signal,
+    rand,
+  });
+  const all = [...preCompleted, ...newly].sort((a, b) => a.part_number - b.part_number);
+  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal);
+  await clearCheckpoint(fingerprint);
+  return { id: cp.job_id };
+}
+
+/** Drop any resume checkpoint for this file — call on an explicit "Start over" so the next upload of
+ *  the same file begins fresh instead of resuming from the interrupted transfer. Best-effort. */
+export function clearUploadCheckpoint(file: {
+  name: string;
+  size: number;
+  lastModified: number;
+}): Promise<void> {
+  return clearCheckpoint(
+    fileFingerprint({ name: file.name, size: file.size, lastModified: file.lastModified }),
   );
-  return result;
 }
 
 export async function createUploadJob(
@@ -311,8 +640,39 @@ export async function createUploadJob(
   onProgress?: (p: UploadProgressInfo) => void,
   signal?: AbortSignal,
   language?: string | null,
+  rand?: () => number,
 ): Promise<{ id: string }> {
   const headers = await authHeaders();
+  const fingerprint = fileFingerprint({
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+  });
+
+  // ── RESUME: a checkpoint from a previous interrupted multipart upload of THIS exact file. The
+  // parts already sit in R2 under the checkpoint's upload_id, so resume that — DON'T mint a new one.
+  // If the checkpoint is unusable (R2 multipart expired / aborted → upload-parts errors), clear it
+  // and fall through to a fresh upload: an honest restart, not a swallowed error (rule #8). ──
+  const checkpoint = await loadCheckpoint(fingerprint);
+  if (checkpoint?.job_id && checkpoint.upload_id && checkpoint.part_size > 0) {
+    try {
+      return await resumeMultipart(
+        file,
+        checkpoint,
+        fingerprint,
+        maxClips,
+        language,
+        headers,
+        onProgress,
+        signal,
+        rand,
+      );
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
+      await clearCheckpoint(fingerprint); // stale/unusable checkpoint → start clean below
+    }
+  }
+
   // 1. Спросить у воркера URL для ПРЯМОЙ загрузки браузер→R2 (cloud) или сигнал local-fallback.
   // Большие видео через ОДИН долгий POST на Modal web рвались (truncated multipart → 400 + CORS).
   // В облаке браузер PUT'ит файл ПРЯМО в R2 (Cloudflare edge, надёжно), минуя Modal web-функцию.
@@ -338,34 +698,41 @@ export async function createUploadJob(
     parts?: { part_number: number; url: string }[];
   };
 
-  // Multipart (большой файл): части грузятся ПАРАЛЛЕЛЬНО прямо в R2, затем upload-complete
-  // собирает объект из их ETag'ов. На сбое — best-effort abort, чтобы не копить части в R2.
+  // Multipart (большой файл): части грузятся ПАРАЛЛЕЛЬНО прямо в R2 (с таймаутом/watchdog/ретраями/
+  // обновлением URL), затем upload-complete собирает объект из их ETag'ов.
   if (init.id && init.upload_id && init.parts && init.part_size) {
     const { id, upload_id, parts, part_size } = init;
+    // Record the checkpoint up front so an interrupted transfer (crash / reload / offline) can resume.
+    await saveCheckpoint(fingerprint, { job_id: id, upload_id, part_size, completed: [] });
     try {
-      const completed = await uploadParts(file, parts, part_size, onProgress, signal);
-      const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          filename: file.name,
-          max_clips: maxClips ?? null,
-          language: language ?? null,
-          upload_id,
-          parts: completed,
-        }),
+      const completed = await uploadPartsResilient(file, parts, part_size, {
+        total: file.size,
+        preCompleted: [],
+        jobId: id,
+        uploadId: upload_id,
+        headers,
+        fingerprint,
+        onProgress,
         signal,
+        rand,
       });
-      if (!done.ok) throw new Error(`Couldn’t finalize upload: ${done.status}`);
+      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal);
+      await clearCheckpoint(fingerprint); // fully uploaded → no resume state to keep
       return { id };
     } catch (e) {
-      // Отменили/уронили загрузку → попросить воркер вычистить залитые части (fire-and-forget).
-      void fetch(`${BASE}/jobs/${id}/upload-abort`, {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ upload_id }),
-        keepalive: true,
-      }).catch(() => {});
+      if (e instanceof DOMException && e.name === "AbortError") {
+        // Deliberate cancel (reset / new submit / unmount) → clean up R2 + drop the checkpoint.
+        void fetch(`${BASE}/jobs/${id}/upload-abort`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ upload_id }),
+          keepalive: true,
+        }).catch(() => {});
+        void clearCheckpoint(fingerprint);
+        throw e;
+      }
+      // Terminal transfer error after retries → KEEP the uploaded parts + checkpoint so the user can
+      // Resume (do NOT abort the multipart — that would delete the parts). Surface the error (rule #8).
       throw e;
     }
   }

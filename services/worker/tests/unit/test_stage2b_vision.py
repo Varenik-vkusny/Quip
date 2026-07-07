@@ -95,6 +95,29 @@ class TestParseVisionResponse:
             parse_vision_response('{"hook_reason": "x"}')
 
 
+# ─────────────── B5: energy survives the vision re-rank (model_copy) ───────────────
+
+
+class TestApplyReviewPreservesEnergy:
+    """apply_review мутирует ТОЛЬКО score (или ещё start/end) через model_copy — реальная энергия
+    клипа (Segment.energy, populated позже в build_clip_out) не должна теряться при ре-ранке."""
+
+    def _review(self, hook_strength: float) -> VisionReview:
+        r = parse_vision_response(f'{{"hook_strength": {hook_strength}, "hook_reason": "x"}}')
+        return r  # ok=True
+
+    def test_energy_survives_rerank_no_trim(self) -> None:
+        seg = mkseg(0.0, 30.0, score=0.4).model_copy(update={"energy": 0.73})
+        out = apply_review(seg, self._review(0.9), uniform(40), trim_edges=False)
+        assert out.energy == 0.73  # энергия сохранена
+        assert out.score == 0.9  # переранжирован только score
+
+    def test_energy_survives_rerank_with_trim(self) -> None:
+        seg = mkseg(2.0, 28.0, score=0.4).model_copy(update={"energy": 0.51})
+        out = apply_review(seg, self._review(0.8), uniform(40), trim_edges=True)
+        assert out.energy == 0.51
+
+
 # ─────────────────────────── parse_vision_shots (Layer A) ───────────────────────────
 
 

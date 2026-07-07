@@ -34,8 +34,8 @@ The moment … — or a bold, specific claim. Make the viewer NEED the answer.
 
 Fill the fields in this order:
 
-STEP 1 — `tone`: the emotion in one or two words (funny / shocking / touching / controversial /
-insightful / relatable / inspiring / infuriating …). Name the feeling first.
+STEP 1 — `tone`: the emotion of the clip. Pick EXACTLY ONE word from this closed set:
+shocking / funny / controversial / inspiring / relatable / insightful / touching. Name the feeling first.
 
 STEP 2 — `hook_style`: pick the pattern that fits. Choose ONE:
 - question   → an open loop that demands the answer. "Why Tom Holland deleted Instagram".

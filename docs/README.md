@@ -261,17 +261,30 @@
   → browser PUTs straight to R2 → `POST /jobs/{id}/upload-complete` spawns processing. Needs an R2
   **CORS rule** on the bucket (set in Cloudflare dashboard — done; JSON in `deploy/modal/r2_setup.py`).
   Local dev still uses the old multipart `POST /jobs/upload`. (Old single-POST path broke on big files.)
-  Files **>100 MB use R2 multipart** (parallel resumable parts: `/jobs/upload-url` returns a
-  presigned URL per part → `upload-complete` assembles → `/jobs/{id}/upload-abort` cleans up).
-  **Cap = 10 GB** (`SourceForm.MAX_UPLOAD_MB`, just a guard); real limit is **3 h**
-  (`billing.MAX_VIDEO_MINUTES`). Modal pipeline funcs (`run_job`/`upload_job`) run **`timeout=10800`
-  (3 h)** + **`cpu=4, memory=4096`** so a long/heavy source (preview transcode + reframe/render)
-  isn't killed and isn't starved. R2 CORS must allow the web origin + **expose `ETag`** (multipart).
+  Files **>32 MB use R2 multipart** (16 MB parts). **Resilient client (2026-07-07):** per-part
+  `xhr.timeout` + stall-watchdog, retry-with-backoff+jitter, presigned-URL renewal, and **resume**
+  from already-uploaded parts via `POST /jobs/{id}/upload-parts` (`storage.list_parts` = R2 ListParts
+  + fresh URLs) + an IndexedDB checkpoint keyed by file fingerprint → a dropped connection or page
+  reload continues the tail instead of restarting from 0%; honest "reconnecting… / retrying part N"
+  UX with a real **Resume** button (the `File` is held through the error screen). `upload-complete`
+  assembles → `/jobs/{id}/upload-abort` cleans up on user-cancel. Client resilience is TDD-covered
+  (`lib/uploadResilience.ts`); backbone verified against real R2.
+  **Cap = 10 GB** (client `SourceForm.MAX_UPLOAD_MB` + server `main.MAX_UPLOAD_BYTES` → 413); real
+  length limit is **3 h** (`billing.MAX_VIDEO_MINUTES`, enforced at probe). Cloud Run `quip-pipeline`
+  runs **task-timeout 10800s (3 h) / 8 vCPU / 32Gi**; `quip-render` **4 vCPU / 16Gi** per clip. R2
+  CORS must allow the web origin + **expose `ETag`** (multipart). ⚠️ source downloads to **tmpfs=RAM**
+  → a very large source can OOM the pipeline (Part C follow-up: ephemeral-disk / streaming).
 - **R2 retention:** daily Modal Cron `cleanup_stale_sources` deletes `source.mp4`/`preview.mp4`
   older than **60 days** (clips kept forever) — source is 70–90 % of storage; without this R2 grows
   unbounded (one-time payment, perpetual storage). Egress is free; only GB-month bills (>10 GB tier).
 - **Clips: up to 30** (`resolve_max_clips hi=30`) with an **Auto** mode ("as many as found, ≤30") vs
   Custom 1–30 in `SourceForm`.
+- **«Почему этот клип» → реальная энергия (2026-07-07).** Полоска «энергия» в карточке клипа теперь
+  берётся из НАСТОЯЩЕЙ RMS-громкости (`clip_energy` по кривой `extract_loudness`, поле
+  `ClipOut.energy` 0..1), а не угадывается из `tone`. Прежде энергия ВСЕГДА падала в минимум (`tone`
+  свободнотекстовый — не совпадал с 7-словным словарём UI); тот же корень молча ломал эмодзи и цветную
+  подсветку карточки. Фикс: серверная `normalize_tone` → канонический набор + промпт замкнут на него.
+  Старые клипы без `energy` фолбэчат на прежнюю tone-эвристику (обратная совместимость).
 - **Editor preview video = a lightweight `preview.mp4` proxy** (≤720p H.264 faststart, made per job),
   served via CDN (`cdn.quip.ink`); source also CDN now. Render still uses the full source. Old jobs
   fall back to source. (Editor video used to load the full 50–160 MB source → slow.)

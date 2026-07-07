@@ -7,6 +7,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { ExportMenu } from "@/components/ExportMenu";
 import { Card } from "@/components/ui/Card";
 import { Numeral } from "@/components/ui/Numeral";
+import { computeSignalBars } from "@/lib/clipSignals";
 import { clipRange } from "@/lib/format";
 import type { ClipOut, Word } from "@/lib/types";
 import { ClipPreview } from "./ClipPreview";
@@ -40,41 +41,6 @@ const TONE_EMOJI: Record<string, string> = {
   shocking: '😮', funny: '😂', touching: '🥺',
   relatable: '🙌', inspiring: '🔥', controversial: '🤔', insightful: '💡',
 };
-
-type SignalKey = 'hook' | 'standalone' | 'energy' | 'speaker';
-
-// Returns translation KEYS (not labels) so the i18n catalog owns the copy; the rendering
-// component resolves `signal.<key>` via next-intl. Pure scoring logic stays here.
-function computeSignalBars(clip: ClipOut): { key: SignalKey; bars: number }[] {
-  const score = clip.score;
-  const signals: { key: SignalKey; bars: number }[] = [
-    {
-      key: 'hook',
-      bars: score >= 0.85 ? 4 : score >= 0.70 ? 3 : score >= 0.55 ? 2 : 1,
-    },
-    {
-      key: 'standalone',
-      bars: ['hook', 'emotional_peak'].includes(clip.type) ? 4
-          : clip.type === 'complete_thought' ? 3
-          : clip.type === 'strong_quote' ? 3
-          : 2,
-    },
-    {
-      key: 'energy',
-      bars: ['shocking', 'funny', 'controversial'].includes(clip.tone ?? '') ? 4
-          : ['inspiring', 'relatable', 'insightful'].includes(clip.tone ?? '') ? 3
-          : clip.tone === 'touching' ? 2
-          : 1,
-    },
-    {
-      key: 'speaker',
-      bars: (clip.hook?.length ?? 0) > 60 ? 3 + (clip.why_works ? 1 : 0)
-          : (clip.hook?.length ?? 0) > 30 ? 2 + (clip.why_works ? 1 : 0)
-          : 1 + (clip.why_works ? 1 : 0),
-    },
-  ];
-  return signals.map(s => ({ ...s, bars: Math.min(4, Math.max(1, s.bars)) }));
-}
 
 function getScoreTier(score100: number): { textClass: string; gradient: string; glow: string } {
   if (score100 >= 90) return {
@@ -142,6 +108,7 @@ function clipEqual(a: ClipOut, b: ClipOut): boolean {
     a.start === b.start &&
     a.end === b.end &&
     a.duration === b.duration &&
+    a.energy === b.energy &&
     a.hook === b.hook &&
     a.hook_style === b.hook_style &&
     a.key_quote === b.key_quote &&

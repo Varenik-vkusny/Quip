@@ -78,6 +78,69 @@ def clamp_score(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+# ─────────────────────── B6: tone whitelist (совпадает с UI ClipCard) ───────────────────────
+# UI (ClipCard) рисует emoji-бейдж, цветной glow и энергетический fallback-бар по ТОЧНОМУ совпадению
+# tone с этим закрытым набором. Модель регулярно уходит из него («infuriating», «deeply moving»,
+# «emotional») → карточка молча теряла emoji/цвет. Нормализуем tone СЕРВЕРНО в postprocess: канон
+# как есть, синонимы → канон, неизвестное → дефолт (никогда не доверяем LLM оставаться in-vocab).
+_TONE_CANONICAL: frozenset[str] = frozenset(
+    {"shocking", "funny", "controversial", "inspiring", "relatable", "insightful", "touching"}
+)
+
+# Неизвестный тон → дефолт: «insightful» (самый нейтральный из набора — карточка всегда получает
+# осмысленный тон, а не пустой). Задокументировано + проверено тестом (test_tone_normalize).
+_TONE_DEFAULT = "insightful"
+
+_TONE_SYNONYMS: dict[str, str] = {
+    # controversial
+    "infuriating": "controversial", "enraging": "controversial", "angry": "controversial",
+    "divisive": "controversial", "provocative": "controversial", "outrageous": "controversial",
+    "polarizing": "controversial",
+    # touching
+    "moving": "touching", "emotional": "touching", "heartfelt": "touching", "sad": "touching",
+    "tearjerker": "touching", "poignant": "touching", "wholesome": "touching", "sweet": "touching",
+    # inspiring
+    "inspirational": "inspiring", "motivating": "inspiring", "motivational": "inspiring",
+    "uplifting": "inspiring", "empowering": "inspiring", "hopeful": "inspiring",
+    # insightful
+    "informative": "insightful", "educational": "insightful", "profound": "insightful",
+    "eye-opening": "insightful", "smart": "insightful", "thought-provoking": "insightful",
+    "enlightening": "insightful",
+    # shocking
+    "shock": "shocking", "surprising": "shocking", "jaw-dropping": "shocking", "wild": "shocking",
+    "unbelievable": "shocking", "crazy": "shocking", "startling": "shocking",
+    # funny
+    "hilarious": "funny", "comedic": "funny", "humorous": "funny", "amusing": "funny",
+    "lighthearted": "funny", "witty": "funny",
+    # relatable
+    "real": "relatable", "authentic": "relatable", "honest": "relatable", "candid": "relatable",
+}  # fmt: skip
+
+
+def normalize_tone(raw: str | None) -> str | None:
+    """Свести свободный tone LLM к закрытому UI-набору (или None). PURE.
+
+    None/пусто → None (тон не определён). Канон как есть; известный синоним → канон; иначе пробуем
+    по ОТДЕЛЬНЫМ токенам («deeply moving» → «moving» → «touching»); неизвестное → ``_TONE_DEFAULT``.
+    """
+    if raw is None:
+        return None
+    t = raw.strip().lower()
+    if not t:
+        return None
+    if t in _TONE_CANONICAL:
+        return t
+    if t in _TONE_SYNONYMS:
+        return _TONE_SYNONYMS[t]
+    # мультисловный/пунктуированный tone — матчим по токенам (первый совпавший канон/синоним)
+    for tok in t.replace("/", " ").replace(",", " ").split():
+        if tok in _TONE_CANONICAL:
+            return tok
+        if tok in _TONE_SYNONYMS:
+            return _TONE_SYNONYMS[tok]
+    return _TONE_DEFAULT
+
+
 def resolve_max_clips(requested: int | None, default: int, *, lo: int = 1, hi: int = 30) -> int:
     """Сколько кандидатов отдавать: запрос юзера (степпер) > дефолт; кламп в [lo,hi].
 
@@ -441,7 +504,9 @@ def postprocess(
         hook_style = str(style_raw).strip().lower() or None if style_raw else None
         tone_raw = item.get("tone")
         key_quote_raw = item.get("key_quote")
-        tone = str(tone_raw).strip().lower() or None if tone_raw else None
+        # B6: сводим свободный tone LLM к ЗАКРЫТОМУ UI-набору (emoji/glow/energy-fallback в ClipCard
+        # ломались на «infuriating»/«deeply moving»/…). Пусто → None (обратная совместимость).
+        tone = normalize_tone(str(tone_raw)) if tone_raw else None
         key_quote = str(key_quote_raw).strip() or None if key_quote_raw else None
         try:
             # A1: детерминированный снап к границам предложений (start первым — от него зависит
@@ -621,8 +686,9 @@ Return moments as word index ranges. For each moment choose a `type`:
 - strong_quote: a quotable, punchy line.
 
 For each moment ALSO produce (in this order — classify the feeling BEFORE writing the hook):
-- `tone`: the emotion of the moment (funny / shocking / touching / controversial / insightful /
-  relatable …) — name the feeling first, a generic title comes from skipping this.
+- `tone`: the emotion of the moment. Pick EXACTLY ONE word from this closed set:
+  shocking / funny / controversial / inspiring / relatable / insightful / touching. Name the
+  feeling first — a generic title comes from skipping this.
 - `hook_style`: one of story | insight | question | bold_claim | number (story = the speaker's own
   narrative, use their name when known; insight = a generalizable truth framed for the viewer).
 - `hook`: a SPECIFIC on-screen TOP title (≤10 words, transcript language, no ending period) written

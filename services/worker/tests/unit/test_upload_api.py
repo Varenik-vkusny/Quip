@@ -146,3 +146,120 @@ def test_upload_spawn_failure_marks_job_failed(monkeypatch, tmp_path: Path) -> N
 
     assert r.status_code == 500
     assert failed and "modal down" in failed["err"]
+
+
+# ─────────────────── B2: POST /jobs/{id}/upload-parts (resume + URL renewal) ───────────────────
+
+
+def test_upload_parts_lists_completed_and_mints_requested(monkeypatch) -> None:
+    # ListParts даёт уже-залитые части (completed); parts = свежие presigned URL для ЗАПРОШЕННЫХ.
+    monkeypatch.delenv("SUPABASE_URL", raising=False)  # auth off (dev)
+    import app.main as main
+
+    monkeypatch.setattr(
+        main.storage,
+        "list_parts",
+        lambda job_id, upload_id: [
+            {"part_number": 1, "etag": "e1", "size": 100},
+            {"part_number": 4, "etag": "e4", "size": 50},
+        ],
+    )
+    monkeypatch.setattr(
+        main.storage,
+        "presigned_upload_part_url",
+        lambda job_id, upload_id, n: f"https://r2/{job_id}/{upload_id}/{n}",
+    )
+
+    client = TestClient(main.app)
+    r = client.post("/jobs/job_x/upload-parts", json={"upload_id": "up1", "part_numbers": [2, 3]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["completed"] == [
+        {"part_number": 1, "etag": "e1"},
+        {"part_number": 4, "etag": "e4"},
+    ]
+    assert [p["part_number"] for p in body["parts"]] == [2, 3]
+    assert body["parts"][0]["url"].endswith("/2")
+    assert body["parts"][1]["url"].endswith("/3")
+
+
+def test_upload_parts_resume_derives_remaining_from_size(monkeypatch) -> None:
+    # part_numbers опущен (resume) → mint'им URL для ВСЕХ частей 1..plan_part_count(size), КРОМЕ
+    # уже завершённых (из list_parts). part_size = plan_part_size(size), эхом клиенту.
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    import app.main as main
+    from app import storage
+
+    monkeypatch.setattr(
+        main.storage,
+        "list_parts",
+        lambda job_id, upload_id: [
+            {"part_number": 1, "etag": "e1", "size": 100},
+            {"part_number": 2, "etag": "e2", "size": 100},
+        ],
+    )
+    monkeypatch.setattr(
+        main.storage, "presigned_upload_part_url", lambda job_id, upload_id, n: f"url-{n}"
+    )
+
+    size = 3 * storage.MULTIPART_MIN_PART_SIZE + 1  # → part_size 16 МБ, 4 части
+    client = TestClient(main.app)
+    r = client.post("/jobs/job_y/upload-parts", json={"upload_id": "up2", "size": size})
+    assert r.status_code == 200
+    body = r.json()
+    ps = storage.plan_part_size(size)
+    n = storage.plan_part_count(size, ps)
+    assert body["part_size"] == ps
+    assert [p["part_number"] for p in body["parts"]] == [
+        i for i in range(1, n + 1) if i not in (1, 2)
+    ]
+
+
+def test_upload_parts_requires_auth(monkeypatch) -> None:
+    # auth включён (SUPABASE_URL) + нет токена → 401 ДО обращения к R2 (list_parts не зовём).
+    monkeypatch.setenv("SUPABASE_URL", "https://ref.supabase.co")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-hs256-secret-at-least-32-bytes-long!!")
+    import app.main as main
+
+    def _boom(*a, **k):  # list_parts не должен быть достигнут (иначе тест-фейл при auth-багге)
+        raise AssertionError("list_parts reached without auth")
+
+    monkeypatch.setattr(main.storage, "list_parts", _boom)
+
+    client = TestClient(main.app)
+    r = client.post("/jobs/job_z/upload-parts", json={"upload_id": "u"})
+    assert r.status_code == 401
+
+
+# ─────────────────── B3: server-side upload size cap (defense-in-depth) ───────────────────
+
+
+def test_upload_url_rejects_oversize(monkeypatch) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)  # auth off
+    monkeypatch.delenv("BILLING_ENABLED", raising=False)  # quota off
+    import app.main as main
+
+    client = TestClient(main.app)
+    r = client.post(
+        "/jobs/upload-url", json={"filename": "big.mp4", "size": main.MAX_UPLOAD_BYTES + 1}
+    )
+    assert r.status_code == 413
+    assert "GB" in r.json()["detail"]
+
+
+def test_upload_url_accepts_within_cap(monkeypatch) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("BILLING_ENABLED", raising=False)
+    import types
+
+    import app.main as main
+
+    # local backend → {"local": true} (не трогаем R2); гарантируем local, не полагаясь на кэш env.
+    monkeypatch.setattr(
+        main, "get_settings", lambda: types.SimpleNamespace(storage_backend="local")
+    )
+
+    client = TestClient(main.app)
+    r = client.post("/jobs/upload-url", json={"filename": "ok.mp4", "size": 1024})
+    assert r.status_code == 200
+    assert r.json().get("local") is True

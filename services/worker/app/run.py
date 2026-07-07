@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.editor.reframe_cache import build_persist_payload
 from app.errors import JobError, YoutubeBotGateError
 from app.models import ClipOut, Job, JobStatus, Metrics, Segment, Transcript, Word
+from app.pipeline.clip_energy import clip_energy
 from app.pipeline.preview_moments import (
     detect_energy_moments,
     detect_preview_moments,
@@ -98,12 +99,21 @@ def clip_spawn_args(
 
 
 def build_clip_out(
-    clip_id: str, seg: Segment, transcript_words: list[Word], video_url: str
+    clip_id: str,
+    seg: Segment,
+    transcript_words: list[Word],
+    video_url: str,
+    *,
+    loudness: list[float] | None = None,
 ) -> ClipOut:
     """Сегмент + слова транскрипта + готовый ``video_url`` → ClipOut (wire). PURE.
 
     Сниппет/слова считаются по окну сегмента — НЕ зависят от того, где рендерился клип
     (локально или на фан-аут-контейнере).
+
+    ``loudness`` (опц.) — RMS-кривая громкости источника (из ``extract_loudness``): считаем реальную
+    ``energy`` клипа (0..1, ``clip_energy`` над окном [start,end]). None (не передана / нет кривой)
+    → ``energy=None`` → фронт откатится на tone-эвристику (обратная совместимость).
     """
     return ClipOut(
         id=clip_id,
@@ -122,6 +132,7 @@ def build_clip_out(
         hook_style=seg.hook_style,
         tone=seg.tone,
         key_quote=seg.key_quote,
+        energy=clip_energy(loudness, seg.start, seg.end),
     )
 
 
@@ -813,7 +824,7 @@ def run_pipeline(
     #    атомарно проставит свой video_url (db.set_clip_ready). clip_id 1-based (clip_{i:02d})
     #    совпадает с порядком segments → idx фан-аута выровнен. ──
     pending_clips: list[ClipOut] = [
-        build_clip_out(f"clip_{i:02d}", seg, transcript.words, "")
+        build_clip_out(f"clip_{i:02d}", seg, transcript.words, "", loudness=loudness)
         for i, seg in enumerate(segments, start=1)
     ]
     db.set_clips_pending(job_id, pending_clips, progress=60, status=JobStatus.selecting)
@@ -880,7 +891,7 @@ def run_pipeline(
     )
     results.sort(key=lambda r: r["clip_index"])
     clips: list[ClipOut] = [
-        build_clip_out(r["clip_id"], seg, transcript.words, r["video_url"])
+        build_clip_out(r["clip_id"], seg, transcript.words, r["video_url"], loudness=loudness)
         for seg, r in zip(segments, results, strict=True)
     ]
     stages["reframe"] = round(sum(r["reframe_lat"] for r in results), 2)
