@@ -95,3 +95,24 @@ export const PAYG = {
   body: "Buy videos one at a time. They never expire — one video covers up to 60 minutes of source.",
   cta: "Buy a video",
 } as const;
+
+/**
+ * On-demand clip extraction gate + economics. MIRRORS services/worker/app/billing.py
+ * (`can_extract_clip` / `extract_requires_payment`) and app/config.py (`extract_free_cap` /
+ * `extract_clip_price_usd`). The worker enforces these server-side; this mirror only drives which
+ * Extract-button state the UI shows (available / upgrade / paywall). Money path — keep in sync
+ * with billing.py (CLAUDE.md).
+ */
+export const EXTRACT = {
+  /** Plans allowed to extract new clips from un-clipped moments (Free/Starter see the map only). */
+  plans: ["pro", "studio"] as PlanId[],
+  /** Free while total clips (auto + extracted) stay under this; at/above it → per-clip paywall. */
+  freeCap: 30,
+  /** Price of one extra clip beyond the free cap, USD. */
+  clipPriceUsd: 1,
+} as const;
+
+/** True if the plan may extract clips. */
+export function canExtractClip(plan: string | null | undefined): boolean {
+  return !!plan && (EXTRACT.plans as readonly string[]).includes(plan);
+}

@@ -541,6 +541,38 @@ def fanout_render_clip_job(
     _rlog.info("[fanout] clip_%02d done total=%.1fs", clip_index, total)
 
 
+def render_extracted_clip_job(
+    job_id: str,
+    clip_index: int,
+    seg: dict[str, Any],
+    meta: dict[str, Any],
+    user_id: str | None = None,
+) -> None:
+    """Render ONE on-demand extracted clip (Stages 3–5) in the background, publishing via
+    ``db.set_clip_ready(job_id, clip_index, url)`` EXACTLY like an auto clip.
+
+    Reuses the pipeline's ``render_one_clip_contained`` (same reframe → render → upload → per-clip
+    persist path — the frame-grid invariant is untouched, stage3/stage5 not modified). ``source``
+    is materialized from R2 via ``artifacts.ensure_source`` (cloud) or read from disk (local). The
+    endpoint already appended the clip as pending and verified the source; this just fills its
+    ``video_url``. Per-clip failure is CONTAINED (clip stays pending / empty ``video_url``) — the
+    job is never affected. Same signature shape as ``fanout_render_clip_job``.
+    """
+    from app import artifacts
+    from app.models import Segment
+    from app.run import render_one_clip_contained
+
+    src = artifacts.ensure_source(job_id)  # local disk or R2 → fresh container (as editor-render)
+    render_one_clip_contained(
+        src.parent,
+        src.name,
+        clip_index,
+        Segment.model_validate(seg),
+        SourceMeta.model_validate(meta),
+        user_id,
+    )
+
+
 def run_upload_job(
     job_id: str,
     upload_path: str,

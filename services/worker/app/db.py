@@ -281,6 +281,32 @@ def set_clip_ready(job_id: str, clip_index: int, video_url: str) -> None:
         )
 
 
+def append_pending_clip(job_id: str, clip: dict[str, Any]) -> int:
+    """Append ONE pending clip (empty ``video_url`` + metadata) to the job's clips array and
+    return its NEW 1-based clip index (on-demand extraction path). Routed like
+    ``set_clips_pending``/``set_clip_ready`` (cloud vs local).
+
+    The returned index addresses the appended clip the SAME way ``set_clip_ready`` does
+    (``idx = clip_index - 1``), so the subsequent per-clip render write lands on it. Cloud:
+    best-effort read-modify-write of the ``clips`` jsonb (no atomic append RPC). Local: read-
+    modify-write of ``clips_json``. Raises ``JobError`` if there is no job row (rule #8 —
+    not a silent no-op: the caller must have created the job before extracting from it).
+    """
+    if cs.cloud_enabled():
+        return cs.append_pending_clip(job_id, clip)
+    with _conn() as c:
+        row = c.execute("SELECT clips_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise JobError("persist", f"append_pending_clip: no job row {job_id}")
+        clips = json.loads(row["clips_json"]) if row["clips_json"] else []
+        clips.append(clip)
+        c.execute(
+            "UPDATE jobs SET clips_json=?, updated_at=? WHERE id=?",
+            (json.dumps(clips, ensure_ascii=False), time.time(), job_id),
+        )
+    return len(clips)
+
+
 def set_failed(job_id: str, error: str) -> None:
     if cs.cloud_enabled():
         cs.set_failed(job_id, error)

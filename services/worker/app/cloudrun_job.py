@@ -31,6 +31,7 @@ def main() -> int:
         fanout_render_clip_job,
         generate_video_map_job,
         render_clip_edit_job,
+        render_extracted_clip_job,
         run_pipeline_job,
         run_preview_job,
         run_upload_job_from_r2,
@@ -48,6 +49,7 @@ def main() -> int:
         "agent_edit_job": agent_edit_job,
         "generate_video_map_job": generate_video_map_job,
         "fanout_render_clip": fanout_render_clip_job,
+        "render_extracted_clip_job": render_extracted_clip_job,
     }
     fn = handlers.get(kind)
     if fn is None:

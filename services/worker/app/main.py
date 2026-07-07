@@ -84,6 +84,7 @@ from app.run import DATA_ROOT
 from app.tasks import (
     render_clip_edit_job,
     render_edit_to_file,
+    render_extracted_clip_job,
     run_pipeline_job,
     run_upload_job,
     run_upload_job_from_r2,
@@ -979,6 +980,165 @@ def get_preview_moments(
     _require_owned_job(job_id, authorization, x_user_id)
     moments = db.get_job_artifact(job_id, "preview_moments")
     return {"moments": moments or []}
+
+
+# ──────────────────── On-demand clip extraction (POST /jobs/{id}/clips) ────────────────────
+# Вырезать НОВЫЙ клип из произвольного source-диапазона (un-clipped момент AI-карты ИЛИ drag-
+# выделение на таймлайне) с ТЕМ ЖЕ качеством границ, что у авто-клипа. Гейт денег СЕРВЕРНЫЙ
+# (обойти с фронта нельзя): извлекать могут ТОЛЬКО pro/studio (403 иначе); в рамках уже оплаченного
+# «до 30 клипов на видео» бесплатно, за cap → per-clip пейволл (402). Persist + рендер идут ровно
+# тем же путём, что авто-клипы (append_pending_clip → render_one_clip → set_clip_ready).
+
+
+class ExtractClipBody(BaseModel):
+    """Тело ``POST /jobs/{job_id}/clips``: произвольный source-диапазон [start, end] (секунды)."""
+
+    start: float
+    end: float
+
+
+def _extract_seed_from_map(job_id: str, start: float, end: float) -> dict[str, Any]:
+    """Засеять hook/why_works/reason из БЛИЖАЙШЕГО перекрывающего момента AI-карты (best-effort).
+
+    Нет карты / нет пересечения / любой сбой → пустые дефолты (извлечённый клип всё равно чистый —
+    поля объяснимости опциональны). Момент с максимальным перекрытием [start,end] выигрывает."""
+    from app.editor.video_map import load_video_map
+    from app.models import VideoMoment
+
+    try:
+        vm = load_video_map(job_id)
+    except Exception as e:  # noqa: BLE001 — карта — опциональное обогащение, не роняем извлечение
+        print(f"[extract_clip] WARN video map load failed job={job_id}: {e}")
+        return {}
+    if vm is None or vm.status != "done":
+        return {}
+    best: VideoMoment | None = None
+    best_overlap = 0.0
+    for ch in vm.chapters:
+        for mo in ch.moments:
+            overlap = min(end, mo.end) - max(start, mo.start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = mo
+    if best is None or best_overlap <= 0.0:
+        return {}
+    return {
+        "reason": best.why or best.label,
+        "hook": best.label or None,
+        "why_works": best.why or None,
+    }
+
+
+@app.post("/jobs/{job_id}/clips")
+def extract_clip(
+    job_id: str,
+    body: ExtractClipBody,
+    bg: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> ClipOut:
+    """Вырезать НОВЫЙ клип из source-диапазона [start,end] и запустить его рендер в фоне.
+
+    Гейты (СЕРВЕРНЫЕ, обойти с клиента нельзя): владелец джоба (401/403/404) → план владельца
+    ``pro``/``studio`` иначе 403 ``{"error":"upgrade_required"}`` → источник в 60-дневном окне
+    иначе 409 ``{"error":"source_expired"}`` → идемпотентность (тот же диапазон → тот же клип, 200)
+    → per-clip пейволл за cap: 402 ``{"error":"payment_required","price_usd":…}``. На успех: клип
+    добавляется pending (пустой ``video_url``), рендер спавнится в фоне (публикует ``video_url``
+    через ``set_clip_ready`` РОВНО как авто-клип), 200 с pending ``ClipOut`` (фронт стримит его как
+    обычный ещё-не-готовый клип). Границы кроятся с тем же качеством, что авто-клип
+    (range_to_segment переиспользует selection-path снап).
+    """
+    from app import artifacts
+    from app.editor.extract_clip import range_to_segment, segment_key
+    from app.pipeline.preview_moments import extract_loudness
+    from app.run import build_clip_out
+
+    # 1. Ownership-гейт (401/403/404). В dev (auth off) строка пустая → дозагружаем сырую строку
+    #    (нужен реальный owner для резолва плана + счётчик клипов), как в cancel_job.
+    row, _requester_id = _require_owned_job(job_id, authorization, x_user_id)
+    if not row:
+        fetched = db.get_job_row(job_id)
+        if fetched is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        row = fetched
+
+    # 2. Гейт плана владельца (money-path, серверный): извлекать могут ТОЛЬКО pro/studio. План
+    #    резолвится из profiles.plan владельца (jobs.user_id) — как resolve_clip_render_policy.
+    #    Нет владельца (локальный dev / ничья джоба) → как local_dev: извлечение разрешено (pro).
+    owner_id = row.get("user_id") or None
+    plan = db.get_user_plan(owner_id) if owner_id else "pro"
+    if not billing.can_extract_clip(plan):
+        raise HTTPException(status_code=403, detail={"error": "upgrade_required"})
+
+    # 4. Транскрипт (слова + длина источника) + гейт доступности источника (60-дневное окно).
+    try:
+        transcript = artifacts.load_transcript(job_id)
+    except JobError as e:
+        raise HTTPException(status_code=404, detail="transcript not found") from e
+    words = transcript.words
+    source_dur = transcript.duration
+    try:
+        src_path = artifacts.ensure_source(job_id)  # источника нет → окно истекло
+    except JobError as e:
+        raise HTTPException(status_code=409, detail={"error": "source_expired"}) from e
+    # Кривую громкости пересчитываем best-effort (уточняет снап краёв к вдоху/обрезку филлеров).
+    # Сбой ТОЛЬКО пересчёта loudness → None (клип всё равно чисто снапнут по словам); НЕ глотаем
+    # посторонние ошибки — ловим узко вокруг extract_loudness.
+    try:
+        loudness = extract_loudness(str(src_path)) or None
+    except Exception as e:  # noqa: BLE001 — только пересчёт loudness опционален (правило №8: лог)
+        print(f"[extract_clip] WARN loudness recompute failed job={job_id}: {e}")
+        loudness = None
+
+    # 5. Чистый Segment (тот же снап, что selection-path) + посев объяснимости из момента карты.
+    seed = _extract_seed_from_map(job_id, body.start, body.end)
+    seg = range_to_segment(
+        body.start,
+        body.end,
+        words,
+        loudness=loudness,
+        source_dur=source_dur,
+        reason=seed.get("reason", ""),
+        hook=seed.get("hook"),
+        why_works=seed.get("why_works"),
+    )
+
+    # 6. Идемпотентность: тот же (округлённый) диапазон уже извлечён → отдаём тот клип, не рендерим.
+    key = segment_key(seg.start, seg.end)
+    current_clips = list((db.get_job(job_id) or {}).get("clips") or [])
+    for c in current_clips:
+        if segment_key(float(c.get("start", -1.0)), float(c.get("end", -1.0))) == key:
+            return ClipOut.model_validate(c)
+
+    # 7. Per-clip пейволл за cap (в рамках оплаченного «до 30 клипов» — бесплатно; ≥ cap → плата).
+    settings = get_settings()
+    if billing.extract_requires_payment(len(current_clips), cap=settings.extract_free_cap):
+        raise HTTPException(
+            status_code=402,
+            detail={"error": "payment_required", "price_usd": settings.extract_clip_price_usd},
+        )
+
+    # 8. Segment → ClipOut (id = следующий clip_NN), pending (video_url="") → append в строку джоба.
+    next_index = len(current_clips) + 1
+    clip_out = build_clip_out(f"clip_{next_index:02d}", seg, words, "", loudness=loudness)
+    idx = db.append_pending_clip(job_id, clip_out.model_dump())
+
+    # 9. Фоновый рендер клипа тем же путём, что пайплайн (reframe→render→upload→set_clip_ready).
+    #    На Cloud Run/Modal — spawn отдельного контейнера; локально/dev — bg.add_task. Не блокируем
+    #    ответ. Сбой спавна НЕ роняет уже добавленный клип (остаётся pending), но логируется (№8).
+    meta = artifacts.load_meta(job_id)
+    seg_dump = seg.model_dump()
+    meta_dump = meta.model_dump()
+    if dispatch.spawn_enabled():
+        try:
+            dispatch.spawn("render_extracted_clip_job", job_id, idx, seg_dump, meta_dump, owner_id)
+        except Exception as e:  # noqa: BLE001 — сбой диспатча видим (правило №8), клип уже pending
+            print(f"[extract_clip] WARN render dispatch failed job={job_id} idx={idx}: {e}")
+    else:
+        bg.add_task(render_extracted_clip_job, job_id, idx, seg_dump, meta_dump, owner_id)
+
+    # 10. Pending ClipOut (video_url="") → фронт стримит его как обычный ещё-не-готовый клип.
+    return clip_out
 
 
 # ──────────────────────────── Editor endpoints ────────────────────────────
