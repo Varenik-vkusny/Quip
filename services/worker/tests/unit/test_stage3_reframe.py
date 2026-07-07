@@ -1630,6 +1630,21 @@ class TestMergeShortCutaway:
         assert [round(r.t0, 2) for r in merged] == [27.0, 40.0, 40.9]  # перебивка выжила
         assert round(merged[1].points[0].cx, 2) == 0.64  # свой кроп, не Карди
 
+    def test_keeps_mid_distance_cutaway(self) -> None:
+        from app.pipeline.stage3_reframe import merge_short_regions
+
+        # Cardi B clip_06: короткая перебивка интервьюера cx 0.59 vs Карди 0.44, Δ=0.15. При старом
+        # пороге 0.5*crop(0.158) глоталась → пол-лица срезано. При 0.33*crop(0.104): 0.15 > 0.104 →
+        # держит СВОЙ кроп 0.59 (лицо интервьюера целиком).
+        regions = [
+            self._fill(0.0, 13.0, 0.44),
+            self._fill(13.0, 14.1, 0.59),
+            self._fill(14.1, 20.0, 0.44),
+        ]
+        merged = merge_short_regions(regions, 1.5, crop_w_frac=0.316)
+        assert [round(r.t0, 2) for r in merged] == [0.0, 13.0, 14.1]  # перебивка выжила
+        assert round(merged[1].points[0].cx, 2) == 0.59
+
     def test_swallows_short_near_cutaway(self) -> None:
         from app.pipeline.stage3_reframe import merge_short_regions
 

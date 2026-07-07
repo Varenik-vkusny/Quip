@@ -322,6 +322,12 @@ def classify_frame(all_faces: list[tuple[float, float]], crop_w_frac: float) -> 
 # обрезок (напр. хвост шота на границе клипа) как отдельный wide-регион = блик/микро-зум-аут; ~5
 # кадров чужого кропа незаметны, а лишний fit-флеш — заметен. 0.4с = как reframe_min_scene_sec.
 _MIN_CUTAWAY_SEC = 0.4
+# Проглатывание короткого fill в предыдущий fill промахивается, если центры лиц дальше этой доли
+# ширины кропа. НЕ пол-кропа (0.5): лицо reg имеет свою ширину (~0.5 кропа), поэтому уже при |Δcx| ≈
+# треть кропа его КРАЙ выходит за окно prev = срезано (баг Cardi B clip_06: интервьюер 0.59 vs Карди
+# 0.44, Δ=0.15 — при 0.5 глоталось и резало пол-лица). 0.33 → разные люди держат СВОЙ кроп, а мелкий
+# джиттер того же лица (Δ < ~0.1) глотается (лишний регион не плодим).
+_CUTAWAY_MISFRAME_FRAC = 0.33
 
 
 def _crop_would_misframe(prev: TrackRegion, reg: TrackRegion, crop_w_frac: float | None) -> bool:
@@ -332,8 +338,8 @@ def _crop_would_misframe(prev: TrackRegion, reg: TrackRegion, crop_w_frac: float
       • reg fit (wide/молчащий слушатель → silence-гейт): тайт-кроп prev держится на позиции лица
         prev поверх ШИРОКОГО контента reg → лицо/субъект reg вне окна → плечо (баг Cardi B clip_02:
         0.9с молчащего интервьюера cx 0.59, gate→fit, проглочен в кроп Карди 0.36).
-      • reg fill, но центр дальше ПОЛОВИНЫ ширины кропа (другой человек): |Δcx| > crop/2 → центр
-        лица reg ВНЕ окна prev → плечо (баг Cardi B clip_04: интервьюер cx 0.64 vs Карди 0.42).
+      • reg fill, но центр дальше _CUTAWAY_MISFRAME_FRAC ширины кропа (другой человек): край лица
+        reg выходит за окно prev → срезано (баг Cardi B clip_04 0.64 vs 0.42; clip_06 0.59 vs 0.44).
     prev fit → полный кадр, кропом не промахнёшься → глотаем как прежде (анти-строб цел).
     crop_w_frac None → выключено (всегда глотаем). Близкий fill (тот же человек) → глотаем (не наш).
     """
@@ -348,7 +354,7 @@ def _crop_would_misframe(prev: TrackRegion, reg: TrackRegion, crop_w_frac: float
         return True  # тайт-кроп поверх другого (широкого) шота → субъект вне окна
     if not reg.points or reg.points[0].cx is None:
         return False
-    return abs(pcx - reg.points[0].cx) > crop_w_frac * 0.5
+    return abs(pcx - reg.points[0].cx) > crop_w_frac * _CUTAWAY_MISFRAME_FRAC
 
 
 def merge_short_regions(
