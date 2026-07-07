@@ -162,6 +162,23 @@ class Settings(BaseSettings):
     # Cloud Run) НЕ несёт subject_cx через границу (clip_spawn_args не расширяли) — это осознанное
     # ограничение прототипа. Kill-switch REFRAME_VISION_SUBJECT=false → байт-в-байт прежний reframe.
     reframe_vision_subject: bool = False
+    # Layer A (multimodal clip quality, exploratory): vision-driven per-shot fill/fit + субъект.
+    # Gemini сегментирует окно на камера-шоты и говорит per-shot, кропить ли ТАЙТ (fill) или
+    # показать ШИРОКО (fit) + центр субъекта. В reframe (plan_regions) уверенный vision-шот
+    # СЕМАНТИЧЕСКИ решает режим per-shot, ПЕРЕОПРЕДЕЛЯЯ silence/coverage-эвристики (баг Cardi B:
+    # молчащий close-up слушателя ошибочно уходил в fit). НЕ трогает scene-cut границы / fill-vs-
+    # fit сетку по кадрам / Δ=0 — только выбор РЕЖИМА + субъекта. Дефолт OFF (прототип, НЕ
+    # отгружено). Требует VISION_REVIEW_ENABLED (shots берутся из vision-ревью). Проводится в
+    # reframe ТОЛЬКО на in-process рендер-пути (локально/dev + фолбэк фан-аута); контейнерный
+    # фан-аут НЕ несёт vision_shots через границу (clip_spawn_args не расширяли) — осознанное
+    # ограничение прототипа. Kill-switch REFRAME_VISION_LAYOUT=false → байт-в-байт прежний reframe.
+    reframe_vision_layout: bool = False
+    # Keep distant cutaways: короткую перебивку-реакцию (реальный отдельный шот < min_hold, напр.
+    # 0.9с интервьюера) НЕ проглатываем в предыдущий fill, если его кроп промахнётся мимо нового
+    # субъекта (|Δcx| > пол-кропа) → иначе на экране плечо чужого человека (баг Cardi B clip_04
+    # @40.5с: шот cx 0.64 держал кроп Карди 0.42). Δ=0 цел (границы на реальных контент-склейках).
+    # Дефолт ON (баг-фикс, не эксперимент). Off = прежнее анти-строб поведение (всегда глотаем).
+    reframe_keep_cutaways: bool = True
 
     @field_validator("vision_review_model", mode="after")
     @classmethod

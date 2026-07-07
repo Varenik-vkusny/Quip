@@ -824,6 +824,197 @@ class TestFollowerSmoothing:
         assert pts[-1].cx > 0.30  # и не перелетел лицо
 
 
+class TestEaseDeadZoneCamera:
+    """_ease_dead_zone_camera: 2nd-order (velocity-damped) dead-zone follower (Layer B).
+
+    Slow-in/slow-out: the camera accelerates smoothly INTO a pan (no first-frame lurch of the
+    old exponential ease) and holds on a still face. Grid-safe (cx values only)."""
+
+    def test_still_face_holds(self) -> None:
+        from app.pipeline.stage3_reframe import _ease_dead_zone_camera
+
+        cams = _ease_dead_zone_camera([0.45] * 60, None)
+        assert all(abs(c - 0.45) < 1e-9 for c in cams)
+
+    def test_empty_is_empty(self) -> None:
+        from app.pipeline.stage3_reframe import _ease_dead_zone_camera
+
+        assert _ease_dead_zone_camera([], None) == []
+
+    def test_velocity_ramps_no_first_frame_lurch(self) -> None:
+        # step target well outside the dead-zone: 2nd-order ramps velocity, so the FIRST-frame
+        # move is far smaller than the exponential _FOLLOW_EASE*offset would give, and the
+        # per-frame velocity keeps GROWING for several frames (accelerating into the pan).
+        from app.pipeline.stage3_reframe import (
+            _FOLLOW_ACCEL,
+            _FOLLOW_EASE,
+            _ease_dead_zone_camera,
+        )
+
+        sm = [0.5] + [0.8] * 40  # instant sustained offset of 0.30
+        cams = _ease_dead_zone_camera(sm, None)
+        v1 = cams[1] - cams[0]
+        exp_first = _FOLLOW_EASE * (0.8 - 0.5)  # what the old exponential moved on frame 1
+        assert 0.0 < v1 < exp_first * _FOLLOW_ACCEL * 2  # gradual, ~accel-scaled, not a lurch
+        # velocity accelerates (slow-in): early per-frame deltas strictly increase
+        deltas = [cams[i + 1] - cams[i] for i in range(1, 6)]
+        assert all(deltas[k + 1] > deltas[k] for k in range(len(deltas) - 1))
+
+    def test_reaches_toward_move_and_no_overshoot(self) -> None:
+        from app.pipeline.stage3_reframe import _FOLLOW_DEADZONE, _ease_dead_zone_camera
+
+        sm = [0.5] + [0.8] * 200
+        cams = _ease_dead_zone_camera(sm, None)
+        # eventually catches up to within the dead-zone of the target, never overshoots past it
+        assert 0.8 - _FOLLOW_DEADZONE - 0.02 < cams[-1] <= 0.8 + 1e-9
+
+    def test_init_cx_seeds_start(self) -> None:
+        from app.pipeline.stage3_reframe import _ease_dead_zone_camera
+
+        cams = _ease_dead_zone_camera([0.45] * 30, init_cx=0.60)
+        assert cams[0] == 0.60
+
+
+class TestVisionShotForSceneShot:
+    """vision_shot_for_scene_shot: pure scene-shot↔vision-shot mapping (Layer A). Boundaries and
+    the fps grid are NOT read for cuts — only midpoint→mode lookup."""
+
+    def _vs(self, start: float, mode: str, cx: float | None = None):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage2b_vision_review import VisionShot
+
+        return VisionShot(start_sec=start, mode=mode, subject_cx=cx)
+
+    def test_empty_is_none(self) -> None:
+        from app.pipeline.stage3_reframe import vision_shot_for_scene_shot
+
+        assert vision_shot_for_scene_shot([], 0, 30, 30.0) is None
+
+    def test_midpoint_selects_covering_shot(self) -> None:
+        from app.pipeline.stage3_reframe import vision_shot_for_scene_shot
+
+        vshots = [self._vs(0.0, "fill", 0.3), self._vs(2.0, "fit"), self._vs(5.0, "fill", 0.6)]
+        # scene shot [90,120)@30fps → midpoint 3.5s → falls in [2.0,5.0) → the fit shot
+        got = vision_shot_for_scene_shot(vshots, 90, 120, 30.0)
+        assert got is not None and got.mode == "fit"
+
+    def test_last_shot_covers_to_infinity(self) -> None:
+        from app.pipeline.stage3_reframe import vision_shot_for_scene_shot
+
+        vshots = [self._vs(0.0, "fill", 0.3), self._vs(5.0, "fill", 0.6)]
+        got = vision_shot_for_scene_shot(vshots, 300, 360, 30.0)  # midpoint 11s → last shot
+        assert got is not None and got.subject_cx == 0.6
+
+    def test_midpoint_before_first_uses_nearest_first(self) -> None:
+        from app.pipeline.stage3_reframe import vision_shot_for_scene_shot
+
+        vshots = [self._vs(1.0, "fit"), self._vs(4.0, "fill", 0.5)]
+        got = vision_shot_for_scene_shot(vshots, 0, 15, 30.0)  # midpoint 0.25s < 1.0 → first
+        assert got is not None and got.mode == "fit"
+
+
+class TestPlanRegionsVisionLayout:
+    """plan_regions vision_shots override (Layer A): vision decides per-shot fill/fit + subject,
+    overriding the silence/coverage heuristic gates. Boundaries/grid untouched. Default None →
+    byte-identical (covered by every other TestPlanRegions* case running with vision_shots=None)."""
+
+    def _track(self, f0: int, f1: int, cx: float, width: float, speak: float):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        n = f1 - f0
+        return SpeakerTrack(f0=f0, f1=f1, cx=tuple([cx] * n), width=width, speak=speak)
+
+    def _vs(self, start: float, mode: str, cx: float | None = None):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage2b_vision_review import VisionShot
+
+        return VisionShot(start_sec=start, mode=mode, subject_cx=cx)
+
+    def test_vision_fill_forces_fill_over_silence_gate(self) -> None:
+        # single face, confidently SILENT (speak −1.5 < _SILENCE_WIDE_MAX) → heuristic would fit;
+        # vision says fill → FORCE fill (the Cardi B listener-closeup bug). This is the crux.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 50, 0.5, 0.16, -1.5)]
+        heuristic = plan_regions([(0, 50)], tracks, fps=25.0, crop_w_frac=0.3167)
+        assert heuristic[0].mode == "fit"  # confirm the heuristic would widen it
+        vis = plan_regions(
+            [(0, 50)], tracks, fps=25.0, crop_w_frac=0.3167,
+            vision_shots=[self._vs(0.0, "fill", 0.5)],
+        )  # fmt: skip
+        assert vis[0].mode == "fill"
+
+    def test_vision_fill_forces_fill_over_low_coverage_gate(self) -> None:
+        # face covers only ~10% of the shot (< _FILL_MIN_COVERAGE) → heuristic → fit; vision fill
+        # bypasses the coverage gate and crops on the (only) active track.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 10, 0.4, 0.16, 0.9)]  # 10 of 100 frames
+        heuristic = plan_regions([(0, 100)], tracks, fps=30.0, crop_w_frac=0.32)
+        assert heuristic[0].mode == "fit"
+        vis = plan_regions(
+            [(0, 100)], tracks, fps=30.0, crop_w_frac=0.32,
+            vision_shots=[self._vs(0.0, "fill", 0.4)],
+        )  # fmt: skip
+        assert vis[0].mode == "fill"
+
+    def test_vision_fit_forces_fit_over_fill(self) -> None:
+        # single clear speaker → heuristic fill; vision says fit (e.g. a wide establishing beat)
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 30, 0.5, 0.16, 0.9)]
+        heuristic = plan_regions([(0, 30)], tracks, fps=30.0, crop_w_frac=0.32)
+        assert heuristic[0].mode == "fill"
+        vis = plan_regions(
+            [(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, vision_shots=[self._vs(0.0, "fit")]
+        )
+        assert vis[0].mode == "fit"
+
+    def test_vision_subject_cx_picks_track(self) -> None:
+        # two clustered tracks; loud one at 0.2, quiet at 0.8; vision subject_cx 0.82 → pick quiet
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 30, 0.2, 0.16, 0.9), self._track(0, 30, 0.8, 0.16, 0.1)]
+        vis = plan_regions(
+            [(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, smoothing=1.0,
+            vision_shots=[self._vs(0.0, "fill", 0.82)],
+        )  # fmt: skip
+        assert vis[0].mode == "fill"
+        assert abs(vis[0].points[0].cx - 0.8) < 1e-9  # cropped on the vision-chosen subject
+
+    def test_no_vision_shot_falls_through_to_heuristics(self) -> None:
+        # vision_shots given but none maps (all before this shot's midpoint window is fine — here
+        # empty list path is None). Non-empty but silent-gate face with NO vision fill → heuristic.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 50, 0.5, 0.16, -1.5)]
+        # vision shot exists only far in the future; midpoint maps to nearest-first = that shot.
+        # Use a fit vision shot so behaviour is deterministic + explicit.
+        vis = plan_regions(
+            [(0, 50)], tracks, fps=25.0, crop_w_frac=0.3167, vision_shots=[self._vs(0.0, "fit")]
+        )
+        assert vis[0].mode == "fit"
+
+    def test_vision_fill_no_face_track_falls_through_to_fit(self) -> None:
+        # vision says fill but there is NO face track at all → cannot crop to a subject → explicit
+        # fallthrough to heuristics (which yield fit). Never a silent 0-region.
+        from app.pipeline.stage3_reframe import plan_regions
+
+        vis = plan_regions(
+            [(0, 30)], [], fps=30.0, crop_w_frac=0.32, vision_shots=[self._vs(0.0, "fill", 0.5)]
+        )
+        assert vis[0].mode == "fit"
+
+    def test_vision_ignored_under_explicit_mode_setting(self) -> None:
+        # a global mode_setting override wins over vision (user forced it)
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0, 30, 0.5, 0.16, 0.9)]
+        vis = plan_regions(
+            [(0, 30)], tracks, fps=30.0, crop_w_frac=0.32, mode_setting="fit",
+            vision_shots=[self._vs(0.0, "fill", 0.5)],
+        )  # fmt: skip
+        assert vis[0].mode == "fit"
+
+
 class TestComputeLockedCx:
     """compute_locked_cx: ОДИН статичный центр на шот, гарантирующий ВСЁ лицо в 9:16-кропе.
 
@@ -1398,3 +1589,95 @@ class TestResampleTrack:
         t = SpeakerTrack(f0=0, f1=25, cx=cx, width=0.1, speak=0.5)
         r = resample_track(t, 25.0, 50.0)
         assert r.cx[0] < r.cx[len(r.cx) // 2] < r.cx[-1]
+
+
+class TestMergeShortCutaway:
+    """merge_short_regions + crop_w_frac: короткую перебивку-реакцию (реальный отдельный шот) НЕ
+    проглатываем в предыдущий fill, если удержание его кропа промахнётся мимо нового субъекта →
+    иначе плечо (Cardi B clip_04 @40.5с: шот 40.0–40.9с cx 0.64 держал кроп Карди 0.42)."""
+
+    def _fill(self, t0: float, t1: float, cx: float):  # type: ignore[no-untyped-def]
+        from app.pipeline.stage3_reframe import TrackPoint, TrackRegion
+
+        return TrackRegion(
+            t0=t0, t1=t1, mode="fill", points=(TrackPoint(t=t0, mode="fill", cx=cx),), points_b=()
+        )
+
+    def test_keeps_short_distant_cutaway(self) -> None:
+        from app.pipeline.stage3_reframe import merge_short_regions
+
+        # Карди 0.42 → перебивка интервьюера 0.9с cx 0.64 → Карди 0.43. |0.64-0.42|=0.22 > пол-кропа
+        # (0.316*0.5=0.158) → перебивку НЕ глотаем (иначе плечо), она держит СВОЙ кроп 0.64.
+        regions = [
+            self._fill(27.0, 40.0, 0.42),
+            self._fill(40.0, 40.9, 0.64),
+            self._fill(40.9, 48.6, 0.43),
+        ]
+        merged = merge_short_regions(regions, 1.5, crop_w_frac=0.316)
+        assert [round(r.t0, 2) for r in merged] == [27.0, 40.0, 40.9]  # перебивка выжила
+        assert round(merged[1].points[0].cx, 2) == 0.64  # свой кроп, не Карди
+
+    def test_swallows_short_near_cutaway(self) -> None:
+        from app.pipeline.stage3_reframe import merge_short_regions
+
+        # Тот же короткий шот, но субъект БЛИЗКО (0.42→0.47, Δ=0.05 < 0.158): держащийся кроп его
+        # вмещает → глотаем как прежде (анти-строб, лишний шот не плодим).
+        regions = [
+            self._fill(27.0, 40.0, 0.42),
+            self._fill(40.0, 40.9, 0.47),
+            self._fill(40.9, 48.6, 0.43),
+        ]
+        merged = merge_short_regions(regions, 1.5, crop_w_frac=0.316)
+        assert [round(r.t0, 2) for r in merged] == [27.0, 40.9]  # средний свёрнут
+
+    def test_no_crop_w_frac_swallows_all_short(self) -> None:
+        from app.pipeline.stage3_reframe import merge_short_regions
+
+        # crop_w_frac=None (kill-switch off) → прежнее поведение: любой короткий шот проглочен.
+        regions = [
+            self._fill(27.0, 40.0, 0.42),
+            self._fill(40.0, 40.9, 0.64),
+            self._fill(40.9, 48.6, 0.43),
+        ]
+        merged = merge_short_regions(regions, 1.5)
+        assert [round(r.t0, 2) for r in merged] == [27.0, 40.9]  # средний свёрнут (как раньше)
+
+    def test_keeps_short_fit_cutaway_after_fill(self) -> None:
+        from app.pipeline.stage3_reframe import TrackRegion, merge_short_regions
+
+        # Молчащий интервьюер → silence-гейт делает перебивку FIT. Держать тайт-кроп Карди (fill)
+        # поверх широкого fit-контента = плечо (баг Cardi B clip_02) → короткий fit после fill НЕ
+        # глотаем, он показывается wide (свой fit). Это НЕ трогает fit↔fit анти-строб.
+        regions = [
+            self._fill(0.0, 13.0, 0.42),
+            TrackRegion(t0=13.0, t1=13.5, mode="fit", points=(), points_b=()),
+            self._fill(13.5, 20.0, 0.43),
+        ]
+        merged = merge_short_regions(regions, 1.5, crop_w_frac=0.316)
+        assert [round(r.t0, 2) for r in merged] == [0.0, 13.0, 13.5]  # fit-перебивка выжила
+        assert merged[1].mode == "fit"
+
+    def test_subfloor_cutaway_still_swallowed(self) -> None:
+        from app.pipeline.stage3_reframe import merge_short_regions
+
+        # Ультра-короткий обрезок (0.16с < 0.4с порога) на границе клипа — даже далёкий fill глотаем
+        # (лишний wide-блик заметнее ~5 кадров чужого кропа).
+        regions = [
+            self._fill(0.0, 13.0, 0.42),
+            self._fill(13.0, 13.16, 0.64),
+        ]
+        merged = merge_short_regions(regions, 1.5, crop_w_frac=0.316)
+        assert [round(r.t0, 2) for r in merged] == [0.0]  # обрезок свёрнут
+
+    def test_short_fit_after_fit_still_swallowed(self) -> None:
+        from app.pipeline.stage3_reframe import TrackRegion, merge_short_regions
+
+        # prev = fit (полный кадр, кропом не промахнёшься) → короткий fit глотается как прежде
+        # (анти-строб fit↔fit не трогаем — плеча тут быть не может).
+        regions = [
+            TrackRegion(t0=0.0, t1=13.0, mode="fit", points=(), points_b=()),
+            TrackRegion(t0=13.0, t1=13.5, mode="fit", points=(), points_b=()),
+            self._fill(13.5, 20.0, 0.43),
+        ]
+        merged = merge_short_regions(regions, 1.5, crop_w_frac=0.316)
+        assert [round(r.t0, 2) for r in merged] == [0.0, 13.5]  # средний fit свёрнут в fit

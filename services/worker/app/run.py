@@ -17,7 +17,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,8 @@ from app.pipeline.stage1_transcribe import (
 )
 from app.pipeline.stage2_select import select_segments
 from app.pipeline.stage2b_vision_review import (
-    apply_vision_reviews_indexed,
+    VisionShot,
+    apply_vision_reviews_full,
     review_segments_with_video,
 )
 from app.pipeline.stage3_reframe import reframe_segment
@@ -146,11 +147,14 @@ def render_one_clip(
     meta: SourceMeta,
     user_id: str | None = None,
     subject_cx: float | None = None,
+    vision_shots: Sequence[VisionShot] | None = None,
 ) -> dict[str, Any]:
     """Stages 3–5 для ОДНОГО клипа: reframe → render → upload. Возвращает picklable result.
 
     subject_cx (B2, exploratory, флаг REFRAME_VISION_SUBJECT): vision-подсказка центра субъекта
     [0,1] → тай-брейкер выбора face-track в reframe_segment. None (дефолт) → прежнее поведение.
+    vision_shots (Layer A, exploratory, флаг REFRAME_VISION_LAYOUT): per-shot fill/fit + субъект
+    от Gemini → семантический override режима в reframe_segment. None (дефолт) → прежнее поведение.
 
     Общее ядро (DRY): локальный цикл И Modal-фан-аут зовут ЭТУ функцию. Настройки берём из
     ``get_settings()`` ВНУТРИ (на фан-аут-контейнере свой процесс/env). ``source_name`` —
@@ -177,6 +181,8 @@ def render_one_clip(
         split_enabled=s.reframe_split_enabled,
         wide_speak_min=s.reframe_wide_speak_min,
         subject_cx=subject_cx if s.reframe_vision_subject else None,
+        vision_shots=vision_shots if s.reframe_vision_layout else None,
+        keep_distant_cutaways=s.reframe_keep_cutaways,
     )  # fmt: skip
     reframe_lat = round(time.perf_counter() - t0, 2)
     # Домен 1: персистим РЕАЛЬНЫЕ границы шотов (PySceneDetect) дефолтного интервала клипа, чтобы
@@ -246,6 +252,7 @@ def render_one_clip_contained(
     meta: SourceMeta,
     user_id: str | None = None,
     subject_cx: float | None = None,
+    vision_shots: Sequence[VisionShot] | None = None,
 ) -> dict[str, Any]:
     """render_one_clip с КОНТЕЙНИРОВАНИЕМ per-clip провала (локальный цикл).
 
@@ -253,10 +260,12 @@ def render_one_clip_contained(
     (не молча, правило №8) и возвращаем ``failed_clip_result`` (пустой video_url). Остальные
     клипы рендерятся, джоб доходит до done. Так зеркалит контейнирование Modal-фан-аута в
     worker.reframe_render_clip — единый контракт «провал клипа = пустой url, не падение джоба».
-    ``subject_cx`` (B2, exploratory) прокидывается в render_one_clip → reframe (тай-брейкер трека).
+    ``subject_cx`` (B2) / ``vision_shots`` (Layer A) прокидываются в render_one_clip → reframe.
     """
     try:
-        return render_one_clip(out, source_name, clip_index, seg, meta, user_id, subject_cx)
+        return render_one_clip(
+            out, source_name, clip_index, seg, meta, user_id, subject_cx, vision_shots
+        )
     except JobError as e:
         print(f"  clip_{clip_index:02d}: RENDER FAILED (contained, clip stays empty): {e}")
         return failed_clip_result(clip_index, str(e))
@@ -278,6 +287,16 @@ def _subject_cx_for(subject_cxs: list[float | None] | None, clip_index: int) -> 
     return subject_cxs[i] if 0 <= i < len(subject_cxs) else None
 
 
+def _vision_shots_for(
+    vision_shots_list: list[tuple[VisionShot, ...]] | None, clip_index: int
+) -> tuple[VisionShot, ...] | None:
+    """PURE. per-clip vision shots (Layer A) для 1-based clip_index; нет данных → None."""
+    if not vision_shots_list:
+        return None
+    i = clip_index - 1
+    return vision_shots_list[i] if 0 <= i < len(vision_shots_list) else None
+
+
 def _render_clips_sequential(
     out: Path,
     source_name: str,
@@ -285,11 +304,19 @@ def _render_clips_sequential(
     meta: SourceMeta,
     user_id: str | None,
     subject_cxs: list[float | None] | None = None,
+    vision_shots_list: list[tuple[VisionShot, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     return [
         render_one_clip_contained(
-            out, source_name, i, seg, meta, user_id, _subject_cx_for(subject_cxs, i)
-        )
+            out,
+            source_name,
+            i,
+            seg,
+            meta,
+            user_id,
+            _subject_cx_for(subject_cxs, i),
+            _vision_shots_for(vision_shots_list, i),
+        )  # fmt: skip
         for i, seg in enumerate(segments, start=1)
     ]
 
@@ -302,6 +329,7 @@ def _render_clips_parallel(
     user_id: str | None,
     workers: int,
     subject_cxs: list[float | None] | None = None,
+    vision_shots_list: list[tuple[VisionShot, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     """Параллельный per-clip рендер в ПОТОКАХ (движок B). Тяжёлое — нативный cv2/MediaPipe и
     ffmpeg-СУБПРОЦЕСС (stage5) — отпускает GIL, поэтому потоки дают реальный параллелизм по vCPU
@@ -313,7 +341,16 @@ def _render_clips_parallel(
     import concurrent.futures as cf
 
     args = [
-        (out, source_name, i, seg, meta, user_id, _subject_cx_for(subject_cxs, i))
+        (
+            out,
+            source_name,
+            i,
+            seg,
+            meta,
+            user_id,
+            _subject_cx_for(subject_cxs, i),
+            _vision_shots_for(vision_shots_list, i),
+        )  # fmt: skip
         for i, seg in enumerate(segments, start=1)
     ]
     with cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="render") as ex:
@@ -327,24 +364,30 @@ def _render_clips_in_process(
     meta: SourceMeta,
     user_id: str | None,
     subject_cxs: list[float | None] | None = None,
+    vision_shots_list: list[tuple[VisionShot, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     """Рендер клипов В ПРОЦЕССЕ job-контейнера (нет контейнерного фан-аута): параллелим ПОТОКАМИ на
     vCPU (``RENDER_CONCURRENCY``, деф.4). Пул сломался → sequential (НЕ падаем, правило №8). Это и
     фолбэк контейнерного фан-аута, и локальный/dev-путь. NB: несколько тяжёлых клипов на ОДНОМ
     контейнере переподписывают ядра (каждый клип уже cv2/ffmpeg-многопоточный) → контейнерный
     фан-аут (execution-на-клип) быстрее; этот путь оставлен как надёжный дефолт/фолбэк.
-    ``subject_cxs`` (B2, exploratory) — vision subject-x на клип; проводится ТОЛЬКО этим путём."""
+    ``subject_cxs`` (B2) / ``vision_shots_list`` (Layer A) — vision-подсказки на клип; проводятся
+    ТОЛЬКО этим путём (контейнерный фан-аут их не несёт — прототип)."""
     n = len(segments)
     workers = min(n, max(1, int(os.environ.get("RENDER_CONCURRENCY", "4"))))
     if workers <= 1:
-        return _render_clips_sequential(out, source_name, segments, meta, user_id, subject_cxs)
+        return _render_clips_sequential(
+            out, source_name, segments, meta, user_id, subject_cxs, vision_shots_list
+        )
     try:
         return _render_clips_parallel(
-            out, source_name, segments, meta, user_id, workers, subject_cxs
+            out, source_name, segments, meta, user_id, workers, subject_cxs, vision_shots_list
         )
     except Exception as e:  # noqa: BLE001 — пул сломался → sequential-фолбэк, не валим джоб
         print(f"[render] parallel pool failed ({e}); sequential fallback")
-        return _render_clips_sequential(out, source_name, segments, meta, user_id, subject_cxs)
+        return _render_clips_sequential(
+            out, source_name, segments, meta, user_id, subject_cxs, vision_shots_list
+        )
 
 
 def _render_all_clips(
@@ -355,6 +398,7 @@ def _render_all_clips(
     meta: SourceMeta,
     user_id: str | None,
     subject_cxs: list[float | None] | None = None,
+    vision_shots_list: list[tuple[VisionShot, ...]] | None = None,
 ) -> list[dict[str, Any]]:
     """Stages 3–5 для ВСЕХ клипов. Modal → фан-аут (контейнер на клип, ПАРАЛЛЕЛЬНО);
     локально → последовательный цикл (идентично прежнему поведению). Результаты — в порядке
@@ -386,10 +430,12 @@ def _render_all_clips(
         except Exception as e:  # noqa: BLE001 — фан-аут упал → in-process рендер, не валим джоб
             print(f"[render] container fan-out failed ({e}); in-process render fallback")
             results = _render_clips_in_process(
-                out, source_name, segments, meta, user_id, subject_cxs
+                out, source_name, segments, meta, user_id, subject_cxs, vision_shots_list
             )
     else:
-        results = _render_clips_in_process(out, source_name, segments, meta, user_id, subject_cxs)
+        results = _render_clips_in_process(
+            out, source_name, segments, meta, user_id, subject_cxs, vision_shots_list
+        )
     if results and all(r.get("failed") for r in results):
         reasons = "; ".join(str(r.get("error", "")) for r in results)
         raise JobError("render", f"all {len(results)} clips failed to render: {reasons}")
@@ -686,6 +732,9 @@ def run_pipeline(
     # выбора face-track в reframe. Заполняется в блоке 2b ТОЛЬКО при REFRAME_VISION_SUBJECT; иначе
     # (и на кэш-пути segments.json — subject_cx не персистится) остаётся None → прежний reframe.
     subject_cxs: list[float | None] | None = None
+    # Layer A (exploratory): per-shot fill/fit + субъект на клип (выровнены по ре-ранку) → per-shot
+    # override режима в reframe. Заполняется в 2b ТОЛЬКО при REFRAME_VISION_LAYOUT; иначе None.
+    vision_shots_list: list[tuple[VisionShot, ...]] | None = None
     if seg_path.exists():
         segments = [
             Segment.model_validate(x) for x in json.loads(seg_path.read_text(encoding="utf-8"))
@@ -716,7 +765,7 @@ def run_pipeline(
                 reviews = review_segments_with_video(
                     out / "source.mp4", segments, meta, settings=s, usage_sink=vis_usage
                 )
-                segments, reviewed_subject_cxs = apply_vision_reviews_indexed(
+                segments, reviewed_subject_cxs, reviewed_shots = apply_vision_reviews_full(
                     segments, reviews, transcript.words, max_clips=len(segments)
                 )
                 # B2: subject_cx в reframe ТОЛЬКО под флагом (иначе byte-identical).
@@ -724,6 +773,11 @@ def run_pipeline(
                     subject_cxs = reviewed_subject_cxs
                     n_subj = sum(1 for cx in reviewed_subject_cxs if cx is not None)
                     print(f"[2b] vision: {n_subj} subject hints → reframe")
+                # Layer A: per-shot fill/fit override в reframe ТОЛЬКО под флагом.
+                if s.reframe_vision_layout:
+                    vision_shots_list = reviewed_shots
+                    n_layout = sum(1 for sh in reviewed_shots if sh)
+                    print(f"[2b] vision: {n_layout} clips with per-shot layout → reframe")
                 n_ok = sum(1 for r in reviews if r.ok)
                 print(f"[2b] vision: reviewed {n_ok}/{len(reviews)} windows, re-ranked")
             except Exception as e:  # noqa: BLE001 — весь проход упал → детерминированный отбор (№8)
@@ -820,7 +874,9 @@ def run_pipeline(
 
     # ── Stages 3–5: #1 фан-аут per-clip по контейнерам Modal (параллельно) ЛИБО последовательный
     #    цикл локально. Результаты приходят в порядке сегментов → стабильный ClipOut. ──
-    results = _render_all_clips(job_id, out, "source.mp4", segments, meta, user_id, subject_cxs)
+    results = _render_all_clips(
+        job_id, out, "source.mp4", segments, meta, user_id, subject_cxs, vision_shots_list
+    )
     results.sort(key=lambda r: r["clip_index"])
     clips: list[ClipOut] = [
         build_clip_out(r["clip_id"], seg, transcript.words, r["video_url"])

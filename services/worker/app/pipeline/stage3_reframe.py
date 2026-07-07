@@ -20,12 +20,16 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.errors import JobError
 from app.models import CropWindow
+
+if TYPE_CHECKING:
+    from app.pipeline.stage2b_vision_review import VisionShot
 
 _STAGE = "reframe"
 _ASPECT_W, _ASPECT_H = 9, 16
@@ -216,6 +220,37 @@ _FOLLOW_SAMPLE_SEC = 0.5
 # face doesn't fit — that prevents jerking"). _FOLLOW_EASE = per-frame catch-up once outside.
 _FOLLOW_DEADZONE = 0.06
 _FOLLOW_EASE = 0.04
+# 2nd-order (velocity-damped) ease: instead of snapping the POSITION toward the catch-up target
+# each frame (exponential — velocity jumps 0→peak on frame 1 = the "jerky start" founder felt), we
+# ramp the VELOCITY toward it. The camera accelerates smoothly INTO a pan and decelerates OUT
+# (cinematic slow-in / slow-out). Lower = gentler ramp / longer to reach speed. Grid-safe: this
+# only shapes cx VALUES inside a fill region; region/mode boundaries + fps grid are untouched.
+_FOLLOW_ACCEL = 0.12
+
+
+def _ease_dead_zone_camera(sm: list[float], init_cx: float | None) -> list[float]:
+    """PURE. 2nd-order dead-zone virtual camera over a (pre-smoothed) cx signal `sm`.
+
+    HOLD while the face stays within ±_FOLLOW_DEADZONE of the crop centre; once it leaves the band,
+    ramp the VELOCITY toward the exponential catch-up target (`_FOLLOW_EASE*(sm[i]-cam)`) by
+    `_FOLLOW_ACCEL` per frame, then integrate position. Ramping velocity (not position) removes the
+    first-frame lurch of a plain exponential ease → smooth slow-in/slow-out. `init_cx` (legacy
+    glide seed) sets the start centre; None → start on the face (sm[0]). Empty → empty.
+
+    Меняет ТОЛЬКО значения cx ВНУТРИ fill-региона — границы режима / кадровая сетка НЕ тронуты
+    (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md цел).
+    """
+    if not sm:
+        return []
+    cam = init_cx if init_cx is not None else sm[0]
+    vel = 0.0
+    cams = [cam]
+    for i in range(1, len(sm)):
+        target_vel = _FOLLOW_EASE * (sm[i] - cam) if abs(sm[i] - cam) > _FOLLOW_DEADZONE else 0.0
+        vel += _FOLLOW_ACCEL * (target_vel - vel)
+        cam += vel
+        cams.append(cam)
+    return cams
 
 
 def _smooth_cx_centered(values: list[float], win: int) -> list[float]:
@@ -277,17 +312,62 @@ def classify_frame(all_faces: list[tuple[float, float]], crop_w_frac: float) -> 
     return "fill"
 
 
-def merge_short_regions(regions: list[TrackRegion], min_hold_sec: float) -> list[TrackRegion]:
+# Ниже этого короткую перебивку НЕ спасаем от проглатывания даже при промахе кропа: суб-0.4с
+# обрезок (напр. хвост шота на границе клипа) как отдельный wide-регион = блик/микро-зум-аут; ~5
+# кадров чужого кропа незаметны, а лишний fit-флеш — заметен. 0.4с = как reframe_min_scene_sec.
+_MIN_CUTAWAY_SEC = 0.4
+
+
+def _crop_would_misframe(prev: TrackRegion, reg: TrackRegion, crop_w_frac: float | None) -> bool:
+    """True, если проглотить короткий reg в prev = держать ТАЙТ-кроп prev поверх ДРУГОГО шота reg,
+    промахиваясь мимо его субъекта. PURE.
+
+    Срабатывает только когда prev — fill (узкий 9:16-кроп на конкретном лице). reg — другой шот:
+      • reg fit (wide/молчащий слушатель → silence-гейт): тайт-кроп prev держится на позиции лица
+        prev поверх ШИРОКОГО контента reg → лицо/субъект reg вне окна → плечо (баг Cardi B clip_02:
+        0.9с молчащего интервьюера cx 0.59, gate→fit, проглочен в кроп Карди 0.36).
+      • reg fill, но центр дальше ПОЛОВИНЫ ширины кропа (другой человек): |Δcx| > crop/2 → центр
+        лица reg ВНЕ окна prev → плечо (баг Cardi B clip_04: интервьюер cx 0.64 vs Карди 0.42).
+    prev fit → полный кадр, кропом не промахнёшься → глотаем как прежде (анти-строб цел).
+    crop_w_frac None → выключено (всегда глотаем). Близкий fill (тот же человек) → глотаем (не наш).
+    """
+    if crop_w_frac is None or prev.mode != "fill" or not prev.points:
+        return False
+    if reg.t1 - reg.t0 < _MIN_CUTAWAY_SEC:
+        return False  # суб-0.4с обрезок → глотаем (блик хуже незаметного микро-плеча)
+    pcx = prev.points[-1].cx
+    if pcx is None:
+        return False
+    if reg.mode != "fill":
+        return True  # тайт-кроп поверх другого (широкого) шота → субъект вне окна
+    if not reg.points or reg.points[0].cx is None:
+        return False
+    return abs(pcx - reg.points[0].cx) > crop_w_frac * 0.5
+
+
+def merge_short_regions(
+    regions: list[TrackRegion],
+    min_hold_sec: float,
+    *,
+    crop_w_frac: float | None = None,
+) -> list[TrackRegion]:
     """Анти-флеш V2: регион < min_hold_sec поглощается предыдущим (держим его mode+points).
 
     Гасит рапидное чередование fill↔fit на коротких (<1.5с) планах — «флеши».
     Первый регион не глотаем (нет предыдущего).
+
+    crop_w_frac (не None) — ширина 9:16-кропа: короткий fill-регион, чей субъект ДАЛЬШЕ пол-кропа от
+    удерживаемого кропа предыдущего fill-региона, НЕ проглатываем (иначе на экране плечо чужого
+    человека — баг Cardi B clip_04: 0.9с перебивки интервьюера на cx 0.64 держали кроп Карди 0.42).
+    Такой короткий шот — РЕАЛЬНАЯ склейка (границы на контент-стыке → жёсткий cut невидим,
+    REFRAME_FPS_GRID_INVARIANT), анти-строб тут не нужен. None → прежнее поведение (всегда глотаем).
     """
     if not regions:
         return []
     out = [regions[0]]
     for reg in regions[1:]:
-        if reg.t1 - reg.t0 < min_hold_sec:
+        short = reg.t1 - reg.t0 < min_hold_sec
+        if short and not _crop_would_misframe(out[-1], reg, crop_w_frac):
             prev = out[-1]
             out[-1] = TrackRegion(
                 t0=prev.t0, t1=reg.t1, mode=prev.mode, points=prev.points, points_b=prev.points_b
@@ -496,15 +576,10 @@ def _track_trajectory(
         return (TrackPoint(t=f0 / fps, mode="fill", cx=0.5 if init_cx is None else init_cx),)
     # Centered low-pass (zero lag) removes head-sway jitter before the dead-zone logic.
     sm = _smooth_cx_centered(raw, max(1, round(_FOLLOW_SMOOTH_SEC * fps)))
-    # Dead-zone virtual camera: HOLD while the face stays within ±_FOLLOW_DEADZONE of the crop
-    # centre; only when it leaves the band does the crop EASE toward it, then hold again → moves
-    # only when the face needs it, smoothly. init_cx (legacy glide) seeds the start centre.
-    cam = init_cx if init_cx is not None else sm[0]
-    cams = [cam]
-    for i in range(1, len(sm)):
-        if abs(sm[i] - cam) > _FOLLOW_DEADZONE:
-            cam += _FOLLOW_EASE * (sm[i] - cam)
-        cams.append(cam)
+    # Dead-zone virtual camera (2nd-order velocity-damped ease): HOLD while the face stays within
+    # ±_FOLLOW_DEADZONE of the crop centre; once it leaves the band, ACCELERATE smoothly toward it
+    # and decelerate back into a hold → moves only when the face needs it, no jerky start.
+    cams = _ease_dead_zone_camera(sm, init_cx)
     # Keyframes from the CAMERA path: keep endpoints + the frame before a move (anchors the hold) +
     # the move; collapse the long flat holds. Faithful → no false linear drift (the clip_04 bug).
     step = max(1, round(_FOLLOW_SAMPLE_SEC * fps))
@@ -524,6 +599,81 @@ def _track_trajectory(
     return tuple(pts)
 
 
+def vision_shot_for_scene_shot(
+    vision_shots: Sequence[VisionShot], f0: int, f1: int, fps: float
+) -> VisionShot | None:
+    """PURE. Map a native-frame scene shot [f0,f1) to the vision shot covering its MIDPOINT time.
+
+    Vision shots are window-relative, ordered by start_sec; shot k spans
+    [start_sec[k], start_sec[k+1]) (the last one → +∞). Return the shot whose interval contains the
+    scene-shot midpoint ((f0+f1)/2)/fps; if the midpoint precedes the first vision shot, return the
+    FIRST (nearest). Empty → None.
+
+    Используется ТОЛЬКО чтобы выбрать per-shot MODE + субъект — scene-cut границы (f0,f1) и
+    кадровую сетку НЕ трогаем (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md, Δ=0 цел).
+    """
+    if not vision_shots:
+        return None
+    mid = ((f0 + f1) / 2) / fps
+    ordered = sorted(vision_shots, key=lambda s: s.start_sec)
+    chosen = ordered[0]
+    for sh in ordered:
+        if sh.start_sec <= mid:
+            chosen = sh
+        else:
+            break
+    return chosen
+
+
+def _fill_points_for_target(
+    target: SpeakerTrack | None,
+    f0: int,
+    f1: int,
+    fps: float,
+    *,
+    crop_w_frac: float,
+    smoothing: float,
+    lock_per_shot: bool,
+    prev_fill_end_cx: float | None,
+) -> tuple[TrackPoint, ...]:
+    """PURE. cx-точки fill-региона для `target` внутри шота [f0,f1). Извлечено ДОСЛОВНО из fill-
+    ветки plan_regions, чтобы vision-форс-fill (Layer A) и эвристический fill давали БАЙТ-В-БАЙТ
+    одинаковые точки.
+
+    lock_per_shot=True (дефолт): одна статичная locked-cx, если ВСЁ лицо влезает в бюджет кропа
+    за весь шот (compute_locked_cx), иначе снап+слежение (_track_trajectory). lock_per_shot=False:
+    legacy hybrid-глайд/снап по prev_fill_end_cx. Меняет ТОЛЬКО cx ВНУТРИ fill-региона — границы
+    режима (= кадры шота, ставит вызыватель) и сетка НЕ тронуты (инвариант REFRAME_FPS_GRID цел).
+    """
+    t0 = f0 / fps
+    if lock_per_shot:
+        raw = _track_cx_in_shot(target, f0, f1) if target is not None else []
+        locked = (
+            compute_locked_cx(
+                smooth_centers(list(raw), smoothing, init=raw[0]), target.width, crop_w_frac
+            )
+            if (target is not None and raw)
+            else None
+        )
+        if locked is not None:
+            return (TrackPoint(t=t0, mode="fill", cx=locked),)
+        if target is not None:
+            return _track_trajectory(target, f0, f1, fps, smoothing)  # снап + слежение
+        return (TrackPoint(t=t0, mode="fill", cx=0.5),)
+    # Legacy hybrid-наведение (глайд на близких склейках, снап на дальних). Сохранён ПОД ФЛАГОМ
+    # для отката/совместимости. ⚠️ EMA ВНУТРИ шота = «следование», от которого фаундер просил уйти.
+    target_first = None
+    if target is not None:
+        cxs = _track_cx_in_shot(target, f0, f1)
+        target_first = cxs[0] if cxs else None
+    init = prev_fill_end_cx
+    if init is not None and (target_first is None or abs(target_first - init) > _GLIDE_MAX_DCX):
+        init = None
+    if target is not None:
+        return _track_trajectory(target, f0, f1, fps, smoothing, init_cx=init)
+    return (TrackPoint(t=t0, mode="fill", cx=0.5 if init is None else init),)
+
+
 def plan_regions(
     shots: list[tuple[int, int]],
     tracks: list[SpeakerTrack],
@@ -538,6 +688,7 @@ def plan_regions(
     split_enabled: bool = False,
     wide_speak_min: float = 0.3,
     subject_cx: float | None = None,
+    vision_shots: Sequence[VisionShot] | None = None,
 ) -> list[TrackRegion]:
     """Cut-aligned планировщик: на КАЖДЫЙ шот один режим + траектория. Сердце Pass-1. PURE.
 
@@ -552,6 +703,12 @@ def plan_regions(
     subject_cx (B2, exploratory, флаг REFRAME_VISION_SUBJECT у вызывателя): vision-подсказка центра
     субъекта [0,1] → ТАЙ-БРЕЙКЕР `_pick_target` (какой face-track вести на FILL-шоте). НЕ влияет на
     выбор режима fill/fit, границы и сетку — только на ВЫБОР трека. None → прежнее поведение.
+    vision_shots (Layer A, exploratory, флаг REFRAME_VISION_LAYOUT у вызывателя): per-shot fill/fit
+    + субъект, увиденные Gemini. Уверенный vision-шот, попавший на scene-шот, СЕМАНТИЧЕСКИ РЕШАЕТ
+    режим (fill/fit) + субъект, ПЕРЕОПРЕДЕЛЯЯ silence/coverage-гейты (которые ошибочно расширяют
+    молчащий close-up — баг Cardi B). Нет vision-шота → падаем в сегодняшние эвристики (явно).
+    Меняет ТОЛЬКО mode + субъект (cx-кривую) — scene-cut границы / кадровую сетку НЕ трогаем
+    (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md, Δ=0 цел). None (дефолт) → байт-в-байт прежнее.
     """
     spread_min = crop_w_frac * _WIDE_SPREAD_RATIO if wide_spread_min is None else wide_spread_min
     regions: list[TrackRegion] = []
@@ -565,6 +722,35 @@ def plan_regions(
             regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
             prev_fill_end_cx = None
             continue
+
+        # ── Layer A: vision-driven per-shot fill/fit override (флаг REFRAME_VISION_LAYOUT). ──
+        # Уверенный vision-шот, попавший на ЭТОТ scene-шот, РЕШАЕТ режим (семантика картинки),
+        # ПЕРЕОПРЕДЕЛЯЯ silence/coverage-гейты. Нет vision-шота → падаем в эвристики (ЯВНО, ниже).
+        # Только в auto-режиме (явный mode_setting юзера — приоритетнее). Границы/сетка не тронуты.
+        vshot = (
+            vision_shot_for_scene_shot(vision_shots, f0, f1, fps)
+            if (vision_shots and mode_setting == "auto")
+            else None
+        )
+        if vshot is not None:
+            if vshot.mode == "fit":
+                regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
+                prev_fill_end_cx = None
+                continue
+            # vision mode == "fill": ФОРСИМ fill — обходим silence/coverage-гейты (широко бы
+            # ошиблись). Субъект-трек выбираем vision subject_cx тай-брейкером среди ВСЕХ active
+            # (coverage-гейт обойдён). Нет ни одной face-track → кропить не на что → ЯВНО падаем
+            # в эвристики ниже (дадут fit). Не тихий 0-регион (правило №8).
+            vtarget = _pick_target(active, speak_threshold, subject_cx=vshot.subject_cx)
+            if vtarget is not None:
+                pts = _fill_points_for_target(
+                    vtarget, f0, f1, fps,
+                    crop_w_frac=crop_w_frac, smoothing=smoothing,
+                    lock_per_shot=lock_per_shot, prev_fill_end_cx=prev_fill_end_cx,
+                )  # fmt: skip
+                regions.append(TrackRegion(t0=t0, t1=t1, mode="fill", points=pts))
+                prev_fill_end_cx = pts[-1].cx
+                continue
         if mode_setting != "fill" and (not active or _is_wide_shot(active, f0, f1, spread_min)):
             # WIDE shot (2+ horizontally-spread faces) or no faces → go WIDE; do NOT tight-crop one
             # speaker. Cropping a real 2-shot hides the other person and routinely frames a torso/
@@ -623,40 +809,13 @@ def plan_regions(
         # проходящий через кадр дальше бюджета кропа → compute_locked_cx=None → фолбэк на слежение
         # (_track_trajectory, init=None → СНАП на лицо с первого кадра, без «пол-лица»).
         # Одна точка ⇒ рендер = постоянный кроп; границы режима / кадровая сетка не тронуты
-        # (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md цел).
-        if lock_per_shot:
-            raw = _track_cx_in_shot(target, f0, f1) if target is not None else []
-            locked = (
-                compute_locked_cx(
-                    smooth_centers(list(raw), smoothing, init=raw[0]), target.width, crop_w_frac
-                )
-                if (target is not None and raw)
-                else None
-            )
-            if locked is not None:
-                pts: tuple[TrackPoint, ...] = (TrackPoint(t=t0, mode="fill", cx=locked),)
-            elif target is not None:
-                pts = _track_trajectory(target, f0, f1, fps, smoothing)  # снап + слежение
-            else:
-                pts = (TrackPoint(t=t0, mode="fill", cx=0.5),)
-        else:
-            # Legacy hybrid-наведение (глайд на близких склейках, снап на дальних). Сохранён ПОД
-            # ФЛАГОМ для отката/совместимости. ⚠️ EMA ВНУТРИ шота = «следование», от которого
-            # фаундер просил уйти — поэтому это больше НЕ дефолт.
-            target_first = None
-            if target is not None:
-                cxs = _track_cx_in_shot(target, f0, f1)
-                target_first = cxs[0] if cxs else None
-            init = prev_fill_end_cx
-            if init is not None and (
-                target_first is None or abs(target_first - init) > _GLIDE_MAX_DCX
-            ):
-                init = None
-            pts = (
-                _track_trajectory(target, f0, f1, fps, smoothing, init_cx=init)
-                if target is not None
-                else (TrackPoint(t=t0, mode="fill", cx=0.5 if init is None else init),)
-            )
+        # (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md цел). Построение cx-точек вынесено в
+        # _fill_points_for_target (переиспользуется vision-форс-fill Layer A, байт-в-байт).
+        pts = _fill_points_for_target(
+            target, f0, f1, fps,
+            crop_w_frac=crop_w_frac, smoothing=smoothing,
+            lock_per_shot=lock_per_shot, prev_fill_end_cx=prev_fill_end_cx,
+        )  # fmt: skip
         regions.append(TrackRegion(t0=t0, t1=t1, mode="fill", points=pts))
         prev_fill_end_cx = pts[-1].cx
     return regions
@@ -1103,6 +1262,8 @@ def reframe_segment(
     split_enabled: bool = False,
     wide_speak_min: float = 0.3,
     subject_cx: float | None = None,
+    vision_shots: Sequence[VisionShot] | None = None,
+    keep_distant_cutaways: bool = True,
 ) -> tuple[list[TrackRegion], bool]:
     """Сегмент → (cut-aligned регионы, face_found). Единый путь (ASD по дефолту).
 
@@ -1112,6 +1273,11 @@ def reframe_segment(
     subject_cx (B2, exploratory): vision-подсказка центра субъекта [0,1] → тай-брейкер выбора
     face-track в plan_regions (какой человек в кадре на multi-face шоте). None (дефолт) → прежнее
     поведение байт-в-байт. Проводится ТОЛЬКО когда вызыватель включил REFRAME_VISION_SUBJECT.
+
+    vision_shots (Layer A, exploratory, флаг REFRAME_VISION_LAYOUT у вызывателя): per-shot fill/fit
+    + субъект от Gemini (window-relative) → СЕМАНТИЧЕСКИЙ override режима per-shot в plan_regions
+    (переопределяет silence/coverage-гейты). НЕ трогает scene-cut границы / кадровую сетку (Δ=0).
+    None (дефолт) → прежнее поведение байт-в-байт.
     """
     from app.pipeline.asd_reframe import score_tracks_in_segment  # noqa: PLC0415
 
@@ -1148,6 +1314,10 @@ def reframe_segment(
     face_found = bool(tracks_native)
     tracks = [resample_track(t, face_fps, fps) for t in tracks_native]
 
+    # crop_w_frac в merge: короткую перебивку (реальный отдельный шот, напр. 0.9с интервьюера) НЕ
+    # проглатываем в предыдущий fill, если его кроп промахнётся мимо нового субъекта → иначе плечо
+    # (баг Cardi B clip_04 @40.5с: шот 40.0–40.9с cx 0.64 держал кроп Карди 0.42). Флаг
+    # keep_distant_cutaways=false → merge без crop_w_frac (прежнее: всегда глотаем короткие).
     regions = merge_short_regions(
         plan_regions(
             shots,
@@ -1161,8 +1331,10 @@ def reframe_segment(
             split_enabled=split_enabled,
             wide_speak_min=wide_speak_min,
             subject_cx=subject_cx,
+            vision_shots=vision_shots,
         ),
         min_hold_sec,
+        crop_w_frac=crop_w_frac if keep_distant_cutaways else None,
     )
     if not regions:
         regions = [TrackRegion(t0=0.0, t1=duration, mode="fit", points=())]

@@ -12,12 +12,15 @@ from app.errors import JobError
 from app.models import ClipType, Segment, Word
 from app.pipeline.stage2b_vision_review import (
     VisionReview,
+    VisionShot,
     apply_review,
     apply_vision_reviews,
+    apply_vision_reviews_full,
     apply_vision_reviews_indexed,
     clamp_edges_to_words,
     neutral_review,
     parse_vision_response,
+    parse_vision_shots,
     rerank_and_cap,
     subject_cx_from_box,
 )
@@ -90,6 +93,77 @@ class TestParseVisionResponse:
         # hook_strength — ядро сигнала; его отсутствие = сбой парса (→ neutral upstream), а не 0.0
         with pytest.raises(JobError):
             parse_vision_response('{"hook_reason": "x"}')
+
+
+# ─────────────────────────── parse_vision_shots (Layer A) ───────────────────────────
+
+
+class TestParseVisionShots:
+    def test_absent_shots_is_empty(self) -> None:
+        assert parse_vision_shots({"hook_strength": 0.5}) == ()
+
+    def test_parses_fill_and_fit_shots(self) -> None:
+        data = {
+            "shots": [
+                {"start_sec": 0.0, "mode": "fill", "subject_cx": 0.3},
+                {"start_sec": 4.2, "mode": "fit"},
+            ]
+        }
+        shots = parse_vision_shots(data)
+        assert len(shots) == 2
+        assert shots[0] == VisionShot(start_sec=0.0, mode="fill", subject_cx=0.3)
+        assert shots[1] == VisionShot(start_sec=4.2, mode="fit", subject_cx=None)
+
+    def test_fit_drops_subject_cx(self) -> None:
+        # a fit shot has no single subject → subject_cx forced to None even if the model gave one
+        shots = parse_vision_shots(
+            {"shots": [{"start_sec": 0.0, "mode": "fit", "subject_cx": 0.7}]}
+        )
+        assert shots[0].subject_cx is None
+
+    def test_subject_cx_clamped_into_unit_range(self) -> None:
+        shots = parse_vision_shots(
+            {"shots": [{"start_sec": 0.0, "mode": "fill", "subject_cx": 1.9}]}
+        )
+        assert shots[0].subject_cx == 1.0
+
+    def test_unknown_mode_skipped(self) -> None:
+        # a shot whose mode is neither fill nor fit is dropped (explicit, not silently kept)
+        shots = parse_vision_shots(
+            {"shots": [{"start_sec": 0.0, "mode": "zoom"}, {"start_sec": 1.0, "mode": "fill"}]}
+        )
+        assert [s.mode for s in shots] == ["fill"]
+
+    def test_missing_start_sec_skipped(self) -> None:
+        shots = parse_vision_shots({"shots": [{"mode": "fill"}, {"start_sec": 2.0, "mode": "fit"}]})
+        assert [s.start_sec for s in shots] == [2.0]
+
+    def test_non_list_shots_is_empty(self) -> None:
+        assert parse_vision_shots({"shots": "nope"}) == ()
+
+    def test_negative_start_clamped_to_zero(self) -> None:
+        shots = parse_vision_shots({"shots": [{"start_sec": -0.3, "mode": "fill"}]})
+        assert shots[0].start_sec == 0.0
+
+
+class TestParseVisionResponseShots:
+    def test_parse_vision_response_carries_shots(self) -> None:
+        text = (
+            '{"hook_strength": 0.6, "hook_reason": "x", "shots": ['
+            '{"start_sec": 0.0, "mode": "fill", "subject_cx": 0.4},'
+            '{"start_sec": 3.0, "mode": "fit"}]}'
+        )
+        r = parse_vision_response(text)
+        assert len(r.shots) == 2
+        assert r.shots[0].mode == "fill" and r.shots[0].subject_cx == 0.4
+        assert r.shots[1].mode == "fit"
+
+    def test_no_shots_defaults_empty(self) -> None:
+        r = parse_vision_response('{"hook_strength": 0.4, "hook_reason": "x"}')
+        assert r.shots == ()
+
+    def test_neutral_review_has_empty_shots(self) -> None:
+        assert neutral_review().shots == ()
 
 
 # ─────────────────────────── clamp_edges_to_words (drift guard) ───────────────────────────
@@ -332,3 +406,42 @@ class TestApplyVisionReviewsIndexed:
         indexed, _ = apply_vision_reviews_indexed(segs, reviews, w, max_clips=2)
         assert [s.start for s in plain] == [s.start for s in indexed]
         assert [s.score for s in plain] == [s.score for s in indexed]
+
+
+# ───────────── apply_vision_reviews_full (Layer A: aligned subject_cx + shots) ─────────────
+
+
+class TestApplyVisionReviewsFull:
+    def _rev(self, hook: float, cx: float, shots: tuple[VisionShot, ...]) -> VisionReview:
+        return VisionReview(
+            hook, "r", True, False, False, None, None, None, None,
+            subject_cx=cx, shots=shots, ok=True,
+        )  # fmt: skip
+
+    def test_shots_and_subject_cx_travel_with_reranked_segments(self) -> None:
+        w = uniform(120)
+        segs = [mkseg(0, 20, 0.8), mkseg(30, 50, 0.2)]
+        sh_a = (VisionShot(0.0, "fit", None),)
+        sh_b = (VisionShot(0.0, "fill", 0.7),)
+        reviews = [self._rev(0.1, 0.3, sh_a), self._rev(0.95, 0.7, sh_b)]
+        out_segs, subj, shots = apply_vision_reviews_full(segs, reviews, w, max_clips=2)
+        # second segment scored 0.95 → re-ranked first; its shots + subject_cx ride WITH it
+        assert out_segs[0].start == 30.0 and subj[0] == 0.7 and shots[0] == sh_b
+        assert out_segs[1].start == 0.0 and subj[1] == 0.3 and shots[1] == sh_a
+
+    def test_shorter_reviews_pad_empty_shots(self) -> None:
+        w = uniform(120)
+        segs = [mkseg(0, 20, 0.8), mkseg(30, 50, 0.2)]
+        reviews = [self._rev(0.9, 0.4, (VisionShot(0.0, "fill", 0.4),))]  # only one review
+        out_segs, subj, shots = apply_vision_reviews_full(segs, reviews, w, max_clips=2)
+        assert out_segs[0].start == 0.0 and shots[0] and subj[0] == 0.4
+        assert out_segs[1].start == 30.0 and shots[1] == () and subj[1] is None
+
+    def test_indexed_is_thin_wrapper_same_order(self) -> None:
+        w = uniform(120)
+        segs = [mkseg(0, 20, 0.8), mkseg(30, 50, 0.2)]
+        reviews = [self._rev(0.1, 0.3, ()), self._rev(0.95, 0.7, ())]
+        full_segs, full_subj, _ = apply_vision_reviews_full(segs, reviews, w, max_clips=2)
+        idx_segs, idx_subj = apply_vision_reviews_indexed(segs, reviews, w, max_clips=2)
+        assert [s.start for s in full_segs] == [s.start for s in idx_segs]
+        assert full_subj == idx_subj

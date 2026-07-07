@@ -63,6 +63,23 @@ _WINDOW_HEIGHT = 480
 
 
 @dataclass(frozen=True)
+class VisionShot:
+    """ОДИН камера-шот (склейка), увиденный Gemini ВНУТРИ окна клипа (Layer A, флаг
+    REFRAME_VISION_LAYOUT). `start_sec` — начало шота ОТНОСИТЕЛЬНО старта окна (0 = seg.start);
+    `mode` ∈ {"fill","fit"} — должен ли вертикальный 9:16-short кропнуть ТАЙТ на субъекте (fill)
+    или показать ШИРОКИЙ кадр (fit: 2+ человек / establishing / нет одного субъекта);
+    `subject_cx` — горизонтальный центр субъекта [0,1] для fill (None для fit / если модели нет).
+
+    Проводится в reframe как СЕМАНТИЧЕСКИЙ override per-shot режима fill/fit + выбор субъекта,
+    НЕ трогая scene-cut границы / кадровую сетку (инвариант docs/REFRAME_FPS_GRID_INVARIANT.md).
+    """
+
+    start_sec: float  # window-relative начало шота
+    mode: str  # "fill" | "fit"
+    subject_cx: float | None  # fill: centre-x субъекта [0,1]; fit/нет данных: None
+
+
+@dataclass(frozen=True)
 class VisionReview:
     """Результат мультимодального ревью ОДНОГО окна. `ok=False` → нейтральный/сбойный review:
     вызыватели (apply_review) его НЕ применяют — сегмент остаётся детерминированным.
@@ -71,6 +88,8 @@ class VisionReview:
     subject_hint / fill_vs_fit_hint — текстовые B2-хинты (пока не проводятся в reframe).
     subject_cx — ЧИСЛОВОЙ B2-сигнал (centre-x субъекта из Gemini-box, 0..1); проводится в
     reframe как тай-брейкер `_pick_target` (какой трек вести); флаг REFRAME_VISION_SUBJECT.
+    shots — Layer A: per-shot fill/fit + субъект, увиденные моделью внутри окна (флаг
+    REFRAME_VISION_LAYOUT); пусто = нет per-shot сигнала. neutral_review → пусто.
     """
 
     hook_strength: float  # [0,1] — вирусность хука по видео+звуку
@@ -84,6 +103,7 @@ class VisionReview:
     fill_vs_fit_hint: str | None  # B2-hint (текст): пер-шот режим
     subject_cx: float | None = None  # B2: centre-x субъекта из Gemini-box [0,1]; None=нет
     ok: bool = True  # False = не применять (нейтральный/сбойный)
+    shots: tuple[VisionShot, ...] = ()  # Layer A: per-shot fill/fit + субъект (флаг)
 
 
 def neutral_review() -> VisionReview:
@@ -96,7 +116,7 @@ def neutral_review() -> VisionReview:
         hook_strength=0.0, hook_reason="", is_complete_thought=True,
         edge_issue_start=False, edge_issue_end=False,
         trimmed_start_sec=None, trimmed_end_sec=None,
-        subject_hint=None, fill_vs_fit_hint=None, subject_cx=None, ok=False,
+        subject_hint=None, fill_vs_fit_hint=None, subject_cx=None, ok=False, shots=(),
     )  # fmt: skip
 
 
@@ -121,6 +141,44 @@ def subject_cx_from_box(box: Any) -> float | None:
         return None
     cx = (xmin + xmax) / 2.0 / 1000.0
     return min(1.0, max(0.0, cx))
+
+
+def parse_vision_shots(data: Any) -> tuple[VisionShot, ...]:
+    """PURE. Parse Gemini's per-window `shots` array → tuple[VisionShot] (Layer A).
+
+    Each shot object: `start_sec` (window-relative float, clamped ≥ 0), `mode` (MUST be exactly
+    "fill" or "fit" — any other/absent value drops the shot: explicit, not silently coerced),
+    `subject_cx` (fill only, clamped into [0,1]; forced None for fit). A missing start_sec or an
+    unrecognised mode drops that shot (we never fabricate a boundary). Absent / non-list `shots`
+    → empty tuple. Malformed numbers drop only the offending shot, never the whole review.
+    """
+    if not isinstance(data, dict):
+        return ()
+    raw = data.get("shots")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[VisionShot] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        mode = str(item.get("mode", "")).strip().lower()
+        if mode not in ("fill", "fit"):
+            continue  # unknown/absent mode → drop (не выдумываем режим)
+        start_raw = item.get("start_sec")
+        if start_raw is None:
+            continue  # без времени шот бесполезен (не на что маппить)
+        try:
+            start = max(0.0, float(start_raw))
+        except (TypeError, ValueError):
+            continue
+        cx: float | None = None
+        if mode == "fill" and item.get("subject_cx") is not None:
+            try:
+                cx = min(1.0, max(0.0, float(item["subject_cx"])))
+            except (TypeError, ValueError):
+                cx = None
+        out.append(VisionShot(start_sec=start, mode=mode, subject_cx=cx))
+    return tuple(out)
 
 
 def parse_vision_response(text: str) -> VisionReview:
@@ -166,6 +224,7 @@ def parse_vision_response(text: str) -> VisionReview:
         fill_vs_fit_hint=_opt_str("fill_vs_fit_hint"),
         subject_cx=subject_cx_from_box(data.get("subject_box")),
         ok=True,
+        shots=parse_vision_shots(data),
     )
 
 
@@ -250,6 +309,37 @@ def rerank_and_cap(segments: list[Segment], max_clips: int) -> list[Segment]:
     return sorted(segments, key=lambda s: s.score, reverse=True)[:max_clips]
 
 
+def apply_vision_reviews_full(
+    segments: list[Segment],
+    reviews: list[VisionReview],
+    words: list[Word],
+    *,
+    max_clips: int,
+) -> tuple[list[Segment], list[float | None], list[tuple[VisionShot, ...]]]:
+    """PURE. Как apply_vision_reviews, но ДОПОЛНИТЕЛЬНО возвращает per-clip subject_cx (B2) И
+    per-clip shots (Layer A), ВЫРОВНЕННЫЕ по ре-ранкнутым сегментам — оба сигнала должны ехать
+    ВМЕСТЕ со «своим» клипом сквозь сортировку по score (Segment — read-only контракт, эти поля
+    туда не добавить). Единый источник порядка для _indexed/_full/plain-обёрток.
+
+    len(reviews) короче segments (тех.сбой) → недостающие = нейтральные (no-op: subject_cx=None,
+    shots=()). Сортировка идентична apply_vision_reviews (стабильный sort по score убыв. + обрезка).
+    """
+    applied: list[tuple[Segment, float | None, tuple[VisionShot, ...]]] = [
+        (
+            apply_review(seg, reviews[i] if i < len(reviews) else neutral_review(), words),
+            reviews[i].subject_cx if i < len(reviews) else None,
+            reviews[i].shots if i < len(reviews) else (),
+        )
+        for i, seg in enumerate(segments)
+    ]
+    ordered = sorted(applied, key=lambda p: p[0].score, reverse=True)[:max_clips]
+    return (
+        [seg for seg, _, _ in ordered],
+        [cx for _, cx, _ in ordered],
+        [shots for _, _, shots in ordered],
+    )
+
+
 def apply_vision_reviews_indexed(
     segments: list[Segment],
     reviews: list[VisionReview],
@@ -257,22 +347,10 @@ def apply_vision_reviews_indexed(
     *,
     max_clips: int,
 ) -> tuple[list[Segment], list[float | None]]:
-    """PURE. Как apply_vision_reviews, но ДОПОЛНИТЕЛЬНО возвращает subject_cx, ВЫРОВНЕННЫЙ по
-    ре-ранкнутым сегментам (B2: центр субъекта должен ехать ВМЕСТЕ со «своим» клипом сквозь
-    сортировку по score, т.к. Segment — read-only контракт, поле subject_cx туда не добавить).
-
-    len(reviews) короче segments (тех.сбой) → недостающие = нейтральные (no-op, subject_cx=None).
-    Сортировка идентична apply_vision_reviews (стабильный sort по score убыв. + обрезка).
-    """
-    applied: list[tuple[Segment, float | None]] = [
-        (
-            apply_review(seg, reviews[i] if i < len(reviews) else neutral_review(), words),
-            reviews[i].subject_cx if i < len(reviews) else None,
-        )
-        for i, seg in enumerate(segments)
-    ]
-    ordered = sorted(applied, key=lambda p: p[0].score, reverse=True)[:max_clips]
-    return [seg for seg, _ in ordered], [cx for _, cx in ordered]
+    """PURE. apply_vision_reviews + ВЫРОВНЕННЫЙ по ре-ранку subject_cx (B2). Тонкая обёртка над
+    apply_vision_reviews_full (единый источник порядка) — отбрасывает per-clip shots (Layer A)."""
+    segs, cxs, _ = apply_vision_reviews_full(segments, reviews, words, max_clips=max_clips)
+    return segs, cxs
 
 
 def apply_vision_reviews(
@@ -323,6 +401,17 @@ Also return (used later for vertical reframing, does not affect this decision �
   there is no single clear subject (e.g. a wide shot of several equally-important people).
 - subject_hint: a short label for that same subject (e.g. "left speaker", "the woman").
 - fill_vs_fit_hint: "fill" (single tight subject → crop) or "fit" (wide / multiple people / text).
+- shots: segment this clip into its distinct CAMERA SHOTS (the cuts you actually see). For EACH
+  shot, in order, give an object:
+    - start_sec: when the shot STARTS, in seconds RELATIVE TO THE START OF THIS CLIP (the first
+      shot starts at 0).
+    - mode: "fill" if a vertical 9:16 short should CROP TIGHT on the single main person; "fit" if
+      it should show the WIDE frame instead — use "fit" for 2+ important people, a wide
+      establishing / room shot, on-screen text/graphics, or whenever there is no single clear
+      subject to follow.
+    - subject_cx: for a "fill" shot, the main person's HORIZONTAL centre as a number 0..1
+      (0 = far left, 0.5 = centre, 1 = far right). null for "fit" shots.
+  If the whole clip is one continuous shot, return a single shot starting at 0.
 
 Return ONLY the JSON object with these exact keys.
 """
@@ -333,6 +422,15 @@ def load_vision_prompt() -> str:
     if _PROMPT_PATH.exists():
         return _PROMPT_PATH.read_text(encoding="utf-8")
     return DEFAULT_VISION_PROMPT
+
+
+class _VisionShotSchema(BaseModel):
+    """Layer A: один камера-шот внутри окна. start_sec — window-relative; mode — fill|fit;
+    subject_cx — центр субъекта 0..1 (для fill)."""
+
+    start_sec: float
+    mode: str  # "fill" | "fit"
+    subject_cx: float | None = None
 
 
 class _VisionSchema(BaseModel):
@@ -348,6 +446,7 @@ class _VisionSchema(BaseModel):
     subject_box: list[int] | None = None  # B2: [ymin,xmin,ymax,xmax] 0..1000 → subject centre-x
     subject_hint: str | None = None
     fill_vs_fit_hint: str | None = None
+    shots: list[_VisionShotSchema] | None = None  # Layer A: per-shot fill/fit + subject
 
 
 def _build_user_prompt(seg: Segment, window_dur: float) -> str:

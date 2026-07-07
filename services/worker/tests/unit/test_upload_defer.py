@@ -218,7 +218,9 @@ def test_run_pipeline_normalizes_source_before_r2_upload_and_fanout(
         events.append("upload_source")
         assert mp4.exists(), "source.mp4 ОБЯЗАН существовать ДО заливки в R2"
 
-    def _render_all(job_id, o, source_name, segments, m, user_id, subject_cxs=None):  # noqa: ANN001
+    def _render_all(
+        job_id, o, source_name, segments, m, user_id, subject_cxs=None, vision_shots_list=None
+    ):  # noqa: ANN001
         events.append("render_all")
         assert (o / source_name).exists(), "source.mp4 ОБЯЗАН существовать ДО фан-аута рендера"
         return [{

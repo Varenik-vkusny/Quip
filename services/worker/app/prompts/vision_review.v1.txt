@@ -24,5 +24,16 @@ Also return (used later for vertical reframing, does not affect this decision �
   there is no single clear subject (e.g. a wide shot of several equally-important people).
 - subject_hint: a short label for that same subject (e.g. "left speaker", "the woman").
 - fill_vs_fit_hint: "fill" (single tight subject → crop) or "fit" (wide / multiple people / text).
+- shots: segment this clip into its distinct CAMERA SHOTS (the cuts you actually see). For EACH
+  shot, in order, give an object:
+    - start_sec: when the shot STARTS, in seconds RELATIVE TO THE START OF THIS CLIP (the first
+      shot starts at 0).
+    - mode: "fill" if a vertical 9:16 short should CROP TIGHT on the single main person; "fit" if
+      it should show the WIDE frame instead — use "fit" for 2+ important people, a wide
+      establishing / room shot, on-screen text/graphics, or whenever there is no single clear
+      subject to follow.
+    - subject_cx: for a "fill" shot, the main person's HORIZONTAL centre as a number 0..1
+      (0 = far left, 0.5 = centre, 1 = far right). null for "fit" shots.
+  If the whole clip is one continuous shot, return a single shot starting at 0.
 
 Return ONLY the JSON object with these exact keys.
