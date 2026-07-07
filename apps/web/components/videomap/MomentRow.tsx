@@ -9,10 +9,11 @@ import { clipNum } from "@/lib/videoMapNarrative";
 import type { VideoMoment } from "@/lib/types";
 import { ExtractButton } from "./ExtractButton";
 
-// One moment in the outline. Clicking the body seeks the source to the moment start. A clipped
-// moment (a clip OVERLAPS it) shows an "Open clip #N" link; an untapped moment shows the (M1:
-// disabled) Extract CTA. This is the fix for the old ○-moment lie — momentClipId returns null for a
-// gap moment instead of mislinking it to a neighbouring clip.
+// One moment as a flush hairline row — no card, no colored status dot. Structure is typographic:
+// title (ink) over a one-line why (muted) over a quiet meta line (time · kind). The right column is
+// the single action: a clipped moment links to its clip, an untapped one offers Extract. (This is
+// the fix for the old ○-moment lie — momentClipId returns null for a gap moment, so it no longer
+// mislinks to a neighbour.) Kind is a calm faint word, not a colored-dot rainbow.
 
 export function MomentRow({
   moment,
@@ -25,32 +26,36 @@ export function MomentRow({
   jobId: string;
   onSeek: (sec: number) => void;
 }) {
-  const { dot } = kindColor(moment.kind);
   const clipId = momentClipId(clips, moment);
+  const kind = kindColor(moment.kind).label.toLowerCase();
 
   return (
-    <div className="flex items-start gap-2.5 rounded-lg border border-line bg-surface px-3 py-2.5 transition-colors duration-150 hover:border-line-strong">
+    <div className="flex items-start gap-3 py-2.5">
       <button
         type="button"
         onClick={() => onSeek(moment.start)}
-        className="flex min-w-0 flex-1 items-start gap-2.5 text-left"
+        className="group min-w-0 flex-1 text-left"
       >
-        <span className={`mt-1 size-2 shrink-0 rounded-pill ${dot}`} aria-hidden />
-        <span className="min-w-0 flex-1">
-          <span className="block font-semibold leading-snug text-ink">{moment.label}</span>
-          <span className="mt-0.5 block text-xs leading-relaxed text-muted">{moment.why}</span>
-          <Numeral className="mt-1 block text-xs text-faint">{mmss(moment.start)}</Numeral>
+        <span className="block text-sm font-medium leading-snug text-ink transition-colors duration-150 group-hover:text-accent">
+          {moment.label}
+        </span>
+        <span className="mt-0.5 block line-clamp-2 text-xs leading-relaxed text-muted">
+          {moment.why}
+        </span>
+        <span className="mt-1 block text-xs text-faint">
+          <Numeral className="tabular-nums">{mmss(moment.start)}</Numeral>
+          <span className="mx-1.5">·</span>
+          {kind}
         </span>
       </button>
 
-      <div className="shrink-0 pt-0.5">
+      <div className="shrink-0">
         {clipId ? (
           <Link
             href={`/edit/${jobId}/${clipId}`}
-            className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-xs font-semibold text-ink transition-colors duration-150 hover:border-line-strong"
+            className="text-xs font-medium text-muted underline-offset-4 transition-colors duration-150 hover:text-ink hover:underline"
           >
-            <span className="size-1.5 rounded-pill bg-accent" aria-hidden />
-            Open clip #{clipNum(clipId)}
+            Clip {clipNum(clipId)}
           </Link>
         ) : (
           <ExtractButton state="coming" disabled />
