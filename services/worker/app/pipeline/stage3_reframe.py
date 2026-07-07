@@ -219,7 +219,12 @@ def smooth_centers(
 # WITHOUT lag — the shot is processed offline (batch), so we look ahead + behind. Cheap O(n) array
 # math, no model → zero extra load. Window (sec) + keyframe time-resolution for tracing the curve.
 _FOLLOW_SMOOTH_SEC = 0.9
-_FOLLOW_SAMPLE_SEC = 0.5
+# 0.15 (было 0.5): кейфреймы трассируют плавную camera-кривую в ~3× ЧАЩЕ. Рендер линейно
+# интерполирует между кейфреймами (build_fill_crop_expr / _interp_cx), поэтому редкая выборка (0.5с)
+# на медленном пане давала СКАЧКИ СКОРОСТИ каждые 0.5с = «маленькими прыжками» (founder QA clip_07).
+# Holds не раздувает: min_delta схлопывает плоские участки → лишние кейфреймы только на РЕАЛЬНОМ
+# движении (2-3с пан ≈ 14 кейфреймов, ок для piecewise-expr). Кадровую сетку/границы НЕ трогает.
+_FOLLOW_SAMPLE_SEC = 0.15
 # Dead-zone virtual camera: the face may drift ±_FOLLOW_DEADZONE (frame-width) from the held crop
 # centre WITHOUT the camera moving; only when it leaves the band does the crop ease toward it. → the
 # crop moves ONLY when the face really needs it, and always smoothly (founder: "track only if the
@@ -566,7 +571,7 @@ def _track_trajectory(
     f1: int,
     fps: float,
     smoothing: float,
-    min_delta: float = 0.012,
+    min_delta: float = 0.003,
     *,
     init_cx: float | None = None,
 ) -> tuple[TrackPoint, ...]:
@@ -578,7 +583,10 @@ def _track_trajectory(
     prev_fill_end_cx (continuity), но на склейке к ДРУГОМУ спикеру это открывало кроп между
     людьми = пол-лица — убрано (жёсткий cut и так маскирует снап центра).
     Dead-zone: новый кейфрейм только при сдвиге ≥ min_delta от последнего — убирает
-    per-frame дрожание детектора, сохраняет следование реальному движению человека.
+    per-frame дрожание детектора, сохраняет следование реальному движению человека. min_delta 0.003
+    (было 0.012): кейфреймы плотнее по cx → линейная интерполяция рендера повторяет плавную ease-
+    кривую без скачков скорости («прыжков») на медленном пане; статику dead-zone всё равно держит
+    (camera-путь плоский → кейфреймы схлопываются), поэтому мельче min_delta шум НЕ пропускает.
     ⚠️ Границы режима (fill/fit) НЕ трогаем — инвариант docs/REFRAME_FPS_GRID_INVARIANT.md цел:
     меняется только стартовое значение cx-выражения внутри fill-региона (рендер не меняется).
     """

@@ -836,6 +836,31 @@ class TestFollowerSmoothing:
         assert pts[-1].cx < 0.42  # в итоге сместился к лицу (но dead-zone → ~0.06 не доходя центра)
         assert pts[-1].cx > 0.30  # и не перелетел лицо
 
+    def test_small_pan_no_step_facets(self) -> None:
+        # Founder QA clip_07: медленный пан ЧУТЬ за dead-zone двигался «маленькими прыжками».
+        # Причина: кейфреймы раз в 0.5с (_FOLLOW_SAMPLE_SEC) при min_delta 0.012 → линейная
+        # интерполяция рендера давала СКАЧКИ СКОРОСТИ каждые 0.5с. Реконструируем per-frame как
+        # рендер (линейный interp) и проверяем, что рывок (|Δскорости|) КРОШЕЧНЫЙ.
+        fps = 30.0
+        cx = [0.45 + 0.15 * min(1.0, i / 55) for i in range(75)] + [0.60] * 15
+        pts = self._track(cx)
+
+        def interp(t: float) -> float:
+            if t <= pts[0].t:
+                return pts[0].cx or 0.5
+            for i in range(len(pts) - 1):
+                if pts[i].t <= t <= pts[i + 1].t:
+                    span = pts[i + 1].t - pts[i].t
+                    a = (t - pts[i].t) / span if span > 0 else 0.0
+                    return (pts[i].cx or 0.5) + a * ((pts[i + 1].cx or 0.5) - (pts[i].cx or 0.5))
+            return pts[-1].cx or 0.5
+
+        recon = [interp(f / fps) for f in range(len(cx))]
+        vel = [recon[i] - recon[i - 1] for i in range(1, len(recon))]
+        jerk = [abs(vel[i] - vel[i - 1]) for i in range(1, len(vel))]
+        assert max(jerk) < 0.0015  # нет видимых скачков скорости на медленном пане
+        assert (pts[-1].cx or 0) > (pts[0].cx or 0) + 0.05  # и пан реально произошёл
+
 
 class TestEaseDeadZoneCamera:
     """_ease_dead_zone_camera: 2nd-order (velocity-damped) dead-zone follower (Layer B).
