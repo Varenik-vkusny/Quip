@@ -29,6 +29,8 @@ export default async function DevVideoMapPage({
           clips={CARDI_B_FIXTURE.clips}
           initialMap={CARDI_B_FIXTURE.map}
           previewUrl={CARDI_B_FIXTURE.previewUrl}
+          plan="pro"
+          demoMode
         />
       )}
     </main>

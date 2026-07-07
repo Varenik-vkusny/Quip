@@ -4,6 +4,7 @@ import { Numeral } from "@/components/ui/Numeral";
 import { mmss } from "@/lib/format";
 import { classifyMoment, type ClipLike } from "@/lib/videoMapCoverage";
 import type { VideoChapter } from "@/lib/types";
+import type { ExtractState } from "./ExtractButton";
 import { MomentRow } from "./MomentRow";
 
 // The clickable outline: chapters as clean collapsible sections, moments as flush hairline rows.
@@ -17,12 +18,16 @@ function ChapterOutlineItem({
   jobId,
   onSeek,
   defaultOpen,
+  extractState,
+  onExtract,
 }: {
   chapter: VideoChapter;
   clips: ClipLike[];
   jobId: string;
   onSeek: (sec: number) => void;
   defaultOpen: boolean;
+  extractState: ExtractState;
+  onExtract?: (start: number, end: number) => void;
 }) {
   const moments = chapter.moments ?? [];
   const untapped = moments.filter(
@@ -74,7 +79,15 @@ function ChapterOutlineItem({
         {moments.length > 0 && (
           <div className="divide-y divide-line">
             {moments.map((m, i) => (
-              <MomentRow key={i} moment={m} clips={clips} jobId={jobId} onSeek={onSeek} />
+              <MomentRow
+                key={i}
+                moment={m}
+                clips={clips}
+                jobId={jobId}
+                onSeek={onSeek}
+                extractState={extractState}
+                onExtract={onExtract}
+              />
             ))}
           </div>
         )}
@@ -88,11 +101,15 @@ export function MapOutline({
   clips,
   jobId,
   onSeek,
+  extractState,
+  onExtract,
 }: {
   chapters: VideoChapter[];
   clips: ClipLike[];
   jobId: string;
   onSeek: (sec: number) => void;
+  extractState: ExtractState;
+  onExtract?: (start: number, end: number) => void;
 }) {
   return (
     <div className="max-h-[560px] overflow-y-auto rounded-lg border border-line bg-surface">
@@ -104,6 +121,8 @@ export function MapOutline({
           jobId={jobId}
           onSeek={onSeek}
           defaultOpen={i === 0}
+          extractState={extractState}
+          onExtract={onExtract}
         />
       ))}
     </div>

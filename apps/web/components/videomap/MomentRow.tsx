@@ -7,24 +7,28 @@ import { kindColor } from "@/lib/momentKinds";
 import { momentClipId, type ClipLike } from "@/lib/videoMapCoverage";
 import { clipNum } from "@/lib/videoMapNarrative";
 import type { VideoMoment } from "@/lib/types";
-import { ExtractButton } from "./ExtractButton";
+import { ExtractButton, type ExtractState } from "./ExtractButton";
 
 // One moment as a flush hairline row — no card, no colored status dot. Structure is typographic:
 // title (ink) over a one-line why (muted) over a quiet meta line (time · kind). The right column is
-// the single action: a clipped moment links to its clip, an untapped one offers Extract. (This is
-// the fix for the old ○-moment lie — momentClipId returns null for a gap moment, so it no longer
-// mislinks to a neighbour.) Kind is a calm faint word, not a colored-dot rainbow.
+// the single action: a clipped moment links to its clip, an un-clipped one offers Extract (state
+// driven by plan/cap; the click hits the real endpoint via onExtract). momentClipId returns null for
+// a gap moment, so it no longer mislinks to a neighbour.
 
 export function MomentRow({
   moment,
   clips,
   jobId,
   onSeek,
+  extractState = "gated",
+  onExtract,
 }: {
   moment: VideoMoment;
   clips: ClipLike[];
   jobId: string;
   onSeek: (sec: number) => void;
+  extractState?: ExtractState;
+  onExtract?: (start: number, end: number) => void;
 }) {
   const clipId = momentClipId(clips, moment);
   const kind = kindColor(moment.kind).label.toLowerCase();
@@ -58,7 +62,10 @@ export function MomentRow({
             Clip {clipNum(clipId)}
           </Link>
         ) : (
-          <ExtractButton state="coming" disabled />
+          <ExtractButton
+            state={extractState}
+            onExtract={onExtract ? () => onExtract(moment.start, moment.end) : undefined}
+          />
         )}
       </div>
     </div>

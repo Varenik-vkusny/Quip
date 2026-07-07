@@ -7,6 +7,7 @@ import type {
   CaptionTrack,
   ChaptersData,
   ClipEdit,
+  ClipOut,
   HighlightStyle,
   Job,
   TimelineData,
@@ -55,6 +56,62 @@ export function withToken(url: string, token: string | null | undefined, key = "
   if (!token || !url) return url;
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}${key}=${encodeURIComponent(token)}`;
+}
+
+/** Result of an on-demand clip extraction (POST /jobs/{id}/clips). The worker is the authority on
+ *  the gate: a click always calls it and reacts to the response, so the UI can't drift from
+ *  billing.py. `reason` maps the worker's 402/403/409 to a human message. */
+export type ExtractResult =
+  | { ok: true; clip: ClipOut }
+  | {
+      ok: false;
+      reason: "gated" | "paywall" | "expired" | "auth" | "error";
+      priceUsd?: number;
+      message: string;
+    };
+
+/** Cut a NEW clip from an arbitrary source range [start,end] (an un-clipped moment or a timeline
+ *  drag-select). Returns the pending ClipOut (empty video_url = still rendering, streams in like any
+ *  pending clip), or a typed failure for the gate/paywall/expiry the worker enforces. */
+export async function createClipFromRange(
+  jobId: string,
+  range: { start: number; end: number },
+): Promise<ExtractResult> {
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify(range),
+  });
+  if (res.ok) return { ok: true, clip: (await res.json()) as ClipOut };
+
+  // FastAPI HTTPException nests our payload under `detail`.
+  const body = (await res.json().catch(() => null)) as {
+    error?: string;
+    price_usd?: number;
+    detail?: { error?: string; price_usd?: number } | string;
+  } | null;
+  const detail = typeof body?.detail === "object" ? body?.detail : undefined;
+  const err = body?.error ?? detail?.error;
+  const priceUsd = body?.price_usd ?? detail?.price_usd;
+
+  if (res.status === 403 || err === "upgrade_required")
+    return { ok: false, reason: "gated", message: "Extracting clips is a Pro feature." };
+  if (res.status === 402 || err === "payment_required")
+    return {
+      ok: false,
+      reason: "paywall",
+      priceUsd,
+      message: `That's past your 30 free clips — $${priceUsd ?? 1} to pull this one.`,
+    };
+  if (res.status === 409 || err === "source_expired")
+    return {
+      ok: false,
+      reason: "expired",
+      message: "This video's source is no longer stored — re-upload to extract more.",
+    };
+  if (res.status === 401)
+    return { ok: false, reason: "auth", message: "Sign in to extract clips." };
+  return { ok: false, reason: "error", message: `Couldn't extract this clip (${res.status}).` };
 }
 
 // ── Scoped media tickets (opaque, ~5min TTL, per job) ──
