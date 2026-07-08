@@ -3,79 +3,194 @@
 /*
   ════════════════════════════════════════════════════════════════════════
   QUIP — design tokens (single source of truth). See DESIGN.md for rationale.
-  Direction: Warm Precision (concept C, founder-chosen 2026-06-13) — WARM near-black +
-  scarce coral, Onest display, hairlines over shadows. (Previously cool "Precision Dark"
-  / concept B; founder asked to warm it to C.) Change a value here → whole UI re-skins.
-  Backward-compatible utility names are preserved (bg-bg, text-ink, border-line,
-  text-hook/peak/thought/quote, font-display/sans/mono, rounded-card).
+  Direction: «Studio» / Signal Gold (founder-chosen 2026-07-09, supersedes
+  Warm Precision). TWO THEMES from one token set:
+    - light «stage»  (marketing default): warm off-white, stacked micro-shadows
+    - dark «studio»  (app/editor default): warm near-black, surface ladder + hairlines
+  Runtime switching: [data-theme] on <html> (set pre-paint by the root-layout
+  inline script; NO cookies — keeps marketing SSG). Utility names are stable
+  (bg-bg, text-ink, border-line, text-hook/peak/thought/quote, font-display/
+  sans/mono, rounded-card) — change a value here → whole UI re-skins.
+  Brand rule: gold ONLY on chrome (logo, primary CTA, focus, active nav).
+  Moment colors (hook/peak/thought/quote) are quarantined inside clip cards.
   ════════════════════════════════════════════════════════════════════════
 */
-@theme {
-  /* canvas / surfaces — WARM near-black ladder (brown-black undertone, ~35° hue) */
-  --color-bg: #0c0b09;
-  --color-surface: #15120e;
-  --color-surface-2: #1c1813;
-  --color-surface-3: #241f18;
 
-  /* text (warm off-white; same lightness tiers as before → AA preserved) */
-  --color-ink: #f2efe9;
-  --color-muted: #9a8f80;
-  --color-faint: #8b8276; /* AA ≥4.5:1 on --color-bg for fine print */
+/* ── runtime theme variables ─────────────────────────────────────────── */
+:root {
+  color-scheme: light;
 
-  /* hairlines (elevation = ladder + borders, not shadows) */
-  --color-line: rgba(242, 239, 233, 0.08);
-  --color-line-strong: rgba(242, 239, 233, 0.14);
+  /* canvas / surfaces — warm off-white «stage» */
+  --t-bg: #faf9f5;
+  --t-surface: #ffffff;
+  --t-surface-2: #f2f0ea;
+  --t-surface-3: #eae7df;
 
-  /* signature accent — coral (scarce) */
-  --color-accent: #ff5a3d;
-  --color-accent-2: #e0431f;
-  --color-accent-tint: rgba(255, 90, 61, 0.12);
-  --color-accent-line: rgba(255, 90, 61, 0.3);
+  /* text — warm near-black ink */
+  --t-ink: #1c1a17;
+  --t-muted: #57534a;
+  --t-faint: #6d6759; /* AA ≥4.5:1 on --t-bg for fine print */
 
-  /* clip-type functional colors (encode the moment type) */
-  --color-hook: #ff5a3d;
-  --color-peak: #c06bff;
-  --color-thought: #19bd8b;
-  --color-quote: #4d8dff;
+  /* hairlines */
+  --t-line: rgba(28, 26, 23, 0.09);
+  --t-line-strong: rgba(28, 26, 23, 0.16);
+
+  /* signature accent — Signal Gold (scarce: logo, primary CTA, focus) */
+  --t-accent: #f0a400; /* fill; text on it is always --t-on-accent */
+  --t-accent-2: #dd9500; /* pressed / hover fill */
+  --t-accent-ink: #8f6400; /* TEXT accent on light surfaces (AA) */
+  --t-on-accent: #1c1a17;
+  --t-accent-tint: rgba(240, 164, 0, 0.12);
+  --t-accent-line: rgba(240, 164, 0, 0.45);
+
+  /* clip-moment functional colors (cards only, never chrome) */
+  --t-hook: #d93b1f;
+  --t-peak: #8b3dd9;
+  --t-thought: #0e8a63;
+  --t-quote: #2e6be6;
+  --t-hook-tint: rgba(217, 59, 31, 0.1);
+  --t-peak-tint: rgba(139, 61, 217, 0.1);
+  --t-thought-tint: rgba(14, 138, 99, 0.1);
+  --t-quote-tint: rgba(46, 107, 230, 0.1);
 
   /* semantic */
-  --color-ok: #19bd8b;
-  --color-warn: #f5b32e;
-  --color-bad: #ff6b6b;
+  --t-ok: #0e8a63;
+  --t-warn: #b45309;
+  --t-bad: #c42b2b;
 
+  /* depth — stacked micro-shadows (Vercel recipe), no neon, no single fat drop */
+  --t-shadow-card:
+    0 1px 2px rgba(28, 26, 23, 0.05), 0 4px 14px rgba(28, 26, 23, 0.06),
+    inset 0 0 0 1px rgba(28, 26, 23, 0.06);
+  --t-shadow-card-hover:
+    0 2px 4px rgba(28, 26, 23, 0.06), 0 12px 32px rgba(28, 26, 23, 0.1),
+    inset 0 0 0 1px rgba(28, 26, 23, 0.08);
+  --t-shadow-pop:
+    0 4px 10px rgba(28, 26, 23, 0.08), 0 24px 60px -12px rgba(28, 26, 23, 0.18),
+    inset 0 0 0 1px rgba(28, 26, 23, 0.06);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* canvas / surfaces — warm near-black «studio» ladder */
+  --t-bg: #0d0c0a;
+  --t-surface: #15130f;
+  --t-surface-2: #1c1915;
+  --t-surface-3: #24201a;
+
+  --t-ink: #f4f2ec;
+  --t-muted: #a29b8d;
+  --t-faint: #8b8476; /* AA on --t-bg */
+
+  --t-line: rgba(244, 242, 236, 0.08);
+  --t-line-strong: rgba(244, 242, 236, 0.15);
+
+  --t-accent: #ffb224;
+  --t-accent-2: #ffc24d;
+  --t-accent-ink: #ffc24d;
+  --t-on-accent: #1c1a17;
+  --t-accent-tint: rgba(255, 178, 36, 0.12);
+  --t-accent-line: rgba(255, 178, 36, 0.4);
+
+  --t-hook: #ff5a3d;
+  --t-peak: #c06bff;
+  --t-thought: #19bd8b;
+  --t-quote: #4d8dff;
+  --t-hook-tint: rgba(255, 90, 61, 0.13);
+  --t-peak-tint: rgba(192, 107, 255, 0.13);
+  --t-thought-tint: rgba(25, 189, 139, 0.13);
+  --t-quote-tint: rgba(77, 141, 255, 0.13);
+
+  --t-ok: #19bd8b;
+  --t-warn: #f5b32e;
+  --t-bad: #ff6b6b;
+
+  /* depth — ladder + hairlines; pop reserved for floating cards */
+  --t-shadow-card: inset 0 1px 0 rgba(244, 242, 236, 0.05), 0 0 0 1px var(--t-line);
+  --t-shadow-card-hover:
+    inset 0 1px 0 rgba(244, 242, 236, 0.08), 0 0 0 1px var(--t-line-strong),
+    0 14px 40px -12px rgba(0, 0, 0, 0.6);
+  --t-shadow-pop:
+    inset 0 1px 0 rgba(244, 242, 236, 0.07), 0 0 0 1px var(--t-line-strong),
+    0 24px 60px -12px rgba(0, 0, 0, 0.65);
+}
+
+/* ── Tailwind theme (inline: utilities resolve the runtime vars) ─────── */
+@theme inline {
+  --color-bg: var(--t-bg);
+  --color-surface: var(--t-surface);
+  --color-surface-2: var(--t-surface-2);
+  --color-surface-3: var(--t-surface-3);
+
+  --color-ink: var(--t-ink);
+  --color-muted: var(--t-muted);
+  --color-faint: var(--t-faint);
+
+  --color-line: var(--t-line);
+  --color-line-strong: var(--t-line-strong);
+
+  --color-accent: var(--t-accent);
+  --color-accent-2: var(--t-accent-2);
+  --color-accent-ink: var(--t-accent-ink);
+  --color-on-accent: var(--t-on-accent);
+  --color-accent-tint: var(--t-accent-tint);
+  --color-accent-line: var(--t-accent-line);
+
+  --color-hook: var(--t-hook);
+  --color-peak: var(--t-peak);
+  --color-thought: var(--t-thought);
+  --color-quote: var(--t-quote);
+  --color-hook-tint: var(--t-hook-tint);
+  --color-peak-tint: var(--t-peak-tint);
+  --color-thought-tint: var(--t-thought-tint);
+  --color-quote-tint: var(--t-quote-tint);
+
+  --color-ok: var(--t-ok);
+  --color-warn: var(--t-warn);
+  --color-bad: var(--t-bad);
+
+  --shadow-card: var(--t-shadow-card);
+  --shadow-card-hover: var(--t-shadow-card-hover);
+  --shadow-pop: var(--t-shadow-pop);
+}
+
+@theme {
   /* fonts (provided by next/font in layout.tsx) */
   --font-display: var(--font-onest), system-ui, sans-serif;
   --font-sans: var(--font-onest), system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, monospace;
 
-  /* radii */
+  /* radii — one system: cards 14-16, inputs 8-10, CTAs pill */
   --radius-sm: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-xl: 20px;
-  --radius-card: 14px;
+  --radius-card: 16px;
   --radius-pill: 999px;
 
-  /* semantic display/heading scale (size · line-height · tracking · weight) */
-  --text-display-2xl: 4.5rem;
-  --text-display-2xl--line-height: 1.02;
+  /* semantic display/heading scale (size · line-height · tracking · weight).
+     Premium retune 2026-07-09: weight ceiling 650 (was 800) + tight tracking —
+     the Linear/Framer move; hierarchy comes from weight+color, not shouting. */
+  --text-display-2xl: 4.25rem;
+  --text-display-2xl--line-height: 1.04;
   --text-display-2xl--letter-spacing: -0.03em;
-  --text-display-2xl--font-weight: 800;
+  --text-display-2xl--font-weight: 650;
 
-  --text-display-xl: 3.5rem;
-  --text-display-xl--line-height: 1.04;
+  --text-display-xl: 3.25rem;
+  --text-display-xl--line-height: 1.05;
   --text-display-xl--letter-spacing: -0.028em;
-  --text-display-xl--font-weight: 800;
+  --text-display-xl--font-weight: 650;
 
   --text-display-lg: 2.5rem;
-  --text-display-lg--line-height: 1.06;
-  --text-display-lg--letter-spacing: -0.024em;
-  --text-display-lg--font-weight: 700;
+  --text-display-lg--line-height: 1.07;
+  --text-display-lg--letter-spacing: -0.026em;
+  --text-display-lg--font-weight: 620;
 
   --text-h2: 1.875rem;
   --text-h2--line-height: 1.12;
-  --text-h2--letter-spacing: -0.02em;
-  --text-h2--font-weight: 700;
+  --text-h2--letter-spacing: -0.022em;
+  --text-h2--font-weight: 620;
 
   --text-h3: 1.375rem;
   --text-h3--line-height: 1.25;
@@ -93,6 +208,7 @@
 
   /* motion */
   --ease-snappy: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
 
   /* layout */
   --container-page: 1200px;
@@ -112,10 +228,22 @@
 
 /* ─────────────────────────── base ─────────────────────────── */
 html {
-  background: var(--color-bg);
-  color: var(--color-ink);
+  background: var(--t-bg);
+  color: var(--t-ink);
   scroll-behavior: smooth;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* smooth theme switch: the toggle adds .theming for one transition beat */
+html.theming,
+html.theming *,
+html.theming *::before,
+html.theming *::after {
+  transition:
+    background-color 0.3s var(--ease-out-strong),
+    color 0.3s var(--ease-out-strong),
+    border-color 0.3s var(--ease-out-strong),
+    box-shadow 0.3s var(--ease-out-strong) !important;
 }
 
 body {
@@ -134,29 +262,29 @@ body {
 :focus-visible {
   outline: none;
   box-shadow:
-    0 0 0 2px var(--color-bg),
-    0 0 0 4px var(--color-accent-line);
+    0 0 0 2px var(--t-bg),
+    0 0 0 4px var(--t-accent-line);
   border-radius: var(--radius-sm);
 }
 
 ::selection {
-  background: var(--color-accent-tint);
-  color: var(--color-ink);
+  background: var(--t-accent-tint);
+  color: var(--t-ink);
 }
 
-/* subtle dark scrollbar (instrument feel) */
+/* subtle scrollbar (instrument feel) — follows theme via tokens */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-surface-3) transparent;
+  scrollbar-color: var(--t-surface-3) transparent;
 }
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--color-surface-3);
+  background: var(--t-surface-3);
   border-radius: 999px;
-  border: 3px solid var(--color-bg);
+  border: 3px solid var(--t-bg);
 }
 
 /* horizontal touch galleries (preset strips, chip rows): keep swipe, hide the bar.
@@ -188,16 +316,16 @@ input[type="range"].range-touch::-webkit-slider-thumb {
   height: 20px;
   margin-top: -8px; /* center the 20px thumb on the thin track */
   border-radius: 999px;
-  background: var(--color-accent);
-  border: 2px solid var(--color-bg);
+  background: var(--t-accent);
+  border: 2px solid var(--t-bg);
   cursor: pointer;
 }
 input[type="range"].range-touch::-moz-range-thumb {
   width: 20px;
   height: 20px;
   border-radius: 999px;
-  background: var(--color-accent);
-  border: 2px solid var(--color-bg);
+  background: var(--t-accent);
+  border: 2px solid var(--t-bg);
   cursor: pointer;
 }
 
@@ -234,14 +362,9 @@ input[type="range"].range-touch::-moz-range-thumb {
 }
 
 /* ─────────────────────── Landing page additions ───────────────────────
-   Ported from the standalone landing (quip-landing-delivery). ADDITIVE ONLY:
-   every selector below is a NEW class name the rest of the app does not use
-   (verified: zero collisions), so dashboard/editor surfaces are untouched.
-   The shared Warm-Precision @theme tokens already exist above. The landing's
-   --ease-out entrance curve is SCOPED to the .grain subtree (below) so it never
-   overrides Tailwind's global `ease-out` utility (dashboard / NavProgress keep
-   the default curve). Everything here is reached only via the .grain wrapper in
-   app/(home)/layout.tsx. */
+   Landing-scoped helpers. Reached via the .grain wrapper in app/(home)/layout.tsx;
+   marketing sub-pages reuse .container-page / .lift / .edge-fade. All token-driven
+   so they work in BOTH themes. */
 
 /* landing-only motion curve. Set on .grain so var(--ease-out) used by .lift and
    the landing CTAs (ease-[var(--ease-out)]) resolves to the emil entrance curve
@@ -267,24 +390,26 @@ input[type="range"].range-touch::-moz-range-thumb {
    Used as a fixed background wash; pointer-events none. */
 .graticule {
   background-image:
-    linear-gradient(to right, var(--color-line) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--color-line) 1px, transparent 1px);
+    linear-gradient(to right, var(--t-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--t-line) 1px, transparent 1px);
   background-size: 64px 64px;
 }
 
-/* film grain — ONLY on a fixed pointer-events-none overlay (perf: no scroll repaint). */
+/* film grain — ONLY on a fixed pointer-events-none overlay (perf: no scroll repaint).
+   Slightly quieter on the light stage than it was on the dark-only brand. */
 .grain::after {
   content: "";
   position: fixed;
   inset: 0;
   z-index: 60;
   pointer-events: none;
-  opacity: 0.035;
+  opacity: 0.028;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* hover-lift for cards (emil: transform/opacity only, gated to real hover devices).
-   Subtle 3px rise + a faint warm bloom, never coral. Settles on a strong ease-out. */
+   Subtle 3px rise; shadow recipe comes from the theme (stacked micro on light,
+   hairline+drop on dark). Never gold. */
 .lift {
   transition:
     transform 0.22s var(--ease-out),
@@ -295,16 +420,14 @@ input[type="range"].range-touch::-moz-range-thumb {
 @media (hover: hover) and (pointer: fine) {
   .lift:hover {
     transform: translateY(-3px);
-    border-color: var(--color-line-strong);
-    box-shadow:
-      inset 0 1px 0 rgba(242, 239, 233, 0.08),
-      0 14px 40px -12px rgba(0, 0, 0, 0.6);
+    border-color: var(--t-line-strong);
+    box-shadow: var(--t-shadow-card-hover);
   }
 }
 
-/* coral underline-mark for emphasized words (NOT a serif swap — same family) */
+/* gold text-mark for emphasized words (same family, weight/color emphasis only) */
 .mark-accent {
-  color: var(--color-accent);
+  color: var(--t-accent-ink);
 }
 
 /* mono numeral helper (scores, timecodes, prices) */

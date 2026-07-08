@@ -5,6 +5,7 @@ import { IBM_Plex_Mono, Onest } from "next/font/google";
 import { YandexMetrika } from "@/components/analytics/YandexMetrika";
 import { FeedbackWidgetLoader } from "@/components/app/FeedbackWidgetLoader";
 import { NavProgress } from "@/components/ui/NavProgress";
+import { ThemeApplier } from "@/components/ui/ThemeApplier";
 import { DEFAULT_LOCALE } from "@/i18n/locale";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
@@ -89,11 +90,23 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-full bg-bg text-ink antialiased">
-        {/* Mark JS active before paint so scroll-reveal only hides content when it
-            can actually animate it back in (no-JS / crawlers see everything). */}
+        {/* Pre-paint bootstrap: (1) mark JS active so scroll-reveal only hides
+            content when it can animate it back in; (2) resolve the THEME before
+            first paint (no flash). Theme rule: explicit user choice (localStorage
+            "quip-theme") wins everywhere; otherwise the surface default — the app
+            side (/dashboard, /account, /edit, auth, /dev) opens as the dark
+            «studio», marketing opens as the light «stage». Deliberately NO cookie:
+            reading one in the root layout would opt the whole static marketing/SEO
+            surface out of SSG (see the locale comment above). SPA navigations are
+            handled by <ThemeApplier/> (client), which re-applies the surface
+            default on route change while respecting the saved choice. */}
         <script
-          dangerouslySetInnerHTML={{ __html: "document.documentElement.classList.add('js')" }}
+          dangerouslySetInnerHTML={{
+            __html:
+              "(function(){var d=document.documentElement;d.classList.add('js');var t=null;try{t=localStorage.getItem('quip-theme')}catch(e){}if(t!=='light'&&t!=='dark'){t=/^\\/(dashboard|account|edit|login|signup|auth|dev)(\\/|$)/.test(location.pathname)?'dark':'light'}d.dataset.theme=t})()",
+          }}
         />
+        <ThemeApplier />
         {/* NavProgress + FeedbackWidgetLoader use no next-intl APIs, so they render fine
             outside any provider (verified: neither imports next-intl). */}
         <NavProgress />
