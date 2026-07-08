@@ -17,6 +17,7 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import { Spinner } from "@/components/ui/Spinner";
 import { Split } from "@/components/ui/Split";
+import { ResultTabs } from "@/components/videomap/ResultTabs";
 import {
   cancelJob,
   clearUploadCheckpoint,
@@ -29,6 +30,7 @@ import { markReviewed, noteRecentCreated } from "@/lib/recent";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { useJob } from "@/lib/useJob";
+import { useUsage } from "@/lib/useUsage";
 
 // Heavy, phase-gated result views — NOT shown on the idle "New project" first paint (the only
 // thing a returning user sees before they submit). Code-split so their JS (and their transitive
@@ -68,10 +70,10 @@ const ClipGrid = dynamic(() => import("@/components/ClipGrid").then((m) => m.Cli
   ssr: false,
   loading: () => <ClipGridSkeleton />,
 });
-const VideoMap = dynamic(() => import("@/components/VideoMap").then((m) => m.VideoMap), {
-  ssr: false,
-  loading: () => <VideoMapSkeleton />,
-});
+const ResultsVideoMap = dynamic(
+  () => import("@/components/videomap/ResultsVideoMap").then((m) => m.ResultsVideoMap),
+  { ssr: false, loading: () => <VideoMapSkeleton /> },
+);
 
 /** Friendly label for the recent-projects list (no PII, just a hint). */
 function labelFromUrl(url: string): string {
@@ -181,6 +183,7 @@ function DashboardInner() {
   const t = useTranslations("dashboard");
   const router = useRouter();
   const { job, jobId, error: pollError, reconnecting, elapsed, start, reset, reconnectNow } = useJob();
+  const { usage } = useUsage(); // owner plan → drives the Video Map's Extract gate
   const [submitting, setSubmitting] = useState(false);
   const [upload, setUpload] = useState<UploadProgressInfo | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -429,10 +432,13 @@ function DashboardInner() {
             />
           )
         ) : phase === "done" && job ? (
-          <>
-            <VideoMap jobId={job.id} clips={job.clips ?? []} />
-            <ClipGrid key={job.id} job={job} />
-          </>
+          <ResultTabs
+            clipCount={job.clips?.length ?? 0}
+            clips={<ClipGrid key={job.id} job={job} />}
+            map={
+              <ResultsVideoMap jobId={job.id} clips={job.clips ?? []} plan={usage?.plan} />
+            }
+          />
         ) : phase === "cancelled" ? (
           <div className="mx-auto max-w-xl">
             <Eyebrow tone="faint">{t("runStopped")}</Eyebrow>
