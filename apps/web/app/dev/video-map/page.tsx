@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { RealJobCockpit } from "@/components/videomap/RealJobCockpit";
 import { VideoMapCockpit } from "@/components/videomap/VideoMapCockpit";
 import { CARDI_B_FIXTURE } from "@/lib/fixtures/videoMapCardiB";
 
@@ -22,7 +23,7 @@ export default async function DevVideoMapPage({
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
       {jobId ? (
-        <VideoMapCockpit jobId={jobId} />
+        <RealJobCockpit jobId={jobId} />
       ) : (
         <VideoMapCockpit
           jobId={CARDI_B_FIXTURE.jobId}
