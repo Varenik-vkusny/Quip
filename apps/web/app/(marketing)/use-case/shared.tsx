@@ -54,7 +54,7 @@ const CHROME: Record<Locale, {
     moreUseCases: "Ещё кейсы",
     pricing: "Тарифы",
     noCardEmphasis: "Без карты.",
-    noCard: "2 видео бесплатно каждый месяц.",
+    noCard: "1 видео бесплатно каждый месяц.",
     ctaOpen: "Открыть приложение",
     ctaTry: "Попробовать бесплатно",
   },

@@ -64,7 +64,7 @@ Credit model: **1 credit = 60 minutes of source video.**
 
 | Plan | Price | Credits / mo | Notes |
 |---|---|---|---|
-| **Free** | $0 | **2** (≈120 min) | watermark, 720p cap |
+| **Free** | $0 | **1** (≈60 min) | watermark, 720p cap |
 | **Starter** | **$15/mo** | **10** (≈600 min) | no watermark, 1080p |
 | **Pro** | **$35/mo** | **30** (≈1800 min) | 1080p, queue priority |
 | **PAYG** | **$3** | 1 credit (one-off) | credits don't expire |

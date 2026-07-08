@@ -152,6 +152,6 @@ def test_usage_endpoint_defaults_without_user(monkeypatch) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["plan"] == "free"
-    assert body["monthly_videos"] == 2  # free = 2 видео
-    assert body["monthly_minutes"] == 120  # = 2 × 60 мин
-    assert body["remaining_videos"] == 2.0 and body["remaining_minutes"] == 120.0
+    assert body["monthly_videos"] == 1  # free = 1 видео
+    assert body["monthly_minutes"] == 60  # = 1 × 60 мин
+    assert body["remaining_videos"] == 1.0 and body["remaining_minutes"] == 60.0

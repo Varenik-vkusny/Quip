@@ -28,7 +28,7 @@ class TestVideoUnits:
         assert minutes_to_videos(522) == 8.7
 
     def test_plan_monthly_minutes(self) -> None:
-        assert plan_monthly_minutes(resolve_plan("free")) == 120  # 2 видео
+        assert plan_monthly_minutes(resolve_plan("free")) == 60  # 1 видео
         assert plan_monthly_minutes(resolve_plan("starter")) == 600  # 10 видео
         assert plan_monthly_minutes(resolve_plan("pro")) == 1800  # 30 видео
 
@@ -144,17 +144,17 @@ class TestCheckQuota:
         assert d.allowed is True
         assert d.from_monthly_min == 10.0 and d.from_payg_min == 0.0
 
-    def test_free_two_videos_equals_120_min(self) -> None:
-        # free = 2 видео = 120 мин: 119 мин использовано → ещё 1 мин ок; ровно 120 → отказ.
-        assert check_quota("free", 119.0, 0.0, 1.0).allowed is True
-        assert check_quota("free", 120.0, 0.0, 5.0).allowed is False
+    def test_free_one_video_equals_60_min(self) -> None:
+        # free = 1 видео = 60 мин: 59 мин использовано → ещё 1 мин ок; ровно 60 → отказ.
+        assert check_quota("free", 59.0, 0.0, 1.0).allowed is True
+        assert check_quota("free", 60.0, 0.0, 5.0).allowed is False
 
     def test_free_has_no_per_video_cap_only_quota(self) -> None:
-        # Free больше НЕ капит длину одного видео: 90-мин видео ОК, если влезает в месячный
-        # пул (120 мин). Длина ограничена только остатком минут + техпотолком.
-        assert check_quota("free", 0.0, 0.0, 90.0).allowed is True
-        # видео длиннее остатка минут (120) → отказ по КВОТЕ, не по per-video кэпу
-        over = check_quota("free", 0.0, 0.0, 130.0)
+        # Free больше НЕ капит длину одного видео: 60-мин видео ОК — весь месячный пул (60 мин).
+        # Длина ограничена только остатком минут + техпотолком, не per-video кэпом.
+        assert check_quota("free", 0.0, 0.0, 60.0).allowed is True
+        # видео длиннее остатка минут (60) → отказ по КВОТЕ, не по per-video кэпу
+        over = check_quota("free", 0.0, 0.0, 70.0)
         assert over.allowed is False
         assert over.reason is not None and "minutes" in over.reason.lower()
 
@@ -235,7 +235,7 @@ class TestPlansShape:
         )
 
     def test_monthly_videos(self) -> None:
-        assert PLANS["free"].monthly_videos == 2
+        assert PLANS["free"].monthly_videos == 1
         assert PLANS["starter"].monthly_videos == 10
         assert PLANS["pro"].monthly_videos == 30
         assert PLANS["studio"].monthly_videos == 42

@@ -2,7 +2,7 @@
  * Disposable / temp-mail domain blocklist — MIRRORS
  * services/worker/app/billing.py DISPOSABLE_EMAIL_DOMAINS (the enforcement source of truth).
  *
- * Anti-abuse: the free plan (2 videos) gets farmed with throwaway inboxes. The SERVER is the
+ * Anti-abuse: the free plan (1 video) gets farmed with throwaway inboxes. The SERVER is the
  * authority (rejects disposable domains at the free-job gate); this client copy is UX only —
  * it blocks obvious throwaway domains before submit with a friendly message. Keep in sync when
  * billing.py changes.

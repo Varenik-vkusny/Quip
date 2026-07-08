@@ -30,8 +30,8 @@ export const PLANS: PlanDisplay[] = [
     name: "Free",
     price: 0,
     tagline: "See it work, no card required.",
-    limit: "2 videos / month",
-    limitNote: "120 minutes of source to use however you like.",
+    limit: "1 video / month",
+    limitNote: "60 minutes of source to use however you like.",
     cta: "Start free",
     features: [
       "Explainable clips with hook, score and reason",
