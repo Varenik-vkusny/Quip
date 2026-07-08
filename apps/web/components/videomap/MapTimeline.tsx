@@ -418,15 +418,24 @@ export function MapTimeline({
             })}
           </div>
 
-          {/* Selection overlay */}
+          {/* Selection overlay (accent — strong so it's obvious a range is chosen) */}
           {sel && fracOf(selLo) <= 1 && fracOf(selHi) >= 0 && (
             <div
-              className="pointer-events-none absolute inset-y-0 z-20 border-x border-accent bg-accent/15"
+              className="pointer-events-none absolute inset-y-0 z-20 border-x-2 border-accent bg-accent/25"
               style={{
                 left: leftPct(selLo),
                 width: `${Math.max(((selHi - selLo) / viewLen) * 100, 0)}%`,
               }}
             />
+          )}
+
+          {/* Select-mode instruction, until the user draws a range. */}
+          {mode === "select" && !sel && (
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+              <span className="rounded-md bg-black/60 px-2.5 py-1 text-xs font-medium text-white/90">
+                Drag across the section you want as a clip
+              </span>
+            </div>
           )}
 
           {/* Hover cursor (thin ink line, distinct from the white playhead) */}

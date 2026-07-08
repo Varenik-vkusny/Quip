@@ -273,21 +273,34 @@ export function VideoMapCockpit({
                 />
               </div>
 
-              {/* Contextual panel: a drag-selection becomes an extract target; otherwise a quiet
-                  you-are-here so the rail never reads as empty space. */}
-              <div className="rounded-lg border border-line bg-surface px-4 py-3">
+              {/* Contextual panel. A drag-selection becomes a LOUD extract target (accent bar so it's
+                  unmissable); otherwise a quiet you-are-here so the rail never reads as empty space. */}
+              <div
+                className={`rounded-lg border px-4 py-3 transition-colors duration-150 ${
+                  selection ? "border-accent/60 bg-accent/10" : "border-line bg-surface"
+                }`}
+              >
                 {selection ? (
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-muted">
-                      Selected{" "}
-                      <Numeral className="tabular-nums text-ink">
+                    <div className="min-w-0">
+                      <span className="block text-xs font-medium text-accent">Selected range</span>
+                      <Numeral className="mt-0.5 block text-sm font-semibold tabular-nums text-ink">
                         {mmss(selection.start)}-{mmss(selection.end)}
                       </Numeral>
-                    </span>
-                    <ExtractButton
-                      state={extractState}
-                      onExtract={() => handleExtract(selection.start, selection.end)}
-                    />
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setSelection(null)}
+                        className="text-xs font-medium text-muted transition-colors duration-150 hover:text-ink"
+                      >
+                        Clear
+                      </button>
+                      <ExtractButton
+                        state={extractState}
+                        onExtract={() => handleExtract(selection.start, selection.end)}
+                      />
+                    </div>
                   </div>
                 ) : nowChapter ? (
                   <p className="text-xs leading-relaxed">
@@ -296,7 +309,7 @@ export function VideoMapCockpit({
                   </p>
                 ) : (
                   <p className="text-xs leading-relaxed text-muted">
-                    Click a moment to jump here, or drag the timeline to pull a new clip.
+                    Click a moment to jump here, or use Select on the timeline to pull a new clip.
                   </p>
                 )}
               </div>
