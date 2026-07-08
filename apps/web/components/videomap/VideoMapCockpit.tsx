@@ -15,9 +15,11 @@ import { MapTimeline } from "./MapTimeline";
 import { NarrativeCollapse } from "./NarrativeCollapse";
 import { SourcePreview } from "./SourcePreview";
 
-// The Video Map cockpit: whole-video timeline (the map) on top, then a sticky media rail (source
-// preview + a contextual you-are-here / extract panel) beside the clickable outline, then the
-// demoted narrative. Everything shares ONE playhead. `initialMap` (fixture harness) short-circuits
+// The Video Map cockpit: a left rail (source preview → the whole-video timeline/scrubber → a
+// contextual you-are-here / extract panel) beside the clickable outline, then the demoted narrative.
+// The timeline sits directly under the video so the rail has no dead space and both columns end near
+// the same height. Everything shares ONE playhead (click = seek+play; timeline drag = scrub, seek
+// without play). `initialMap` (fixture harness) short-circuits
 // the poll. An un-clipped moment (or a timeline drag-select) can be EXTRACTED into a new clip via
 // POST /jobs/{id}/clips (the worker enforces the Pro/Studio gate + free-cap paywall); the new clip
 // is merged optimistically so the moment flips to "Clip N" and coverage updates live. `demoMode`
@@ -61,7 +63,7 @@ export function VideoMapCockpit({
   // ONE shared playhead: SourcePreview pushes source time here; outline/timeline seek through the
   // imperative seekRef (published by SourcePreview) so a jump doesn't wait on a React re-render.
   const [playheadSec, setPlayheadSec] = useState(0);
-  const seekRef = useRef<((sec: number) => void) | null>(null);
+  const seekRef = useRef<((sec: number, opts?: { play?: boolean }) => void) | null>(null);
   const [selection, setSelection] = useState<{ start: number; end: number } | null>(null);
 
   // Clips pulled this session (optimistic): merged over the prop clips so classification/coverage
@@ -102,9 +104,15 @@ export function VideoMapCockpit({
     };
   }, [initialMap, poll]);
 
+  // Click-to-jump: move the playhead AND play from there.
   const seek = useCallback((sec: number) => {
     setPlayheadSec(sec);
-    seekRef.current?.(sec);
+    seekRef.current?.(sec, { play: true });
+  }, []);
+  // Scrub: seek the frame WITHOUT play, so dragging the timeline previews without auto-playing.
+  const scrub = useCallback((sec: number) => {
+    setPlayheadSec(sec);
+    seekRef.current?.(sec, { play: false });
   }, []);
 
   const chapters = map?.chapters ?? [];
@@ -237,21 +245,11 @@ export function VideoMapCockpit({
             </div>
           )}
 
-          {/* Whole-video timeline — the map. Full width, on top. */}
-          <div className="rounded-lg border border-line bg-surface px-4 py-4">
-            <MapTimeline
-              chapters={chapters}
-              clips={clipList}
-              durationSec={durationSec}
-              playheadSec={playheadSec}
-              onSeek={seek}
-              onSelectRange={setSelection}
-            />
-          </div>
-
-          {/* Media rail (sticky) + outline */}
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,400px)_1fr] lg:items-start">
-            <div className="space-y-3 lg:sticky lg:top-4">
+          {/* Left rail (preview → timeline → contextual panel) beside the outline. Stacking the
+              timeline UNDER the short 16:9 preview fills what used to be dead space below it, and
+              the two columns now end near the same height. */}
+          <div className="grid gap-4 lg:grid-cols-[1fr_minmax(320px,380px)] lg:items-start">
+            <div className="space-y-4">
               {previewUrl ? (
                 <SourcePreview previewUrl={previewUrl} onTime={setPlayheadSec} seekRef={seekRef} />
               ) : (
@@ -261,6 +259,19 @@ export function VideoMapCockpit({
                   </p>
                 </div>
               )}
+
+              {/* Whole-video timeline — the scrubber, directly under the video. */}
+              <div className="rounded-lg border border-line bg-surface px-4 py-4">
+                <MapTimeline
+                  chapters={chapters}
+                  clips={clipList}
+                  durationSec={durationSec}
+                  playheadSec={playheadSec}
+                  onSeek={seek}
+                  onScrub={scrub}
+                  onSelectRange={setSelection}
+                />
+              </div>
 
               {/* Contextual panel: a drag-selection becomes an extract target; otherwise a quiet
                   you-are-here so the rail never reads as empty space. */}
@@ -291,14 +302,17 @@ export function VideoMapCockpit({
               </div>
             </div>
 
-            <MapOutline
-              chapters={chapters}
-              clips={clipList}
-              jobId={jobId}
-              onSeek={seek}
-              extractState={extractState}
-              onExtract={handleExtract}
-            />
+            {/* Outline — sticky on desktop, height-capped to balance the left rail. */}
+            <div className="lg:sticky lg:top-4">
+              <MapOutline
+                chapters={chapters}
+                clips={clipList}
+                jobId={jobId}
+                onSeek={seek}
+                extractState={extractState}
+                onExtract={handleExtract}
+              />
+            </div>
           </div>
 
           {/* Demoted narrative */}

@@ -21,7 +21,7 @@ export function SourcePreview({
 }: {
   previewUrl: string;
   onTime: (sec: number) => void;
-  seekRef: React.MutableRefObject<((sec: number) => void) | null>;
+  seekRef: React.MutableRefObject<((sec: number, opts?: { play?: boolean }) => void) | null>;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   // Keep the latest onTime in a ref so the frame loop never re-subscribes (a new closure each render
@@ -31,11 +31,13 @@ export function SourcePreview({
     onTimeRef.current = onTime;
   }, [onTime]);
 
-  // Publish the imperative seek: set currentTime + play. Cleared on unmount so a stale closure can't
+  // Publish the imperative seek: set currentTime, and play UNLESS the caller opts out. Scrubbing
+  // passes `{ play: false }` so dragging the timeline seeks each frame without ever hitting play()
+  // (a click-to-jump keeps the default → seek + play). Cleared on unmount so a stale closure can't
   // seek a gone element.
   useEffect(() => {
     const ref = seekRef;
-    ref.current = (s: number) => {
+    ref.current = (s: number, opts?: { play?: boolean }) => {
       const v = videoRef.current;
       if (!v) return;
       try {
@@ -43,9 +45,11 @@ export function SourcePreview({
       } catch {
         /* seek before loadedmetadata can throw — harmless, next play() retries */
       }
-      void v.play().catch(() => {
-        /* autoplay/gesture policies — the frame still seeks, that's what we need */
-      });
+      if (opts?.play !== false) {
+        void v.play().catch(() => {
+          /* autoplay/gesture policies — the frame still seeks, that's what we need */
+        });
+      }
     };
     return () => {
       ref.current = null;

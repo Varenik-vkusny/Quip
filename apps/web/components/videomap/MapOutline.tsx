@@ -112,7 +112,7 @@ export function MapOutline({
   onExtract?: (start: number, end: number) => void;
 }) {
   return (
-    <div className="max-h-[560px] overflow-y-auto rounded-lg border border-line bg-surface">
+    <div className="max-h-[560px] overflow-y-auto rounded-lg border border-line bg-surface lg:max-h-[640px]">
       {chapters.map((ch, i) => (
         <ChapterOutlineItem
           key={i}
