@@ -10,11 +10,11 @@ import { isSupabaseConfigured } from "./supabase/config";
 export const FREE_DEFAULT: UsageInfo = {
   plan: "free",
   plan_name: "Free",
-  monthly_videos: 2,
-  monthly_minutes: 120,
+  monthly_videos: 1,
+  monthly_minutes: 60,
   used_minutes: 0,
-  remaining_minutes: 120,
-  remaining_videos: 2,
+  remaining_minutes: 60,
+  remaining_videos: 1,
   payg_videos: 0,
   payg_minutes: 0,
 };

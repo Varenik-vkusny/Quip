@@ -128,8 +128,8 @@ export type CreateJobInput = {
 export interface UsageInfo {
   plan: string;
   plan_name: string;
-  monthly_videos: number; // план: видео/мес (free=2)
-  monthly_minutes: number; // = monthly_videos × 60 (free=120)
+  monthly_videos: number; // план: видео/мес (free=1)
+  monthly_minutes: number; // = monthly_videos × 60 (free=60)
   used_minutes: number; // израсходовано в этом месяце (дробно)
   remaining_minutes: number; // осталось в месячном пуле (без PAYG)
   remaining_videos: number; // = remaining_minutes / 60 (напр. 8.7)

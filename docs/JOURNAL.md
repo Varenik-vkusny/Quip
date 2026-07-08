@@ -4,6 +4,20 @@
 > «как и почему так сделано». Актуальное состояние проекта = docs/README.md. Правила = CLAUDE.md.
 > Новые заметные решения дописывай СЮДА (не в CLAUDE.md).
 
+### 2026-07-08 (биллинг) — Free снижен 2 → 1 видео/мес (60 мин)
+Фаундер: бесплатный план должен выдавать ОДНО видео на анализ, не два. Источник правды —
+`billing.py` `PLANS["free"].monthly_videos` **2 → 1** (месячный пул минут 120 → 60; per-video
+кэпа по-прежнему нет). Зеркала синхронизированы В ТОМ ЖЕ заходе: `lib/plans.ts` (limit/limitNote),
+`lib/landingContent.ts` (EN+RU: allowance-плашка Free, FAQ, trust-строки), `lib/useCases.ts` (EN+RU:
+pricing-body, FAQ, meta-descriptions), `lib/faq.ts`, `messages/ru.json` (signup-subtitle),
+`app/(marketing)/use-case/shared.tsx`, `lib/useUsage.ts` (`FREE_DEFAULT`), комменты `lib/api.ts` +
+`lib/disposableEmail.ts` + `main.py`. TDD на квоте: RED (4 fail в test_billing) → правка константы →
+GREEN; обновлены `test_billing`/`test_auth`/`test_polar` (пул free исчерпывается ОДНИМ 60-мин джобом).
+Доки: PRODUCT_CAPABILITIES / PRODUCT_BRIEF / README (credit-model строка) / SUPABASE_SETUP. `just check`
+зелёный (worker 1338 pytest, web 185 vitest, mypy/tsc/ruff/eslint/anti-drift). `quip-landing-delivery/`
+(исходный порт-пакет, НЕ деплоится) намеренно НЕ трогали. **НЕ задеплоено** — ждёт worker-redeploy
+(Cloud Run) + фронт `vercel --prod`.
+
 ### 2026-07-07 (resilient upload + реальная энергия клипа + паспорт лимитов) — фаундер-сессия
 Диагностика 3 read-only агентами → фикс двух проблем. **Загрузка больших видео (нестабильность):** корень —
 `putPart` без `xhr.timeout`/вотчдога (застрявший сокет → `Promise.all` вечно висит на ~99%, без ошибки),

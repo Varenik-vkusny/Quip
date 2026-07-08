@@ -167,7 +167,7 @@
   (billing, credits, usage-idempotency, feedback, promo codes, job-cancel, agent-runs, **video-map**). Clips in **Cloudflare R2**
   (`cdn.quip.ink`).
 - **Billing is ON** (`BILLING_ENABLED`). Payments via **Polar** (NOT Lemon Squeezy). Webhook live
-  and verified. Pricing = **credit model** (Free $0 / 2 · Starter $15 / 10 · Pro $35 / 30 · PAYG $3);
+  and verified. Pricing = **credit model** (Free $0 / 1 · Starter $15 / 10 · Pro $35 / 30 · PAYG $3);
   source of truth = `services/worker/app/billing.py`, mirrored by `apps/web/lib/plans.ts`.
   ⏳ **Studio $49 / 42 videos** — код проведён (billing/polar/plans.ts, Polar-продукт `708186c8-…`), но
   НЕ live: нужна миграция **0016** (`profiles.plan` CHECK += 'studio') + редеплой воркера + push фронта.

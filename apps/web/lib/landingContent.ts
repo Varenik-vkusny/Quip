@@ -405,7 +405,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$0",
           cadence: "forever",
           blurb: "See it work, no card required.",
-          allowance: "2 videos / mo · 120 min",
+          allowance: "1 video / mo · 60 min",
           features: [
             "Explainable clips with hook, score and reason",
             "Smooth 9:16 reframe that tracks the speaker",
@@ -503,7 +503,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
         {
           q: "Is the free plan actually free?",
-          a: "Yes. 2 videos a month, that's 120 minutes of source to use however you like, no card required. Free exports carry a small watermark; paid plans drop it and export at full 1080p.",
+          a: "Yes. 1 video a month, that's 60 minutes of source to use however you like, no card required. Free exports carry a small watermark; paid plans drop it and export at full 1080p.",
         },
       ],
     },
@@ -578,7 +578,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       sub: "Загрузите подкаст, интервью или стрим. Quip нарежет те несколько клипов, что стоит выложить, и объяснит, почему каждый сработает — чтобы вы тратили время на монтаж, а не на поиск моментов.",
       primary: "Загрузить видео",
       secondary: "Как это работает",
-      trust: "Без карты. 2 видео в месяц бесплатно.",
+      trust: "Без карты. 1 видео в месяц бесплатно.",
     },
     clipText: {
       hero: {
@@ -747,7 +747,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           price: "$0",
           cadence: "навсегда",
           blurb: "Посмотрите, как работает. Без карты.",
-          allowance: "2 видео / мес · 120 мин",
+          allowance: "1 видео / мес · 60 мин",
           features: [
             "Объяснимые клипы: хук, оценка и причина",
             "Плавный рефрейм 9:16 за спикером",
@@ -845,7 +845,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
         {
           q: "Бесплатный план правда бесплатный?",
-          a: "Да. 2 видео в месяц — это 120 минут исходника, как угодно, без карты. На бесплатном экспорт идёт с небольшой вотермаркой; платные её убирают и экспортируют в полном 1080p.",
+          a: "Да. 1 видео в месяц — это 60 минут исходника, как угодно, без карты. На бесплатном экспорт идёт с небольшой вотермаркой; платные её убирают и экспортируют в полном 1080p.",
         },
       ],
     },
@@ -855,7 +855,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       sub: "Загрузите видео и получите несколько клипов, за которые не стыдно — каждый с причиной, почему он работает, и с оценкой, которой можно верить.",
       primary: "Попробовать Quip бесплатно",
       secondary: "Смотреть тарифы",
-      trust: "Без карты. 2 видео в месяц бесплатно. Отмена в любой момент.",
+      trust: "Без карты. 1 видео в месяц бесплатно. Отмена в любой момент.",
     },
     footer: {
       tagline:

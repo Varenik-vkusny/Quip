@@ -336,10 +336,9 @@ def test_create_job_quota_gate_blocks_over_limit(monkeypatch) -> None:
     db.set_user_plan(uid, "free")
     month = billing.current_month()
     # Create-time гейт (_enforce_quota) меряет МИНУТЫ (SUM source_minutes), НЕ число событий, и
-    # роняет 402 только когда месячный пул + PAYG на нуле. Исчерпываем весь пул free (2 видео =
-    # 120 мин). Уникальные job_id ({uid}_*): record_usage дедуплит по ГЛОБАЛЬНОМУ job_id.
-    db.record_usage(uid, f"{uid}_j1", 60.0, month)
-    db.record_usage(uid, f"{uid}_j2", 60.0, month)  # 120 мин = месячный пул free исчерпан
+    # роняет 402 только когда месячный пул + PAYG на нуле. Исчерпываем весь пул free (1 видео =
+    # 60 мин). Уникальные job_id ({uid}_*): record_usage дедуплит по ГЛОБАЛЬНОМУ job_id.
+    db.record_usage(uid, f"{uid}_j1", 60.0, month)  # 60 мин = месячный пул free исчерпан
     with TestClient(app) as client:
         r = client.post(
             "/jobs",
