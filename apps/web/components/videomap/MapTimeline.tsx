@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Numeral } from "@/components/ui/Numeral";
 import { mmss } from "@/lib/format";
-import { kindColor } from "@/lib/momentKinds";
-import { coverageSegments, type ClipLike } from "@/lib/videoMapCoverage";
+import { classifyMoment, type ClipLike } from "@/lib/videoMapCoverage";
 import type { VideoChapter } from "@/lib/types";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -257,10 +256,11 @@ export function MapTimeline({
   );
 
   // ── derived ──
-  const coverage = coverageSegments(dur, clips);
-  const moments = chapters.flatMap((ch) =>
-    (ch.moments ?? []).map((m) => ({ start: m.start, kind: m.kind, label: m.label })),
-  );
+  // Only UNTAPPED moments get a marker (the actionable "pull me" spots); clipped ones are already
+  // shown by the clip blocks, and the kind-colour rainbow was noise.
+  const untappedMoments = chapters
+    .flatMap((ch) => ch.moments ?? [])
+    .filter((m) => classifyMoment(clips, m) === "untapped");
   const hoverChapter = hover
     ? (chapters.find((c) => hover.t >= c.start && hover.t < c.end) ?? null)
     : null;
@@ -334,7 +334,7 @@ export function MapTimeline({
       <div className="relative">
         <div
           ref={trackRef}
-          className={`relative h-20 w-full touch-none overflow-hidden rounded-lg border border-line bg-gradient-to-b from-surface-2 to-surface shadow-inner ${
+          className={`relative h-24 w-full touch-none overflow-hidden rounded-lg border border-line-strong bg-surface-2 shadow-sm ${
             mode === "select" ? "cursor-crosshair" : "cursor-pointer"
           }`}
           onPointerDown={onPointerDown}
@@ -361,58 +361,57 @@ export function MapTimeline({
                   seekFromChild(ch.start);
                 }}
                 style={{ left: leftPct(ch.start), width: `${Math.max(widthFrac * 100, 0.5)}%` }}
-                className="group/ch absolute top-0 flex h-[52px] items-start gap-1.5 overflow-hidden border-l border-line px-2 py-1.5 text-left transition-colors hover:bg-surface-2/70"
+                className={`group/ch absolute top-0 h-[52px] overflow-hidden border-l border-line-strong px-2 py-1.5 text-left transition-colors hover:bg-surface-3/70 ${
+                  i % 2 === 1 ? "bg-white/[0.03]" : ""
+                }`}
               >
-                <span
-                  className="mt-0.5 h-3 w-0.5 shrink-0 rounded-full bg-line-strong transition-colors group-hover/ch:bg-accent"
-                  aria-hidden
-                />
-                <span className="min-w-0">
-                  <span className="block truncate text-xs font-semibold leading-tight text-ink">
-                    {ch.title}
-                  </span>
-                  <Numeral className="mt-0.5 block text-[11px] leading-none text-faint">
-                    {mmss(ch.start)}
-                  </Numeral>
+                <span className="block truncate text-xs font-semibold leading-tight text-ink">
+                  {ch.title}
                 </span>
+                <Numeral className="mt-0.5 block text-[11px] leading-none text-faint">
+                  {mmss(ch.start)}
+                </Numeral>
               </button>
             );
           })}
 
-          {/* Moment ticks (mid lane), colored by kind */}
-          {moments.map((m, i) => {
-            const frac = fracOf(m.start);
-            if (frac < -0.02 || frac > 1.02) return null;
-            return (
-              <button
-                key={i}
-                type="button"
-                title={`${m.label} · ${mmss(m.start)}`}
-                aria-label={`${m.label} at ${mmss(m.start)}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  seekFromChild(m.start);
-                }}
-                style={{ left: pct(m.start) }}
-                className="absolute top-[52px] flex h-4 -translate-x-1/2 items-center px-1"
-              >
-                <span className={`h-3 w-0.5 rounded-full ${kindColor(m.kind).dot}`} />
-              </button>
-            );
-          })}
-
-          {/* Coverage band (bottom lane): clipped = accent, untapped = empty */}
-          <div className="absolute inset-x-0 bottom-0 h-3 overflow-hidden border-t border-line bg-surface-2">
-            {coverage.map((s, i) => {
-              const leftFrac = fracOf(s.start);
-              const widthFrac = (s.end - s.start) / viewLen;
+          {/* Coverage lane (bottom): each CLIP is a filled block ("what you've cut"); each UNTAPPED
+              moment is a bright accent tick ("a spot worth pulling"). No kind-colour rainbow. */}
+          <div className="absolute inset-x-0 bottom-0 top-[52px] border-t border-line-strong bg-black/25">
+            <span className="absolute left-2 top-1 font-mono text-[9px] uppercase tracking-wide text-faint">
+              coverage
+            </span>
+            {clips.map((c, i) => {
+              const leftFrac = fracOf(c.start);
+              const widthFrac = (c.end - c.start) / viewLen;
               if (leftFrac + widthFrac < 0 || leftFrac > 1) return null;
               return (
                 <div
-                  key={i}
-                  style={{ left: leftPct(s.start), width: `${Math.max(widthFrac * 100, 0)}%` }}
-                  className={`absolute inset-y-0 ${s.clipped ? "bg-accent" : "bg-transparent"}`}
+                  key={`clip-${i}`}
+                  title={`Clip ${i + 1}`}
+                  style={{ left: leftPct(c.start), width: `${Math.max(widthFrac * 100, 0.4)}%` }}
+                  className="absolute bottom-1.5 h-3.5 rounded-[3px] bg-line-strong/80"
                 />
+              );
+            })}
+            {untappedMoments.map((m, i) => {
+              const frac = fracOf(m.start);
+              if (frac < -0.02 || frac > 1.02) return null;
+              return (
+                <button
+                  key={`u-${i}`}
+                  type="button"
+                  title={`Untapped: ${m.label} · ${mmss(m.start)}`}
+                  aria-label={`Untapped moment: ${m.label} at ${mmss(m.start)}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    seekFromChild(m.start);
+                  }}
+                  style={{ left: pct(m.start) }}
+                  className="group/u absolute bottom-1 flex h-6 -translate-x-1/2 items-end px-1.5"
+                >
+                  <span className="h-5 w-[3px] rounded-full bg-accent shadow-[0_0_6px_rgba(0,0,0,.4)] transition-transform group-hover/u:scale-y-110" />
+                </button>
               );
             })}
           </div>
@@ -510,12 +509,12 @@ export function MapTimeline({
         </span>
         <div className="flex items-center gap-3 text-xs text-muted">
           <span className="flex items-center gap-1.5">
-            <span className="h-2 w-3 rounded-full bg-accent" aria-hidden />
-            Clipped
+            <span className="h-2.5 w-3.5 rounded-[2px] bg-line-strong/80" aria-hidden />
+            Clip
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="h-2 w-3 rounded-full border border-line bg-surface-2" aria-hidden />
-            Untapped
+            <span className="h-3 w-[3px] rounded-full bg-accent" aria-hidden />
+            Untapped moment
           </span>
         </div>
       </div>
