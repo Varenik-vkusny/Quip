@@ -11,7 +11,7 @@ export async function Comparison() {
   const { comparison } = getLandingContent(resolveLocale(await getLocale()));
   const { heading, sub, rows, cols, kept, oneVideoNote, scoredTooLow, rejected } = comparison;
   return (
-    <Section id="compare">
+    <Section id="why">
       <Container>
         <Reveal className="max-w-[44rem]">
           <h2 className="text-[clamp(28px,3.6vw,44px)] font-bold leading-[1.08] tracking-[-0.025em] text-ink">

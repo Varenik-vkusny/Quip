@@ -347,6 +347,14 @@ input[type="range"].range-touch::-moz-range-thumb {
   }
 }
 
+/* manifesto words start dimmed ONLY when JS can bring them back (ScrollFx scrub);
+   crawlers, no-JS, and reduced-motion always read the full line. */
+@media (prefers-reduced-motion: no-preference) {
+  .js [data-mani] .w {
+    opacity: 0.18;
+  }
+}
+
 /* respect reduced-motion (a11y) */
 @media (prefers-reduced-motion: reduce) {
   html {
