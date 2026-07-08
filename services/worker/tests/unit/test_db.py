@@ -425,3 +425,54 @@ def test_deduct_payg_missing_profile_is_safe(monkeypatch, tmp_path) -> None:
     db.init_db()
     db.deduct_payg("ghost", 2)
     assert db.get_profile("ghost")["payg_credits"] == 0
+
+
+# ─────────────── clip_credits: баланс «извлечь лишний клип» ($1), ОТДЕЛЬНЫЙ от PAYG ───────────────
+# Денежный инвариант: клип-кредит покрывает РОВНО одно извлечение за free-cap, не уходит в минус,
+# и НЕ путается с payg_credits (разные колонки → эксплойт «$1 → $3-видео» закрыт).
+
+
+def test_add_clip_credits_upserts_separate_balance(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "cc.db")
+    db.init_db()
+    db.add_clip_credits("u1", 2)
+    db.add_clip_credits("u1", 1)  # upsert +=
+    prof = db.get_profile("u1")
+    assert prof["clip_credits"] == 3
+    assert prof["payg_credits"] == 0  # PAYG-баланс не затронут
+
+
+def test_clip_and_payg_credits_do_not_cross(monkeypatch, tmp_path) -> None:
+    # Начисление в один баланс не течёт в другой (разделение $1-клип vs $3-видео).
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "cc.db")
+    db.init_db()
+    db.add_clip_credits("u1", 3)
+    db.add_payg_credits("u1", 5)
+    prof = db.get_profile("u1")
+    assert prof["clip_credits"] == 3
+    assert prof["payg_credits"] == 5
+
+
+def test_consume_clip_credit_decrements_and_reports_true(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "cc.db")
+    db.init_db()
+    db.add_clip_credits("u1", 2)
+    assert db.consume_clip_credit("u1") is True
+    assert db.get_profile("u1")["clip_credits"] == 1
+
+
+def test_consume_clip_credit_at_zero_returns_false_no_negative(monkeypatch, tmp_path) -> None:
+    # Баланс 0 → нечего списывать: False и НЕ уходим в минус (пейволл-путь отдаст 402).
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "cc.db")
+    db.init_db()
+    db.add_clip_credits("u1", 1)
+    assert db.consume_clip_credit("u1") is True
+    assert db.consume_clip_credit("u1") is False  # баланс уже 0
+    assert db.get_profile("u1")["clip_credits"] == 0
+
+
+def test_consume_clip_credit_missing_profile_is_false(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(db, "_DB_PATH", tmp_path / "cc.db")
+    db.init_db()
+    assert db.consume_clip_credit("ghost") is False
+    assert db.get_profile("ghost")["clip_credits"] == 0

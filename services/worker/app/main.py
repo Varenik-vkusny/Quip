@@ -683,6 +683,18 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
         db.add_payg_credits(user_id, credits)
         return {"ok": True, "applied": True, "user_id": user_id, "payg_credits": credits}
 
+    # Разовая оплата «лишнего клипа» ($1) → начислить клип-кредиты (ОТДЕЛЬНЫЙ баланс, тратится
+    # только на извлечение клипа за free-cap). Матч по СВОЁМУ product_id → не путается с PAYG.
+    extra = polar.parse_extra_clip_order(
+        payload,
+        product_extra_clip=os.environ.get("POLAR_PRODUCT_EXTRA_CLIP", ""),
+        credits_per_order=billing.EXTRACT_CLIP_CREDITS_PER_ORDER,
+    )
+    if extra is not None:
+        user_id, credits = extra
+        db.add_clip_credits(user_id, credits)
+        return {"ok": True, "applied": True, "user_id": user_id, "clip_credits": credits}
+
     return {"ok": True, "applied": False}
 
 
@@ -1110,9 +1122,14 @@ def extract_clip(
         if segment_key(float(c.get("start", -1.0)), float(c.get("end", -1.0))) == key:
             return ClipOut.model_validate(c)
 
-    # 7. Per-clip пейволл за cap (в рамках оплаченного «до 30 клипов» — бесплатно; ≥ cap → плата).
+    # 7. Пейволл за cap. До free-cap извлечение бесплатно (в рамках оплаченного «до 30 клипов»);
+    #    ≥ cap → нужен оплаченный клип-кредит ($1-заказ Polar): есть у владельца — списываем один и
+    #    продолжаем, нет — 402 (фронт ведёт на checkout). Consume ДО append (шаг 8): подтверждаем
+    #    оплату прежде чем создать клип. Без владельца (локальный dev / ничья джоба, plan=pro выше)
+    #    биллинга нет → не капим. Идемпотентный повтор (шаг 6) выходит раньше и кредит НЕ тратит.
     settings = get_settings()
-    if billing.extract_requires_payment(len(current_clips), cap=settings.extract_free_cap):
+    over_cap = billing.extract_requires_payment(len(current_clips), cap=settings.extract_free_cap)
+    if owner_id and over_cap and not db.consume_clip_credit(owner_id):
         raise HTTPException(
             status_code=402,
             detail={"error": "payment_required", "price_usd": settings.extract_clip_price_usd},

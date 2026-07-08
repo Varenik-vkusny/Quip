@@ -88,13 +88,17 @@ def init_db() -> None:
         c.execute(
             """CREATE TABLE IF NOT EXISTS profiles (
                 user_id TEXT PRIMARY KEY, plan TEXT NOT NULL,
-                payg_credits INTEGER NOT NULL DEFAULT 0, updated_at REAL
+                payg_credits INTEGER NOT NULL DEFAULT 0,
+                clip_credits INTEGER NOT NULL DEFAULT 0, updated_at REAL
             )"""
         )
         # Миграция существующих БД (CREATE TABLE IF NOT EXISTS не добавляет колонки):
         # добавить новые поля, если их ещё нет. Идемпотентно.
         _ensure_column(c, "usage_events", "credits", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(c, "profiles", "payg_credits", "INTEGER NOT NULL DEFAULT 0")
+        # clip_credits — отдельный баланс на извлечение клипа за free-cap ($1-заказ Polar,
+        # НЕ PAYG-видео). Зеркало migrations/0016_clip_credits.sql.
+        _ensure_column(c, "profiles", "clip_credits", "INTEGER NOT NULL DEFAULT 0")
         # Stop-кнопка (зеркало migrations/0006_job_cancel.sql): id Modal-функции + флаг отмены.
         _ensure_column(c, "jobs", "function_call_id", "TEXT")
         _ensure_column(c, "jobs", "cancellable", "INTEGER NOT NULL DEFAULT 1")
@@ -755,6 +759,43 @@ def deduct_payg(user_id: str, credits: int) -> None:
         )
 
 
+def add_clip_credits(user_id: str, credits: int) -> None:
+    """Начислить клип-кредиты (вебхук $1-заказа «лишнего клипа» Polar). Upsert (+=).
+
+    ОТДЕЛЬНЫЙ от PAYG баланс: клип-кредит тратится ТОЛЬКО на извлечение клипа за free-cap
+    (consume_clip_credit), НЕ на обработку видео. Зеркалит add_payg_credits.
+    """
+    if supa.supa_enabled():
+        supa.add_clip_credits(user_id, credits)
+        return
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO profiles (user_id, plan, clip_credits, updated_at) VALUES (?,?,?,?)"
+            " ON CONFLICT(user_id) DO UPDATE SET"
+            " clip_credits=profiles.clip_credits+excluded.clip_credits,"
+            " updated_at=excluded.updated_at",
+            (user_id, "free", int(credits), time.time()),
+        )
+
+
+def consume_clip_credit(user_id: str) -> bool:
+    """Списать РОВНО один клип-кредит, если баланс > 0. → True, если списали; False, если нечего.
+
+    Атомарно (условный UPDATE ... WHERE clip_credits>0) — два near-одновременных извлечения при
+    балансе 1 не спишут дважды (один UPDATE затронет строку, второй — 0 строк). Так извлечение
+    за free-cap пропускается ТОЛЬКО за реально оплаченный кредит; иначе вызывающий отдаёт 402.
+    """
+    if supa.supa_enabled():
+        return supa.consume_clip_credit(user_id)
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE profiles SET clip_credits=clip_credits-1, updated_at=?"
+            " WHERE user_id=? AND clip_credits>0",
+            (time.time(), user_id),
+        )
+        return cur.rowcount == 1
+
+
 def get_user_plan(user_id: str) -> str:
     """План пользователя для гейта квоты. Нет записи → "free" (безопасный дефолт)."""
     if supa.supa_enabled():
@@ -765,16 +806,20 @@ def get_user_plan(user_id: str) -> str:
 
 
 def get_profile(user_id: str) -> dict[str, Any]:
-    """Профиль для гейта квоты → {"plan", "payg_credits"}. Нет записи → free / 0."""
+    """Профиль для гейтов → {"plan", "payg_credits", "clip_credits"}. Нет записи → free / 0 / 0."""
     if supa.supa_enabled():
         return supa.get_profile(user_id)
     with _conn() as c:
         row = c.execute(
-            "SELECT plan, payg_credits FROM profiles WHERE user_id=?", (user_id,)
+            "SELECT plan, payg_credits, clip_credits FROM profiles WHERE user_id=?", (user_id,)
         ).fetchone()
     if row is None:
-        return {"plan": "free", "payg_credits": 0}
-    return {"plan": str(row["plan"]), "payg_credits": int(row["payg_credits"])}
+        return {"plan": "free", "payg_credits": 0, "clip_credits": 0}
+    return {
+        "plan": str(row["plan"]),
+        "payg_credits": int(row["payg_credits"]),
+        "clip_credits": int(row["clip_credits"]),
+    }
 
 
 def get_job_owner(job_id: str) -> str | None:

@@ -55,11 +55,15 @@ def _sum_usage(rows: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def _profile_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Ответ PostgREST на profiles → {plan, payg_credits}. Пусто → free / 0. PURE."""
+    """Ответ PostgREST на profiles → {plan, payg_credits, clip_credits}. Пусто → free/0/0. PURE."""
     if not rows:
-        return {"plan": "free", "payg_credits": 0}
+        return {"plan": "free", "payg_credits": 0, "clip_credits": 0}
     r = rows[0]
-    return {"plan": str(r.get("plan") or "free"), "payg_credits": int(r.get("payg_credits") or 0)}
+    return {
+        "plan": str(r.get("plan") or "free"),
+        "payg_credits": int(r.get("payg_credits") or 0),
+        "clip_credits": int(r.get("clip_credits") or 0),
+    }
 
 
 # ─────────────────────────── I/O (тонкие обёртки) ───────────────────────────
@@ -68,7 +72,7 @@ def _profile_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def get_profile(user_id: str) -> dict[str, Any]:
     r = httpx.get(
         f"{_base()}/profiles",
-        params={"id": f"eq.{user_id}", "select": "plan,payg_credits"},
+        params={"id": f"eq.{user_id}", "select": "plan,payg_credits,clip_credits"},
         headers=_headers(),
         timeout=_TIMEOUT,
     )
@@ -183,6 +187,49 @@ def deduct_payg(user_id: str, credits: int) -> None:
         timeout=_TIMEOUT,
     )
     r.raise_for_status()
+
+
+def add_clip_credits(user_id: str, credits: int) -> None:
+    # Начислить клип-кредиты (вебхук $1-заказа «лишнего клипа»). Зеркалит add_payg_credits:
+    # GET баланс + PATCH; профиля нет → INSERT-фолбэк (иначе оплата МОЛЧА терялась бы, правило №8).
+    # ОТДЕЛЬНАЯ колонка clip_credits (не payg_credits) — балансы не путаются.
+    current = int(get_profile(user_id).get("clip_credits") or 0)
+    r = httpx.patch(
+        f"{_base()}/profiles",
+        params={"id": f"eq.{user_id}"},
+        headers=_headers({"Prefer": "return=representation"}),
+        json={"clip_credits": current + int(credits)},
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    if r.json():  # строка существовала и обновилась
+        return
+    ins = httpx.post(
+        f"{_base()}/profiles",
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"id": user_id, "plan": "free", "clip_credits": int(credits)},
+        timeout=_TIMEOUT,
+    )
+    ins.raise_for_status()
+
+
+def consume_clip_credit(user_id: str) -> bool:
+    # Списать РОВНО один клип-кредит, если баланс > 0. → True, если списали; False, если нечего.
+    # Оптимистичный concurrency-guard: PATCH с фильтром clip_credits=gte.1 → если параллельный
+    # запрос уже увёл баланс в 0, фильтр матчит 0 строк, return=representation отдаёт [] → False
+    # (двойного списания при балансе 1 нет). Зеркалит SQLite consume_clip_credit (условный UPDATE).
+    current = int(get_profile(user_id).get("clip_credits") or 0)
+    if current <= 0:
+        return False
+    r = httpx.patch(
+        f"{_base()}/profiles",
+        params={"id": f"eq.{user_id}", "clip_credits": "gte.1"},
+        headers=_headers({"Prefer": "return=representation"}),
+        json={"clip_credits": current - 1},
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    return bool(r.json())
 
 
 def record_usage(

@@ -297,6 +297,11 @@ def payg_credits_for_split(decision: QuotaDecision) -> int:
 # Планы, которым разрешено извлечение. Литералы совпадают с ключами PLANS (pro/studio).
 _EXTRACT_PLANS: frozenset[str] = frozenset({"pro", "studio"})
 
+# Сколько клип-кредитов даёт ОДИН оплаченный «лишний клип» ($1-заказ в Polar). Клип-кредит —
+# ОТДЕЛЬНЫЙ баланс (profiles.clip_credits), тратится ТОЛЬКО на извлечение клипа за free-cap; НЕ
+# путать с PAYG-видео-кредитами ($3/видео). Разделение закрывает эксплойт «$1 → $3-видео».
+EXTRACT_CLIP_CREDITS_PER_ORDER = 1
+
 
 def can_extract_clip(plan: str) -> bool:
     """Может ли план извлекать новые клипы из неотобранных моментов? PURE.

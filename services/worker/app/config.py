@@ -239,6 +239,10 @@ class Settings(BaseSettings):
     polar_webhook_secret: str = ""  # Standard Webhooks секрет Polar.sh (whsec_...)
     polar_product_starter: str = ""  # Polar product_id → план "starter"
     polar_product_pro: str = ""  # Polar product_id → план "pro"
+    # Polar product_id разового «лишнего клипа» ($1) → начисляет profiles.clip_credits (отдельный
+    # баланс на извлечение клипа за free-cap; см. billing.EXTRACT_CLIP_CREDITS_PER_ORDER). Может
+    # быть списком id через запятую (напр. боевой + тестовый). Пусто → extra-clip вебхук инертен.
+    polar_product_extra_clip: str = ""
     supabase_url: str = ""
     supabase_service_role_key: str = ""  # 🔴 ТОЛЬКО сервер; пишет profiles.plan/usage_events
     # ── «Извлечь новый клип из неотобранного момента» (billing.can_extract_clip /

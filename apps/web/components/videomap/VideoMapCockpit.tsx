@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { createClipFromRange, getVideoMap } from "@/lib/api";
 import { mmss } from "@/lib/format";
 import { canExtractClip, EXTRACT } from "@/lib/plans";
+import { extraClipCheckoutHref } from "@/lib/polar";
 import { classifyMoment, type ClipLike } from "@/lib/videoMapCoverage";
 import type { ClipOut, VideoMap } from "@/lib/types";
 import { ExtractButton, type ExtractState } from "./ExtractButton";
@@ -70,6 +71,11 @@ export function VideoMapCockpit({
   // update immediately. Only id/start/end are needed downstream.
   const [extraClips, setExtraClips] = useState<ClipLike[]>([]);
   const [notice, setNotice] = useState<{ tone: "info" | "warn"; text: string } | null>(null);
+  // Set when the worker answers 402 (past the free cap, no clip credit): carries the range so the
+  // user can retry after paying $1. The checkout grants one clip_credit; the retry consumes it.
+  const [paywall, setPaywall] = useState<{ start: number; end: number; priceUsd: number } | null>(
+    null,
+  );
 
   // The pending re-poll recurses; route it through a ref so `poll` never references itself before
   // it's declared (react-hooks/immutability).
@@ -178,11 +184,16 @@ export function VideoMapCockpit({
       }
       const r = await createClipFromRange(jobId, { start, end });
       if (r.ok) {
+        setPaywall(null);
         setExtraClips((prev) => [
           ...prev,
           { id: r.clip.id, start: r.clip.start, end: r.clip.end },
         ]);
         setNotice({ tone: "info", text: "Pulling your clip, it appears here as it renders." });
+      } else if (r.reason === "paywall") {
+        // Past the free cap with no clip credit → offer a real $1 Polar checkout for this exact range.
+        setNotice(null);
+        setPaywall({ start, end, priceUsd: r.priceUsd ?? EXTRACT.clipPriceUsd });
       } else {
         setNotice({ tone: "warn", text: r.message });
       }
@@ -242,6 +253,47 @@ export function VideoMapCockpit({
               }`}
             >
               {notice.text}
+            </div>
+          )}
+
+          {/* Paywall — the worker said this clip is past the free cap. A real $1 Polar checkout for
+              this one clip; after paying, "I've paid — pull it" retries and the worker consumes the
+              credit. Kept out of the outline so it reads as one clear money moment, not a red badge. */}
+          {paywall && (
+            <div className="rounded-lg border border-accent/60 bg-accent/10 px-4 py-3">
+              <p className="text-sm font-medium text-ink">
+                That’s past your {EXTRACT.freeCap} free clips for this video.
+              </p>
+              <p className="mt-0.5 text-xs text-muted">
+                Pull this one for ${paywall.priceUsd} — the rest of the map stays free.{" "}
+                <Numeral className="tabular-nums text-faint">
+                  {mmss(paywall.start)}-{mmss(paywall.end)}
+                </Numeral>
+              </p>
+              <div className="mt-2.5 flex items-center gap-3">
+                <a
+                  href={extraClipCheckoutHref()}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex h-9 items-center rounded-md border border-accent bg-accent/10 px-3.5 text-sm font-semibold text-accent transition-colors duration-150 hover:bg-accent/20"
+                >
+                  Pay ${paywall.priceUsd}
+                </a>
+                <button
+                  type="button"
+                  onClick={() => handleExtract(paywall.start, paywall.end)}
+                  className="text-sm font-medium text-muted transition-colors duration-150 hover:text-ink"
+                >
+                  I’ve paid — pull it
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaywall(null)}
+                  className="ml-auto text-xs font-medium text-faint transition-colors duration-150 hover:text-ink"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           )}
 

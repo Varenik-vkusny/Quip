@@ -25,15 +25,24 @@ class TestSumUsage:
 
 class TestProfileFromRows:
     def test_empty_defaults_free(self) -> None:
-        assert supa._profile_from_rows([]) == {"plan": "free", "payg_credits": 0}
+        assert supa._profile_from_rows([]) == {
+            "plan": "free",
+            "payg_credits": 0,
+            "clip_credits": 0,
+        }
 
     def test_reads_first_row(self) -> None:
-        out = supa._profile_from_rows([{"plan": "pro", "payg_credits": 5}])
-        assert out == {"plan": "pro", "payg_credits": 5}
+        out = supa._profile_from_rows([{"plan": "pro", "payg_credits": 5, "clip_credits": 2}])
+        assert out == {"plan": "pro", "payg_credits": 5, "clip_credits": 2}
 
     def test_nulls_default(self) -> None:
-        out = supa._profile_from_rows([{"plan": None, "payg_credits": None}])
-        assert out == {"plan": "free", "payg_credits": 0}
+        out = supa._profile_from_rows([{"plan": None, "payg_credits": None, "clip_credits": None}])
+        assert out == {"plan": "free", "payg_credits": 0, "clip_credits": 0}
+
+    def test_missing_clip_credits_defaults_zero(self) -> None:
+        # Строка из БД до миграции 0016 (нет колонки clip_credits) → 0, не падаем.
+        out = supa._profile_from_rows([{"plan": "pro", "payg_credits": 1}])
+        assert out == {"plan": "pro", "payg_credits": 1, "clip_credits": 0}
 
 
 class TestSupaEnabled:
@@ -183,6 +192,76 @@ class TestDeductPayg:
         )
         supa.deduct_payg("u1", 0)
         assert patched == []  # n=0 → не дёргаем PATCH
+
+
+class TestAddClipCredits:
+    # $1-заказ «лишнего клипа» → clip_credits (ОТДЕЛЬНАЯ колонка). Как add_payg_credits: upsert,
+    # не теряет оплату; но пишет clip_credits, не payg_credits.
+    def test_increments_existing_profile(self, monkeypatch) -> None:
+        _supa_env(monkeypatch)
+        patched: list[dict] = []
+
+        def fake_get(url, **kw):  # type: ignore[no-untyped-def]
+            return _Resp([{"plan": "pro", "payg_credits": 5, "clip_credits": 1}])
+
+        def fake_patch(url, **kw):  # type: ignore[no-untyped-def]
+            patched.append(kw.get("json", {}))
+            return _Resp([{"id": "u1", "clip_credits": 2}])
+
+        monkeypatch.setattr(supa.httpx, "get", fake_get)
+        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        supa.add_clip_credits("u1", 1)
+        assert patched and patched[0] == {"clip_credits": 2}  # 1 + 1, PAYG не тронут
+
+    def test_inserts_when_profile_missing(self, monkeypatch) -> None:
+        _supa_env(monkeypatch)
+        posts: list[dict] = []
+        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([]))  # профиля нет
+        monkeypatch.setattr(supa.httpx, "patch", lambda url, **kw: _Resp([]))  # 0 строк
+
+        def fake_post(url, **kw):  # type: ignore[no-untyped-def]
+            posts.append(kw.get("json", {}))
+            return _Resp(None, status=201)
+
+        monkeypatch.setattr(supa.httpx, "post", fake_post)
+        supa.add_clip_credits("u_new", 1)
+        assert posts and posts[0]["clip_credits"] == 1 and posts[0]["plan"] == "free"
+
+
+class TestConsumeClipCredit:
+    # Списание одного клип-кредита: условный PATCH (clip_credits=gte.1) → True/False по факту.
+    def test_consumes_when_balance_positive(self, monkeypatch) -> None:
+        _supa_env(monkeypatch)
+        patched: list[dict] = []
+
+        def fake_get(url, **kw):  # type: ignore[no-untyped-def]
+            return _Resp([{"plan": "pro", "payg_credits": 0, "clip_credits": 2}])
+
+        def fake_patch(url, **kw):  # type: ignore[no-untyped-def]
+            patched.append(kw.get("json", {}))
+            return _Resp([{"id": "u1", "clip_credits": 1}])  # строка обновилась
+
+        monkeypatch.setattr(supa.httpx, "get", fake_get)
+        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        assert supa.consume_clip_credit("u1") is True
+        assert patched and patched[0] == {"clip_credits": 1}  # 2 - 1
+
+    def test_returns_false_at_zero_no_patch(self, monkeypatch) -> None:
+        _supa_env(monkeypatch)
+        patched: list[dict] = []
+        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([{"clip_credits": 0}]))
+        monkeypatch.setattr(
+            supa.httpx, "patch", lambda url, **kw: patched.append(kw.get("json", {}))
+        )
+        assert supa.consume_clip_credit("u1") is False
+        assert patched == []  # баланс 0 → PATCH не дёргаем
+
+    def test_returns_false_when_race_lost(self, monkeypatch) -> None:
+        # Прочитали 1, но параллельный запрос уже увёл в 0 → условный PATCH матчит 0 строк ([]).
+        _supa_env(monkeypatch)
+        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([{"clip_credits": 1}]))
+        monkeypatch.setattr(supa.httpx, "patch", lambda url, **kw: _Resp([]))  # 0 строк
+        assert supa.consume_clip_credit("u1") is False
 
 
 class TestRecordUsage:

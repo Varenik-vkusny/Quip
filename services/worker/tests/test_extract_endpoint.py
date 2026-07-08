@@ -204,6 +204,50 @@ def test_over_cap_requires_payment(monkeypatch, tmp_path) -> None:
     assert r.json()["detail"] == {"error": "payment_required", "price_usd": 1.0}
     assert ctx.render_calls == []  # не рендерим, пока не оплатили
     assert len(db.get_job(ctx.job)["clips"]) == 30  # ничего не добавили
+    assert db.get_profile(ctx.uid)["clip_credits"] == 0  # 402-путь не трогает баланс
+
+
+def test_over_cap_with_clip_credit_extracts_and_consumes(monkeypatch, tmp_path) -> None:
+    # За cap, но у владельца есть оплаченный клип-кредит ($1-заказ) → извлекаем и списываем ОДИН.
+    ctx = _setup(monkeypatch, tmp_path, plan="pro")
+    _seed_clips(ctx.job, 30)  # == cap
+    db.add_clip_credits(ctx.uid, 1)
+    r = ctx.client.post(f"/jobs/{ctx.job}/clips", json={"start": 10.0, "end": 40.0})
+    assert r.status_code == 200
+    assert r.json()["id"] == "clip_31"  # клип добавлен за cap
+    assert ctx.render_calls == [(ctx.job, 31, ctx.uid)]  # рендер заспавнен
+    assert len(db.get_job(ctx.job)["clips"]) == 31
+    assert db.get_profile(ctx.uid)["clip_credits"] == 0  # кредит списан ровно один
+
+
+def test_clip_credit_is_single_use(monkeypatch, tmp_path) -> None:
+    # Один кредит покрывает РОВНО один лишний клип: второе (другое) извлечение снова 402.
+    ctx = _setup(monkeypatch, tmp_path, plan="pro")
+    _seed_clips(ctx.job, 30)
+    db.add_clip_credits(ctx.uid, 1)
+    r1 = ctx.client.post(f"/jobs/{ctx.job}/clips", json={"start": 10.0, "end": 40.0})
+    assert r1.status_code == 200
+    r2 = ctx.client.post(f"/jobs/{ctx.job}/clips", json={"start": 5.0, "end": 35.0})
+    assert r2.status_code == 402  # кредит уже потрачен
+    assert len(ctx.render_calls) == 1  # только первый клип рендерился
+    assert len(db.get_job(ctx.job)["clips"]) == 31  # добавился только первый
+
+
+def test_idempotent_over_cap_does_not_consume_credit(monkeypatch, tmp_path) -> None:
+    # Повтор ТОГО ЖЕ диапазона за cap отдаёт существующий клип (шаг 6) и кредит НЕ тратит.
+    ctx = _setup(monkeypatch, tmp_path, plan="pro")
+    _seed_clips(ctx.job, 30)
+    db.add_clip_credits(ctx.uid, 1)
+    r1 = ctx.client.post(f"/jobs/{ctx.job}/clips", json={"start": 10.0, "end": 40.0})
+    assert r1.status_code == 200
+    assert db.get_profile(ctx.uid)["clip_credits"] == 0  # первый клип списал кредит
+    # Тот же диапазон снова → idempotent-возврат, БЕЗ повторного списания (баланс уже 0, но
+    # и не уходит в минус — консьюм не вызывается).
+    r2 = ctx.client.post(f"/jobs/{ctx.job}/clips", json={"start": 10.0, "end": 40.0})
+    assert r2.status_code == 200
+    assert r2.json()["id"] == r1.json()["id"]
+    assert len(ctx.render_calls) == 1
+    assert db.get_profile(ctx.uid)["clip_credits"] == 0
 
 
 # ─────────────────────────── idempotency (same range → same clip) ───────────────────────────
