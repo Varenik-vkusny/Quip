@@ -278,17 +278,19 @@ export function MapTimeline({
             type="button"
             onClick={() => setMode("scrub")}
             aria-pressed={mode === "scrub"}
+            title="Drag along the timeline to move through the video; click to jump to a point"
             className={`rounded px-2.5 py-1 text-xs font-medium transition-colors duration-150 ${
               mode === "scrub" ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
             }`}
           >
-            Scrub
+            Move
           </button>
           {onSelectRange && (
             <button
               type="button"
               onClick={() => setMode("select")}
               aria-pressed={mode === "select"}
+              title="Drag across the part you want, then Extract it as a new clip"
               className={`rounded px-2.5 py-1 text-xs font-medium transition-colors duration-150 ${
                 mode === "select" ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
               }`}
@@ -505,7 +507,9 @@ export function MapTimeline({
       {/* Hint + coverage legend */}
       <div className="mt-1.5 flex items-center justify-between gap-3">
         <span className="text-xs text-faint">
-          {mode === "scrub" ? "Drag to scrub, click to jump" : "Drag to select a range"}
+          {mode === "scrub"
+            ? "Drag to move through the video, click to jump here"
+            : "Drag across a section to pull it as a new clip"}
         </span>
         <div className="flex items-center gap-3 text-xs text-muted">
           <span className="flex items-center gap-1.5">
