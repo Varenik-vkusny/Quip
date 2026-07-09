@@ -67,8 +67,8 @@ export const metadata: Metadata = {
     yandex: siteConfig.yandexVerification,
   },
   icons: {
-    icon: "/icon.png",
-    apple: "/logo-88.png",
+    icon: [{ url: "/icon.png?v=2", type: "image/png" }],
+    apple: "/logo-88.png?v=2",
   },
 };
 
