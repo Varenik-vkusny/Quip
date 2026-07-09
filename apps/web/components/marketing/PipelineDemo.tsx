@@ -28,7 +28,7 @@ export function PipelineDemo() {
           </p>
         </div>
 
-        <div className="mx-auto mt-12 max-w-4xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-[0_32px_80px_-32px_rgba(0,0,0,.6)]">
+        <div className="mx-auto mt-12 max-w-4xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-pop">
           <video
             className="block h-auto w-full"
             autoPlay

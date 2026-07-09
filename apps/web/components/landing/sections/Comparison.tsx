@@ -14,7 +14,7 @@ export async function Comparison() {
     <Section id="why">
       <Container>
         <Reveal className="max-w-[44rem]">
-          <h2 className="text-[clamp(28px,3.6vw,44px)] font-bold leading-[1.08] tracking-[-0.025em] text-ink">
+          <h2 className="text-[clamp(28px,3.6vw,44px)] font-[650] leading-[1.08] tracking-[-0.024em] text-ink">
             {heading}
           </h2>
           <p className="mt-4 text-[1.0625rem] text-muted">{sub}</p>
@@ -22,9 +22,9 @@ export async function Comparison() {
 
         {/* the cut: one kept clip vs the moments that scored too low to ship */}
         <Reveal delay={0.05} className="mt-12">
-          <div className="grid items-center gap-10 rounded-[18px] border border-line bg-surface p-5 sm:p-7 lg:grid-cols-[minmax(0,40fr)_minmax(0,60fr)] lg:gap-12">
+          <div className="grid items-center gap-10 rounded-[18px] bg-surface p-5 shadow-card sm:p-7 lg:grid-cols-[minmax(0,40fr)_minmax(0,60fr)] lg:gap-12">
             <div className="flex items-center gap-5">
-              <div className="relative aspect-[9/16] w-[120px] shrink-0 overflow-hidden rounded-[10px] border border-accent-line bg-bg shadow-[0_0_0_1px_var(--color-accent-line),0_18px_50px_-20px_rgba(255,90,61,0.45)]">
+              <div className="relative aspect-[9/16] w-[120px] shrink-0 overflow-hidden rounded-[10px] bg-bg shadow-pop">
                 <InlineClip
                   src="/clips/clip-1.mp4"
                   poster="/clips/poster-1.jpg"
@@ -33,8 +33,8 @@ export async function Comparison() {
                 />
               </div>
               <div>
-                <span className="inline-flex items-center gap-1.5 rounded-pill border border-accent-line bg-accent-tint px-2.5 py-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-accent">
-                  <Check weight="bold" className="size-3" />
+                <span className="inline-flex items-center gap-1.5 text-[13.5px] font-medium text-ok">
+                  <Check weight="bold" className="size-3.5" />
                   {kept.label}
                 </span>
                 <ConfidenceGauge value={kept.score} variant="card" className="mt-3" />
@@ -43,17 +43,11 @@ export async function Comparison() {
             </div>
 
             <div>
-              <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-faint">{scoredTooLow}</span>
-              <ul className="mt-4 flex flex-col gap-3.5">
+              <span className="text-[13.5px] text-faint">{scoredTooLow}</span>
+              <ul className="mt-3 flex flex-col divide-y divide-line">
                 {rejected.map((r) => (
-                  <li key={r.label} className="flex items-center gap-4">
-                    <span className="num w-7 shrink-0 text-right font-mono text-[15px] text-bad/90">{r.score}</span>
-                    <div className="relative h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-surface-3">
-                      <div
-                        className="absolute inset-y-0 left-0 rounded-full bg-bad/55"
-                        style={{ width: `${r.score}%` }}
-                      />
-                    </div>
+                  <li key={r.label} className="flex items-baseline gap-4 py-2.5">
+                    <span className="num w-8 shrink-0 text-right text-[15px] text-bad">{r.score}</span>
                     <span className="text-[14px] text-muted">{r.label}</span>
                   </li>
                 ))}
@@ -62,30 +56,27 @@ export async function Comparison() {
           </div>
         </Reveal>
 
-        {/* head to head: Quip column reads as the winner (lifted + coral), them dimmed */}
+        {/* head to head: the Quip column reads as the winner (lifted surface), them dimmed */}
         <Reveal delay={0.05} className="mt-10">
           <div className="overflow-hidden rounded-[18px] border border-line">
             {/* header */}
             <div className="grid grid-cols-[1.1fr_1fr_1fr]">
               <div className="px-5 py-4 sm:px-6" />
-              <div className="relative border-x border-line bg-surface-2 px-5 py-4 sm:px-6">
-                <span className="absolute inset-x-0 top-0 h-[2px] bg-accent" aria-hidden />
-                <span className="flex items-center gap-2 font-mono text-[12px] uppercase tracking-[0.12em] text-ink">
-                  <Check weight="bold" className="size-3.5 text-accent" />
+              <div className="border-x border-line bg-surface-2 px-5 py-4 sm:px-6">
+                <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
+                  <Check weight="bold" className="size-3.5 text-ok" />
                   {cols.quip}
                 </span>
               </div>
-              <div className="px-5 py-4 font-mono text-[12px] uppercase tracking-[0.12em] text-faint sm:px-6">
-                {cols.them}
-              </div>
+              <div className="px-5 py-4 text-[13px] font-medium text-faint sm:px-6">{cols.them}</div>
             </div>
             {/* rows */}
             {rows.map((r) => (
               <div key={r.k} className="grid grid-cols-[1.1fr_1fr_1fr] border-t border-line text-[14px]">
                 <div className="px-5 py-4 text-muted sm:px-6">{r.k}</div>
                 <div className="flex items-start gap-2.5 border-x border-line bg-surface-2 px-5 py-4 font-medium text-ink sm:px-6">
-                  {/* neutral ink check: the lifted surface-2 column + coral header already mark
-                      the winner. Per-row coral would over-spend the scarce accent (DESIGN.md). */}
+                  {/* neutral ink check: the lifted surface-2 column already marks the winner;
+                      per-row accent would over-spend the scarce gold (DESIGN.md). */}
                   <Check weight="bold" className="mt-0.5 size-3.5 shrink-0 text-ink" />
                   <span>{r.quip}</span>
                 </div>

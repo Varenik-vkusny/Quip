@@ -10,21 +10,22 @@ const base =
   "disabled:pointer-events-none disabled:opacity-50 active:translate-y-0";
 
 const variantClass: Record<ButtonVariant, string> = {
-  // primary CTA: near-white on dark (matches quip.ink, AA-safe). Coral stays a
-  // scarce accent (mark, highlight, hook plate), never load-bearing button text.
-  primary:
-    "bg-ink text-bg shadow-[0_1px_0_rgba(255,255,255,.35)_inset,0_12px_34px_-16px_rgba(0,0,0,.7)] " +
-    "hover:bg-white hover:-translate-y-px",
+  // primary CTA: ink fill + bg-colored text (theme-inverted, AA-safe in both themes).
+  // Accent stays scarce (mark, highlight, hook plate), never load-bearing button text.
+  // Hover keeps the ink fill (ink/90 softens it a step in both themes) — a surface
+  // token here would invert the button against its own text in one of the two themes.
+  primary: "bg-ink text-bg shadow-card hover:bg-ink/90 hover:shadow-card-hover hover:-translate-y-px",
   secondary:
     "bg-surface-2 text-ink border border-line hover:border-line-strong hover:bg-surface-3 hover:-translate-y-px",
   ghost: "text-muted hover:text-ink hover:bg-surface-2",
-  // coral CTA for in-product moments (run, apply, retry). White-on-coral passes AA;
-  // use sparingly per DESIGN.md (one or two per view). Lifts on hover, settles on press.
-  // Disabled = neutral elevated surface (NOT 50%-opacity coral, which composites to a
-  // muddy maroon over near-black and reads "broken" rather than "waiting for input").
+  // accent CTA for in-product moments (run, apply, retry). text-on-accent is the
+  // token pair for accent fills (AA in both themes); use sparingly per DESIGN.md
+  // (one or two per view). Lifts on hover, settles on press.
+  // Disabled = neutral elevated surface (NOT 50%-opacity accent, which composites to a
+  // muddy tone over the canvas and reads "broken" rather than "waiting for input").
   accent:
-    "bg-accent text-white shadow-[0_1px_0_rgba(255,255,255,.18)_inset,0_12px_34px_-18px_rgba(255,90,61,.6)] " +
-    "hover:bg-accent-2 hover:-translate-y-px " +
+    "bg-accent text-on-accent shadow-card " +
+    "hover:bg-accent-2 hover:shadow-card-hover hover:-translate-y-px " +
     "disabled:opacity-100 disabled:bg-surface-2 disabled:text-faint disabled:shadow-none",
 };
 

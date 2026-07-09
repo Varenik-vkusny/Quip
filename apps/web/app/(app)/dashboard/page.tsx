@@ -160,11 +160,11 @@ function UploadProgress({ info }: { info: UploadProgressInfo }) {
       </div>
       {retryMsg && (
         <div
-          className="mt-3 flex items-center gap-2 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2"
+          className="mt-3 flex items-center gap-2 rounded-md border border-line bg-[color-mix(in_srgb,var(--t-warn)_8%,transparent)] px-3 py-2"
           aria-live="polite"
         >
-          <Spinner size="sm" className="text-amber-400" />
-          <span className="text-xs text-amber-300">{retryMsg}</span>
+          <Spinner size="sm" className="text-warn" />
+          <span className="text-xs text-warn">{retryMsg}</span>
         </div>
       )}
       {rateEtaLine && (

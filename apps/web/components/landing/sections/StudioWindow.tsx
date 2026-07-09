@@ -16,7 +16,9 @@ export async function StudioWindow() {
   const { studio, howItWorks, heroClip, clips } = getLandingContent(
     resolveLocale(await getLocale()),
   );
-  const second = clips[1];
+  // clips[2] is the hook-type example: two different badge types side by side
+  // read as a system, two identical ones read as a copy-paste.
+  const second = clips[2];
 
   return (
     <section id="how-it-works" className="relative py-28 md:py-36">

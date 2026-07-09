@@ -1,6 +1,7 @@
 import { MarketingNavAuth } from "@/components/marketing/MarketingNavAuth";
 import { Container } from "@/components/ui/Container";
 import { Logo } from "@/components/ui/Logo";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
 
 const links = [
   { href: "#how-it-works", label: "How it works" },
@@ -31,7 +32,12 @@ export function MarketingNav() {
           ))}
         </nav>
 
-        <MarketingNavAuth links={links} />
+        <div className="flex items-center gap-2">
+          {/* theme switch lives beside the CTAs (mirrors the landing Nav); on mobile it
+              moves into the MobileMenu dropdown so the bar stays uncluttered */}
+          <ThemeToggle className="hidden sm:inline-flex" />
+          <MarketingNavAuth links={links} />
+        </div>
       </Container>
     </header>
   );

@@ -336,7 +336,7 @@ export const AgentTab = memo(function AgentTab({
             type="button"
             disabled={busy || sending || !input.trim()}
             onClick={() => void send()}
-            className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-bg transition duration-150 ease-snappy hover:bg-accent-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+            className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-on-accent transition duration-150 ease-snappy hover:bg-accent-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
             aria-label={t("send")}
           >
             {sending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}

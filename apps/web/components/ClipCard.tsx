@@ -27,42 +27,17 @@ export function resolveUrl(videoUrl: string): string {
   return `${WORKER_BASE}/${videoUrl}`;
 }
 
-const TONE_GLOW: Record<string, { border: string; shadow: string }> = {
-  shocking:     { border: '#2a1515', shadow: '0 0 0 1px rgba(255,70,70,0.14), 0 0 18px rgba(255,70,70,0.09), inset 0 0 28px rgba(255,60,60,0.04)' },
-  funny:        { border: '#2a2510', shadow: '0 0 0 1px rgba(250,204,21,0.14), 0 0 18px rgba(250,204,21,0.09), inset 0 0 28px rgba(250,200,20,0.04)' },
-  touching:     { border: '#1e1228', shadow: '0 0 0 1px rgba(192,132,252,0.14), 0 0 18px rgba(192,132,252,0.09), inset 0 0 28px rgba(192,132,252,0.04)' },
-  relatable:    { border: '#131d13', shadow: '0 0 0 1px rgba(74,222,128,0.14), 0 0 18px rgba(74,222,128,0.09), inset 0 0 28px rgba(74,222,128,0.04)' },
-  inspiring:    { border: '#1a1710', shadow: '0 0 0 1px rgba(251,146,60,0.14), 0 0 18px rgba(251,146,60,0.09), inset 0 0 28px rgba(251,146,60,0.04)' },
-  controversial:{ border: '#160e20', shadow: '0 0 0 1px rgba(167,139,250,0.14), 0 0 18px rgba(167,139,250,0.09), inset 0 0 28px rgba(167,139,250,0.04)' },
-  insightful:   { border: '#101820', shadow: '0 0 0 1px rgba(56,189,248,0.14), 0 0 18px rgba(56,189,248,0.09), inset 0 0 28px rgba(56,189,248,0.04)' },
-};
-
 const TONE_EMOJI: Record<string, string> = {
   shocking: '😮', funny: '😂', touching: '🥺',
   relatable: '🙌', inspiring: '🔥', controversial: '🤔', insightful: '💡',
 };
 
-function getScoreTier(score100: number): { textClass: string; gradient: string; glow: string } {
-  if (score100 >= 90) return {
-    textClass: 'text-emerald-400',
-    gradient: 'linear-gradient(90deg, rgba(74,222,128,0.55) 0%, #4ade80 55%, #86efac 100%)',
-    glow: '0 0 7px rgba(74,222,128,0.5)',
-  };
-  if (score100 >= 70) return {
-    textClass: 'text-amber-400',
-    gradient: 'linear-gradient(90deg, rgba(251,191,36,0.55) 0%, #fbbf24 55%, #fde68a 100%)',
-    glow: '0 0 7px rgba(251,191,36,0.5)',
-  };
-  if (score100 >= 50) return {
-    textClass: 'text-orange-400',
-    gradient: 'linear-gradient(90deg, rgba(251,146,60,0.55) 0%, #fb923c 55%, #fdba74 100%)',
-    glow: '0 0 7px rgba(251,146,60,0.4)',
-  };
-  return {
-    textClass: 'text-rose-400',
-    gradient: 'linear-gradient(90deg, rgba(251,113,133,0.55) 0%, #fb7185 55%, #fda4af 100%)',
-    glow: '0 0 7px rgba(251,113,133,0.4)',
-  };
+// Semantic score tiers (thresholds unchanged): high → ok, mid (the former amber+orange
+// bands) → warn, low → bad. Flat token fills — no gradients/glows (brand rule: no neon).
+function getScoreTier(score100: number): { textClass: string; bar: string } {
+  if (score100 >= 90) return { textClass: 'text-ok', bar: 'var(--t-ok)' };
+  if (score100 >= 50) return { textClass: 'text-warn', bar: 'var(--t-warn)' };
+  return { textClass: 'text-bad', bar: 'var(--t-bad)' };
 }
 
 type ClipCardProps = {
@@ -181,7 +156,6 @@ function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
 
   const score100 = Math.round(displayScore * 100);
   const tier = analysisStale ? null : getScoreTier(score100);
-  const glow = (!analysisStale && clip.tone && TONE_GLOW[clip.tone]) || null;
   const emoji = clip.tone && TONE_EMOJI[clip.tone];
 
   const handleRefresh = async () => {
@@ -206,8 +180,7 @@ function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
   return (
     <Card
       selected={!pending && selected}
-      style={{ borderColor: glow?.border, boxShadow: glow?.shadow }}
-      className={`flex flex-col overflow-hidden transition duration-200 ease-snappy ${
+      className={`flex flex-col overflow-hidden shadow-card transition duration-200 ease-snappy hover:border-line-strong ${
         pending ? "opacity-90" : "opacity-100"
       } ${mounted ? "translate-y-0 scale-100 opacity-100" : "translate-y-1 scale-95 opacity-0"}`}
     >
@@ -264,8 +237,7 @@ function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
                 className={`h-full rounded-full ${analysisStale ? 'bg-surface-3' : ''}`}
                 style={tier ? {
                   width: `${displayScore * 100}%`,
-                  background: tier.gradient,
-                  boxShadow: tier.glow,
+                  background: tier.bar,
                 } : undefined}
               />
             </div>
@@ -284,11 +256,11 @@ function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
 
         {/* ── key moment or stale banner ── */}
         {clip.key_quote && !analysisStale && (
-          <div className="mt-3 rounded-sm border-l-2 border-emerald-500 bg-emerald-950/40 px-2.5 py-1.5">
-            <p className="mb-1 text-[7px] font-bold uppercase tracking-widest text-emerald-500">
+          <div className="mt-3 rounded-sm border-l-2 border-ok bg-thought-tint px-2.5 py-1.5">
+            <p className="mb-1 text-[7px] font-bold uppercase tracking-widest text-ok">
               ★ {t("keyMoment")}
             </p>
-            <p className="text-[10px] italic leading-relaxed text-emerald-200">
+            <p className="text-[10px] italic leading-relaxed text-muted">
               &ldquo;{clip.key_quote}&rdquo;
             </p>
           </div>
@@ -298,7 +270,7 @@ function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
             <span className="text-[9px] text-muted">{t("staleBanner")}</span>
             <button
               onClick={handleRefresh}
-              className="shrink-0 rounded border border-amber-400/20 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-bold text-amber-400"
+              className="shrink-0 rounded border border-line bg-[color-mix(in_srgb,var(--t-warn)_10%,transparent)] px-1.5 py-0.5 text-[9px] font-bold text-warn"
             >
               ↻ {t("refresh")}
             </button>
@@ -327,7 +299,7 @@ function ClipCardComponent({ jobId, clip, selected, onToggle }: ClipCardProps) {
                         className="w-1 rounded-[1px]"
                         style={{
                           height: h,
-                          background: (!analysisStale && i < bars) ? '#4ade80' : '#262626',
+                          background: (!analysisStale && i < bars) ? 'var(--t-ok)' : 'var(--t-surface-3)',
                         }}
                       />
                     ))}

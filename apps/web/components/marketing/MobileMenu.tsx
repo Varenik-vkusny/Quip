@@ -3,6 +3,7 @@
 import { Menu, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
 
 /**
  * Mobile nav menu (marketing). Controlled dropdown with light-dismiss — closes on a
@@ -50,7 +51,7 @@ export function MobileMenu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-12 w-56 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-surface p-2 shadow-[0_24px_60px_-28px_rgba(0,0,0,.9)]"
+          className="absolute right-0 top-12 w-56 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-surface p-2 shadow-pop"
         >
           {links.map((l) => (
             <a
@@ -71,6 +72,10 @@ export function MobileMenu({
           >
             {authed ? "Dashboard" : "Sign in"}
           </Link>
+          {/* theme switch, reachable on mobile (the header toggle is hidden < sm) */}
+          <div className="mt-1 flex items-center border-t border-line px-3 pb-1 pt-2.5">
+            <ThemeToggle />
+          </div>
         </div>
       )}
     </div>

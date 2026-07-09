@@ -1,140 +1,98 @@
 # Design System — Quip
 
-> Single source of truth for the **production shell** (marketing site, auth, dashboard, account).
-> Tokens live in `apps/web/app/globals.css` (`@theme`). Change values there → whole UI re-skins.
+> Single source of truth for the **production shell** (marketing site, auth, dashboard, account,
+> editor chrome). Tokens live in `apps/web/app/globals.css` (`:root` + `[data-theme="dark"]` →
+> `@theme inline`). Change values there → whole UI re-skins in BOTH themes.
 > Read this before any visual/UI decision. In QA/review, flag anything that deviates.
 
 ## Product Context
 - **What it is:** Quip turns a long video (podcast / interview / stream) into 3–10 vertical
   clips with burned-in subtitles, a hook on top, and an explanation of **why** each one will land.
-- **Who:** solo creators, podcasters, coaches, experts, marketers repurposing long content.
+- **Who:** solo creators, podcasters, video editors, studios repurposing long content (RU + EN).
 - **Wedge (the whole narrative):** not "more clips" (Vizard) — **"fewer clips, but you know WHY
   to post them."** Explainability = hook + why_works + confidence score + clip-type. Plus reframe
   with no flashes and honest pricing (no credit-casino).
-- **Memorable thing:** *a precise, honest instrument you trust.* The cold precision IS the
-  argument — a tool that hands you confidence scores should look measured and credible.
+- **Memorable thing:** *a precise, honest instrument you trust*, staged like a product you'd pay for.
 - **Message:** "Don't just get clips. Know why they're worth posting."
 
-## Direction — Warm Precision (concept C, founder-chosen 2026-06-13)
-- **Decision:** founder chose the **warm** variant (concept C "Warm Precision") over the cool
-  "Precision Dark" (concept B). Same restraint and layout; the near-black canvas + text + hairlines
-  carry a warm (brown-black, ~35° hue) undertone, with warmer coral/amber atmospheric blooms.
-- **History:** originally locked to cool "Precision Dark" matched to quip.ink's computed cool tokens
-  (`#EDF0F8`/`#7E8AA4`); founder asked to warm it to concept C (2026-06-13). Token *lightness* tiers
-  kept identical → AA preserved (Lighthouse a11y 100). Only the **hue** shifted cool→warm.
-- **Mood:** measured, premium, trustworthy. Linear/Vercel restraint + coral as the one human spark.
-  Hairlines over shadows. Product shown as a real 9:16 clip.
-- **Reference:** quip.ink (north-star, layout/restraint); design-md/ (linear, vercel, superhuman,
-  cursor, raycast, runwayml, elevenlabs).
+## Direction — «Studio» / Signal Gold (founder-chosen 2026-07-09; supersedes Warm Precision)
+- **Decision:** full redesign. Brand accent moved coral → **Signal Gold** (founder picked from
+  gold / magenta / evolved-coral options). Coral is now purely the functional `hook` moment color;
+  the brand finally has its own lane (the old system's core conflict).
+- **Two themes from one token set:**
+  - **light «stage»** — marketing default. Warm off-white, white cards, stacked micro-shadows
+    (Vercel recipe). Communicates "trustworthy, worth paying for" (ElevenLabs/Stripe model).
+  - **dark «studio»** — app/auth/editor default. Warm near-black surface ladder + hairlines
+    (Linear recipe). A pro edit bay.
+  - Explicit user choice (localStorage `quip-theme`, ThemeToggle) wins everywhere; otherwise the
+    surface default applies (pre-paint script in `app/layout.tsx` + `ThemeApplier` on SPA nav).
+    **No theme cookie ever in the root layout** — marketing must stay SSG.
+- **Mood:** measured, premium, alive. The landing is scroll-choreographed (Lenis + GSAP) with one
+  signature element: the **WaveformRiver** — an hour of conversation flowing by while the AI
+  ignites moments in gold. Motion is motivated (tells the product story), never decorative loops.
+- **Reference:** design-md kit (linear, elevenlabs, resend, framer as the core family).
 
 ## Color
-Approach: **restrained** — one accent (coral), everything else is a WARM neutral ladder.
+Approach: **one scarce brand accent (gold) on chrome only** — logo, primary CTA, focus ring,
+active nav. Moment colors are **quarantined inside clip cards/badges** and never touch chrome.
+No neon glows, no decorative accent washes (one atmospheric wash in the hero max).
 
-| Token (`--color-*`) | Hex / value | Use |
-|---|---|---|
-| `bg` | `#0C0B09` | page canvas (warm near-black) |
-| `surface` | `#15120E` | cards, panels |
-| `surface-2` | `#1C1813` | raised / nested surfaces |
-| `surface-3` | `#241F18` | hover / active fill |
-| `ink` | `#F2EFE9` | primary text (warm off-white) |
-| `muted` | `#9A8F80` | secondary text (warm grey) |
-| `faint` | `#8B8276` | tertiary / fine print (AA ≥4.5:1 on bg) |
-| `line` | `rgba(242,239,233,.08)` | default hairline border |
-| `line-strong` | `rgba(242,239,233,.14)` | focus / emphasis border |
-| `accent` | `#FF5A3D` | **coral** — CTA, confidence, hook, focus (scarce) |
-| `accent-2` | `#E0431F` | coral pressed/hover |
-| `accent-tint` | `rgba(255,90,61,.12)` | coral wash (chip bg, glow) |
-| `accent-line` | `rgba(255,90,61,.30)` | coral hairline |
-| `hook` | `#FF5A3D` | clip-type chip: hook |
-| `peak` | `#C06BFF` | clip-type chip: emotional_peak |
-| `thought` | `#19BD8B` | clip-type chip: complete_thought |
-| `quote` | `#4D8DFF` | clip-type chip: strong_quote |
-| `ok` / `warn` / `bad` | `#19BD8B` / `#F5B32E` / `#FF6B6B` | confidence / status semantics |
+| Token (`--color-*`) | Light «stage» | Dark «studio» | Use |
+|---|---|---|---|
+| `bg` | `#FAF9F5` | `#0D0C0A` | page canvas (warm) |
+| `surface` | `#FFFFFF` | `#15130F` | cards, panels |
+| `surface-2` | `#F2F0EA` | `#1C1915` | raised / nested |
+| `surface-3` | `#EAE7DF` | `#24201A` | hover / active fill |
+| `ink` | `#1C1A17` | `#F4F2EC` | primary text |
+| `muted` | `#57534A` | `#A29B8D` | secondary text |
+| `faint` | `#6D6759` | `#8B8476` | fine print (AA on bg) |
+| `line` / `line-strong` | ink @ 9% / 16% | ink @ 8% / 15% | hairlines |
+| `accent` | `#F0A400` | `#FFB224` | **gold fill** (CTA, logo); text on it = `on-accent` |
+| `accent-2` | `#DD9500` | `#FFC24D` | hover/pressed fill |
+| `accent-ink` | `#8F6400` | `#FFC24D` | gold as TEXT (AA-safe per theme) |
+| `on-accent` | `#1C1A17` | `#1C1A17` | text/icon on gold fill |
+| `hook` | `#D93B1F` | `#FF5A3D` | moment chip (cards only) |
+| `peak` | `#8B3DD9` | `#C06BFF` | moment chip |
+| `thought` | `#0E8A63` | `#19BD8B` | moment chip |
+| `quote` | `#2E6BE6` | `#4D8DFF` | moment chip |
+| `ok` / `warn` / `bad` | `#0E8A63/#B45309/#C42B2B` | `#19BD8B/#F5B32E/#FF6B6B` | semantic; confidence = `ok` |
 
-**Rules:** coral appears once or twice per view max (primary action, confidence, hook). Text
-contrast ≥ WCAG AA. No second brand color, no gradients-as-accent, no pure `#000`/`#FFF` surfaces.
+Each moment color also has a `*-tint` background token. **Never** put moment colors on buttons,
+nav, or section chrome.
 
-## Typography
-- **Display:** Onest 700–800, tight negative tracking. (Matches quip.ink; already wired.)
-- **Body / UI:** Onest 400–600.
-- **Mono / numerals:** IBM Plex Mono — timecodes, scores, prices. Always `tabular-nums`.
+## Depth
+- **Light:** stacked micro-shadows (`shadow-card`, `shadow-card-hover`, `shadow-pop` tokens) —
+  2–3 tiny offsets + inset hairline ring. Never one fat blurry drop, never colored glows.
+- **Dark:** surface ladder + hairlines; `shadow-pop` (hairline + deep drop) only for floating
+  cards (reason card, product windows).
+- The app-in-marketing trick: a window framed with `data-theme="dark"` scopes the studio tokens
+  to that subtree (see `StudioWindow.tsx`) — the same runtime mechanism as the global switch.
 
-| Role | Size / line-height / tracking / weight |
-|---|---|
-| display-2xl (hero) | 72 / 1.02 / -0.03em / 800 |
-| display-xl | 56 / 1.04 / -0.028em / 800 |
-| display-lg | 40 / 1.06 / -0.024em / 700 |
-| h2 | 30 / 1.12 / -0.02em / 700 |
-| h3 | 22 / 1.25 / -0.015em / 600 |
-| lead | 19 / 1.55 / -0.01em / 400 (muted) |
-| body | 16 / 1.6 / -0.005em / 400 |
-| small | 14 / 1.5 / 0 / 400 |
-| eyebrow/label | 12.5 / 1 / 0.04em / 500 mono, uppercase |
+## Type
+- **Onest** (display + body; Cyrillic-native) + **IBM Plex Mono** (timecodes, confidence scores,
+  prices — always `tnum`). Loaded via `next/font` in `app/layout.tsx`.
+- Premium retune (2026-07-09): display weight ceiling **650** (no 700–800 shouting), tight
+  tracking −2.6…−3%. Semantic scale tokens: `text-display-2xl/xl/lg`, `text-h2/h3`, `text-lead`.
+- Hierarchy comes from weight + color, not raw size. Body ≤ 65ch.
+- **Zero em-dashes** anywhere user-facing (brand + anti-slop rule).
 
-Clamp display sizes responsively (`clamp()`); never let a headline wrap to 5+ short lines.
+## Motion (emil rules)
+- Transform/opacity only; strong ease-out `var(--ease-out-strong)`; press feedback `scale(.97)`.
+- Landing choreography lives in ONE client island `components/landing/fx/ScrollFx.tsx`
+  (Lenis inertia, nav pill morph, hero parallax, count-ups, pinned film-strip pan, manifesto word
+  scrub, 3D product-shot entrance) + the `WaveformRiver` canvas. Sections stay server components
+  and opt in via data-attributes. Everything degrades to static under `prefers-reduced-motion`
+  and no-JS (content never hidden).
+- App/editor: no scroll theater; tactile micro-feedback only.
 
-## Spacing
-- **Base:** 4px. Scale: 4 · 8 · 12 · 16 · 24 · 32 · 48 · 64 · 96 · 128.
-- **Density:** comfortable. Section vertical rhythm 96–128px desktop / 64px mobile.
-- **Max content width:** 1200px (`--container`); prose 680px.
+## Anti-slop rules (enforced in review)
+- Max ~1 eyebrow per 3 sections; no `//`-prefixed or numbered section labels; no mono-caps trust
+  lines; no marquee strips (founder-vetoed as "AI-ish"); no decorative dots; no fake metrics.
+- One gold element per fold. No purple AI gradients. Cards only where elevation means something.
+- Real product media over illustration: the landing runs on actual clips from `public/clips/`
+  + `public/demo/`.
 
-## Layout
-- **Approach:** hybrid — disciplined grid for app, editorial asymmetry for marketing (hero is a
-  poster, not a centered document; left-aligned headline + product on the right).
-- **Border radius:** sm 8 (buttons/inputs/chips) · md 10 · lg 14 (cards) · xl 20 (hero media) ·
-  pill 999 (only tiny status chips/eyebrows). `--radius-card` = 14 (back-compat).
-
-## Motion
-- **Approach:** intentional, guiding — reveal-on-scroll, focus on CTA. Never decorative chaos.
-- **Easing:** `cubic-bezier(.2,.7,.2,1)`. Durations: micro 120 · short 180 · medium 240 · slow 400ms.
-- **Tactility:** buttons lift `translateY(-1px)` on hover, settle on `:active`; 150–220ms.
-- Respect `prefers-reduced-motion` (already in globals).
-
-## Elevation
-- **No drop shadows for structure** — use the surface ladder + hairlines. One soft shadow is
-  allowed on the hero product media only.
-- **Focus ring:** `0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent-line)`.
-
-## Component primitives (`components/ui/`)
-Reusable, token-only, a11y-first. No god-components, no hardcoded hex.
-`Button` (primary/secondary/ghost/accent) · `Input` (error/disabled) · `Card` (interactive/selected) ·
-`Container` (default/wide/prose) · `Section` (tight/default/loose) · `Logo` · `Select`/`Switch`/`Checkbox`
-(now ink-on, not coral — keeps the accent scarce) · `IconButton`.
-**Instrument-language primitives (2026-06-23):** `Eyebrow` (mono uppercase label — the single
-section-label voice) · `Numeral` (inline mono tabular) · `Meter` (thin value-keyed gauge) ·
-`Stat` (THE confidence/credit/count readout = mono value + Eyebrow + optional Meter) ·
-`Badge` (clip-type/status chip keyed to tokens) · `Skeleton` · `Spinner` · `EmptyState` ·
-`Split` (asymmetric rail+canvas layout — the centered-card-stack killer).
-
-## Instrument language (the cohesion signature, 2026-06-23)
-The product hands you a verdict, so the app reads like an instrument's readout panel.
-- **The confidence SCORE is the recurring hero** — rendered everywhere via `Stat` (dashboard
-  ClipCard, results masthead, editor chrome, landing hero/closer). One component, one look.
-- **Mono numerals are the data typeface** — every score/timecode/duration/%/price/count in
-  `font-mono tabular-nums`. Onest display is reserved for human headlines/verdicts.
-- **Confidence color = `ok`/green** (the semantic), NOT coral — so coral stays the scarce
-  CTA/live-signal accent (≤1–2 per view). Selection = ring + checkbox, never dimming/opacity.
-- **Hairline panels over floating cards**; asymmetric `Split` over centered stacks.
-
-## Anti-slop (taste pre-flight)
-Never: purple/violet "AI gradient", 3-column icon-in-circle grids, centered-everything, uniform
-bubble radius, gradient CTAs, system-ui as display/body, stock-photo heroes, "Built for X" filler.
-Do: asymmetry, hierarchy, second-read moments, the product shown real, one scarce accent.
-
-## SEO / a11y (build requirements)
-`generateMetadata` per page (title/description/canonical), OG + Twitter cards + OG image,
-`app/sitemap.ts`, `app/robots.ts`, JSON-LD (SoftwareApplication/Organization/FAQPage), semantic
-`<main>/<nav>/<section>`, h1→h2→h3, alt text, `next/font` (CLS≈0), `next/image`. Target Lighthouse
-perf/a11y/SEO/best-practices ≥ 90. Contrast AA, visible focus, full keyboard nav.
-
-## Decisions Log
-| Date | Decision | Rationale |
-|---|---|---|
-| 2026-06-13 | System created by /design-consultation | Production shell for Quip |
-| 2026-06-13 | Direction = Precision Dark matched to quip.ink | Founder: brand consistency with live site |
-| 2026-06-13 | ~~Cool near-black~~ → **Warm near-black (concept C)** | Founder chose warm "Warm Precision" over cool B; hue cool→warm, lightness/AA unchanged |
-| 2026-06-13 | Display = Onest (drop Unbounded) | quip.ink uses Onest 700; already wired |
-| 2026-06-13 | Coral kept as sole accent | In quip mark + both ref clusters + burned into every exported clip |
-| 2026-06-23 | **Instrument-language redesign** (dashboard/results/landing/account/editor) | Execution was AI-templated; bold rewrite to the "precision instrument" identity. Palette + functionality unchanged. |
-| 2026-06-23 | Confidence score = `ok`/green via shared `Stat`, coral reserved for CTA/active | Unify the signature across app+marketing; keep coral genuinely scarce (founder feedback: too AI-ish/coral-spread) |
-| 2026-06-23 | Toggles/checkboxes "on" = ink, input focus = line-strong | Stop coral over-spend in routine chrome (the one-accent rule was leaking) |
+## History
+- 2026-06-13 — «Warm Precision» (concept C): warm near-black + scarce coral, dark-only. Superseded.
+- 2026-07-09 — «Studio» / Signal Gold: dual themes, gold brand lane, scroll choreography,
+  WaveformRiver signature. Branch `feat/premium-redesign`.

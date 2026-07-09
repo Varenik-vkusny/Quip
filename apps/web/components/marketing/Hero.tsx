@@ -13,10 +13,10 @@ export async function Hero() {
   const authed = Boolean(await getOptionalUser());
   return (
     <section className="relative overflow-hidden">
-      {/* one restrained coral bloom — the single ambient signal on the page */}
+      {/* one restrained accent bloom — the single ambient signal on the page */}
       <div
         aria-hidden
-        className="pointer-events-none absolute -left-40 -top-40 size-[640px] rounded-full bg-[radial-gradient(circle,rgba(255,90,61,.10),transparent_62%)]"
+        className="pointer-events-none absolute -left-40 -top-40 size-[640px] rounded-full bg-[radial-gradient(circle,var(--t-accent-tint),transparent_62%)]"
       />
 
       <Container className="relative grid items-center gap-14 py-16 sm:py-24 lg:grid-cols-[1.02fr_.98fr] lg:gap-14 lg:py-28">
@@ -79,7 +79,7 @@ export async function Hero() {
             />
 
             {/* the verdict — hero-scale score, the first reading you see */}
-            <div className="absolute -left-2 top-4 w-[46%] rounded-lg border border-line bg-surface/90 p-4 backdrop-blur-md shadow-[0_28px_64px_-26px_rgba(0,0,0,.85)] sm:-left-3 sm:top-6 lg:-left-8">
+            <div className="absolute -left-2 top-4 w-[46%] rounded-lg border border-line bg-surface/90 p-4 backdrop-blur-md shadow-pop sm:-left-3 sm:top-6 lg:-left-8">
               <Stat
                 label="Confidence"
                 value={94}

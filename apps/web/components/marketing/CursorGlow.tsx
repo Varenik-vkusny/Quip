@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 
 /**
- * Soft coral blob that trails the cursor (lerped, so it lags slightly) — adds a
+ * Soft accent-tinted blob that trails the cursor (lerped, so it lags slightly) — adds a
  * subtle "alive" feel on the marketing pages. Sits behind content (z-0; the page
  * wrapper is z-10), so it only shows through transparent sections. Skipped entirely
  * on touch / coarse-pointer devices and when reduced-motion is requested.
@@ -59,8 +59,7 @@ export function CursorGlow() {
       aria-hidden
       className="pointer-events-none fixed left-0 top-0 z-0 -ml-80 -mt-80 size-[640px] rounded-full opacity-100 transition-opacity duration-500 will-change-transform"
       style={{
-        background:
-          "radial-gradient(circle at center, rgba(255,90,61,0.08) 0%, rgba(255,90,61,0.03) 35%, transparent 70%)",
+        background: "radial-gradient(circle at center, var(--t-accent-tint) 0%, transparent 70%)",
       }}
     />
   );

@@ -399,7 +399,7 @@ export function FitTimeline({
               )}
               {isActive && !selected && (
                 <span
-                  className="pointer-events-none absolute inset-0 ring-2 ring-inset ring-white/70"
+                  className="pointer-events-none absolute inset-0 ring-2 ring-inset ring-ink/70"
                   aria-hidden
                 />
               )}
@@ -415,7 +415,7 @@ export function FitTimeline({
 
         {playheadFrac !== null && (
           <div
-            className="pointer-events-none absolute top-0 bottom-0 z-10 w-0.5 bg-white shadow-[0_0_4px_rgba(0,0,0,.6)]"
+            className="pointer-events-none absolute top-0 bottom-0 z-10 w-0.5 bg-accent shadow-[0_0_4px_var(--t-accent-line)]"
             style={{ left: `${playheadFrac * 100}%` }}
             aria-hidden
           />

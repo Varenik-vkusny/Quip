@@ -35,7 +35,7 @@ export function ReasoningCard({
       className={cn(
         "rounded-lg border border-line p-4",
         floating
-          ? "bg-surface/90 backdrop-blur-md shadow-[0_28px_64px_-26px_rgba(0,0,0,.85)]"
+          ? "bg-surface/90 backdrop-blur-md shadow-pop"
           : "bg-surface-2",
         className,
       )}

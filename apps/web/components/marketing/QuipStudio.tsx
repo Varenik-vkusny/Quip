@@ -182,7 +182,7 @@ export function QuipStudio() {
 
         <div
           ref={rootRef}
-          className="mx-auto mt-12 max-w-4xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-[0_32px_80px_-32px_rgba(0,0,0,.6)]"
+          className="mx-auto mt-12 max-w-4xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-pop"
         >
           {/* top bar: title + state + sample tabs */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-surface-2 px-5 py-4">
@@ -252,7 +252,7 @@ export function QuipStudio() {
                     ZONE_CLS[c.type],
                     linked === i
                       ? "ring-2 ring-ink ring-offset-1 ring-offset-surface-3"
-                      : "ring-1 ring-inset ring-white/0 hover:ring-white/20 focus-visible:ring-2 focus-visible:ring-ink",
+                      : "ring-1 ring-inset ring-ink/0 hover:ring-ink/20 focus-visible:ring-2 focus-visible:ring-ink",
                   )}
                   style={{ left: `${c.left}%`, width: `${c.width}%` }}
                 >

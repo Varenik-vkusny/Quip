@@ -133,7 +133,7 @@ export function FeedbackWidget() {
         aria-hidden={open || undefined}
         tabIndex={open ? -1 : undefined}
         className={cn(
-          "fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2.5 text-sm font-medium text-ink shadow-[0_16px_40px_-20px_rgba(0,0,0,.85)] transition duration-150 ease-snappy hover:border-line-strong hover:-translate-y-px",
+          "fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2.5 text-sm font-medium text-ink shadow-pop transition duration-150 ease-snappy hover:border-line-strong hover:-translate-y-px",
           open && "pointer-events-none scale-95 opacity-0",
         )}
       >
@@ -157,7 +157,7 @@ export function FeedbackWidget() {
             onClick={(e) => e.stopPropagation()}
             onTransitionEnd={onPanelTransitionEnd}
             className={cn(
-              "max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-lg border border-line bg-surface p-5 shadow-[0_24px_80px_-24px_rgba(0,0,0,.9)] transition duration-150 ease-snappy",
+              "max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-lg border border-line bg-surface p-5 shadow-pop transition duration-150 ease-snappy",
               // mobile = slide-up sheet; sm+ = rise + scale
               shown
                 ? "translate-y-0 scale-100 opacity-100"
