@@ -1,95 +1,192 @@
 import { getLocale, getTranslations } from "next-intl/server";
 import { resolveLocale } from "@/i18n/locale";
 import { getLandingContent, ROUTES } from "@/lib/landingContent";
-import { Container, WordChip, TypeBadge } from "../components/primitives";
+import { Container, TypeBadge } from "../components/primitives";
 import { PrimaryCTA, GhostCTA } from "../components/CTA";
-import { ConfidenceGauge } from "../components/Confidence";
 import { InlineClip } from "../components/InlineClip";
+import { Reveal } from "../components/Reveal";
+import { WaveformRiver, type RiverMoment } from "../fx/WaveformRiver";
 
+/*
+  Hero — the light «stage». Left: the value prop with ONE gold word. Right: a fan
+  of real product clips (the middle phone actually plays) with the reasoning card
+  floating over it — the thing no volume-clipper shows. Below, the signature
+  WaveformRiver: an hour of conversation flowing by while the AI catches moments.
+  ScrollFx drives the parallax ([data-para]) and the confidence count-up
+  ([data-count-to]); with reduced motion everything renders static and complete.
+*/
 export async function Hero({ authed = false }: { authed?: boolean }) {
-  const { hero, heroClip, openApp } = getLandingContent(resolveLocale(await getLocale()));
+  const content = getLandingContent(resolveLocale(await getLocale()));
+  const { hero, heroClip, typeLabel, openApp } = content;
   const t = await getTranslations("heroReadout");
+
+  // The river's moments: fixed positions across the "hour", labeled with the
+  // localized moment types. Decorative (aria-hidden), so no content coupling.
+  const riverMoments: RiverMoment[] = [
+    { at: 0.16, type: "hook", label: typeLabel.hook },
+    { at: 0.38, type: "quote", label: typeLabel.quote },
+    { at: 0.61, type: "peak", label: typeLabel.peak },
+    { at: 0.84, type: "thought", label: typeLabel.thought },
+  ];
+
   return (
-    <section id="top" className="relative overflow-hidden pt-28 pb-20 md:pt-32 md:pb-28">
-      {/* instrument graticule, faded, never coral */}
+    <section id="top" data-hero className="relative overflow-hidden pt-28 md:pt-32">
+      {/* one atmospheric wash: gold breath top-left, faint peak-violet far right */}
       <div
-        className="graticule pointer-events-none absolute inset-0 opacity-40 [mask-image:radial-gradient(120%_80%_at_70%_0%,#000_0%,transparent_65%)]"
         aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(900px 480px at 12% -10%, var(--t-accent-tint), transparent 62%)," +
+            "radial-gradient(700px 420px at 88% 8%, var(--t-peak-tint), transparent 60%)",
+          opacity: 0.75,
+        }}
       />
 
       <Container className="relative">
-        <div className="grid items-center gap-y-14 lg:grid-cols-[minmax(0,48fr)_minmax(0,52fr)] lg:gap-x-14">
-          {/* LEFT - value prop */}
-          <div className="max-w-[37rem]">
-            <h1 className="text-[clamp(36px,4.6vw,56px)] font-extrabold leading-[1.04] tracking-[-0.03em] text-ink">
-              {hero.headlinePre}
-              <br />
-              {hero.headlineMid}
-              <WordChip>{hero.headlineAccent}</WordChip>
-              {hero.headlinePost}
-            </h1>
-            <p className="mt-6 max-w-[44ch] text-[1.0625rem] leading-relaxed text-muted">{hero.sub}</p>
-
-            <div className="mt-9 flex flex-wrap items-center gap-3">
-              <PrimaryCTA href={authed ? ROUTES.app : ROUTES.signup} size="lg">
-                {authed ? openApp : hero.primary}
-              </PrimaryCTA>
-              <GhostCTA href="#how-it-works" size="lg">
-                {hero.secondary}
-              </GhostCTA>
-            </div>
-
-            <p className="mt-6 font-mono text-[12px] uppercase tracking-[0.08em] text-faint">{hero.trust}</p>
+        <div className="grid items-center gap-y-14 lg:grid-cols-[minmax(0,52fr)_minmax(0,48fr)] lg:gap-x-12">
+          {/* LEFT — value prop */}
+          <div className="max-w-[36rem]">
+            <Reveal>
+              <h1 className="text-[clamp(34px,4vw,44px)] font-[650] leading-[1.06] tracking-[-0.028em] text-ink [text-wrap:balance]">
+                {hero.headlinePre}{" "}
+                {hero.headlineMid}
+                <span className="mark-accent">{hero.headlineAccent}</span>
+                {hero.headlinePost}
+              </h1>
+            </Reveal>
+            <Reveal delay={0.06}>
+              <p className="mt-6 max-w-[44ch] text-[1.0625rem] leading-relaxed text-muted">
+                {hero.sub}
+              </p>
+            </Reveal>
+            <Reveal delay={0.12}>
+              <div className="mt-9 flex flex-wrap items-center gap-3">
+                <PrimaryCTA href={authed ? ROUTES.app : ROUTES.signup} size="lg">
+                  {authed ? openApp : hero.primary}
+                </PrimaryCTA>
+                <GhostCTA href="#demo" size="lg">
+                  {hero.secondary}
+                </GhostCTA>
+              </div>
+            </Reveal>
+            <Reveal delay={0.18}>
+              <p className="mt-6 text-[13.5px] text-faint">{hero.trust}</p>
+            </Reveal>
           </div>
 
-          {/* RIGHT - live product readout */}
-          <HeroReadout
-            clip={heroClip}
-            labels={{ status: t("status"), avg: t("avg"), confidence: t("confidence") }}
-          />
+          {/* RIGHT — the product, literally: three real clips + the reasoning card */}
+          <Reveal delay={0.1}>
+            <div className="relative mx-auto h-[480px] w-full max-w-[560px] sm:h-[520px]">
+              <Phone
+                className="left-[2%] top-[64px] w-[176px] rotate-[-5deg] sm:w-[196px]"
+                para={-42}
+                peek="group-hover:-translate-y-4 group-hover:-rotate-6 group-hover:scale-[1.06]"
+              >
+                <img
+                  src="/clips/frame-1.jpg"
+                  alt=""
+                  width={196}
+                  height={348}
+                  loading="eager"
+                  className="size-full object-cover"
+                />
+              </Phone>
+              <Phone
+                className="left-[31%] top-0 z-[2] w-[210px] sm:w-[232px]"
+                para={-92}
+                peek="group-hover:-translate-y-5 group-hover:scale-[1.07]"
+              >
+                <InlineClip
+                  src={heroClip.src!}
+                  poster={heroClip.poster}
+                  label={`Quip clip: ${heroClip.hook}`}
+                  className="size-full object-cover"
+                />
+              </Phone>
+              <Phone
+                className="right-0 top-[84px] w-[176px] rotate-[4.5deg] sm:w-[196px]"
+                para={-58}
+                peek="group-hover:-translate-y-4 group-hover:rotate-6 group-hover:scale-[1.06]"
+              >
+                <img
+                  src="/clips/clip-4.webp"
+                  alt=""
+                  width={196}
+                  height={348}
+                  loading="eager"
+                  className="size-full object-cover"
+                />
+              </Phone>
+
+              {/* the reasoning card — Quip's un-copyable artifact */}
+              <aside
+                data-para="34"
+                data-count-scope
+                className="absolute bottom-0 left-[8%] z-[4] w-[min(340px,92%)] rounded-card bg-surface p-4 shadow-pop sm:left-[14%] sm:p-5"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <TypeBadge type={heroClip.type} label={heroClip.typeLabel} />
+                  <span className="font-mono text-[12.5px] text-muted">
+                    {t("confidence").toLowerCase()}{" "}
+                    <b className="font-semibold text-ok" data-count-to={heroClip.confidence}>
+                      {heroClip.confidence}
+                    </b>
+                  </span>
+                </div>
+                <p className="mt-3 text-[15px] font-semibold leading-snug tracking-[-0.01em] text-ink">
+                  {heroClip.hook}
+                </p>
+                <p className="mt-1.5 text-[13px] leading-snug text-muted">{heroClip.reason}</p>
+                <div className="mt-3.5 h-[3px] overflow-hidden rounded-pill bg-surface-3">
+                  <i
+                    data-count-bar
+                    className="block h-full rounded-pill bg-ok"
+                    style={{ width: `${heroClip.confidence}%` }}
+                  />
+                </div>
+              </aside>
+            </div>
+          </Reveal>
         </div>
       </Container>
+
+      {/* signature: the conversation flowing by, moments igniting as they're caught */}
+      <div className="relative mt-14 md:mt-16">
+        <WaveformRiver moments={riverMoments} className="h-[96px] w-full md:h-[120px]" />
+      </div>
     </section>
   );
 }
 
-function HeroReadout({
-  clip,
-  labels,
+/* A phone-framed clip in the hero fan. TWO layers on purpose: the OUTER owns
+   position + base rotation + the scroll parallax (ScrollFx writes an inline
+   transform on [data-para], so it must not share an element with the hover
+   transform or the inline style wins and hover does nothing — that was the old
+   "cards just overlap flatly" bug). The INNER carries the hover "peek": on hover
+   it lifts, scales and fans further out (direction passed per phone via `peek`),
+   so grabbing a card makes it present itself instead of flatly covering its
+   neighbours. z-index (not a transform) is bumped on the outer so it sits on top. */
+function Phone({
+  children,
+  className = "",
+  para,
+  peek = "",
 }: {
-  clip: ReturnType<typeof getLandingContent>["heroClip"];
-  labels: { status: string; avg: string; confidence: string };
+  children: React.ReactNode;
+  className?: string;
+  para: number;
+  peek?: string;
 }) {
   return (
-    <div className="rounded-[16px] border border-line-strong bg-surface/70 p-5 shadow-[inset_0_1px_0_rgba(242,239,233,0.05)] backdrop-blur-sm sm:p-7">
-      {/* one quiet header line: real, informative, no live-theater */}
-      <div className="flex items-center justify-between font-mono text-[11px] uppercase tracking-[0.12em] text-faint">
-        <span>{labels.status}</span>
-        <span>{labels.avg}</span>
-      </div>
-
-      {/* clip + the reading, sitting directly on the panel (no nested box) */}
-      <div className="mt-6 grid grid-cols-[auto_minmax(0,1fr)] gap-6 sm:gap-8">
-        <div className="relative aspect-[9/16] w-[150px] shrink-0 overflow-hidden rounded-[10px] border border-line bg-bg sm:w-[172px]">
-          <InlineClip
-            src={clip.src!}
-            poster={clip.poster}
-            label={`Quip clip: ${clip.hook}`}
-            className="size-full object-cover"
-          />
-          <span className="absolute left-2 top-2">
-            <TypeBadge type={clip.type} label={clip.typeLabel} />
-          </span>
-        </div>
-
-        <div className="flex min-w-0 flex-col">
-          <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">{labels.confidence}</span>
-          <ConfidenceGauge value={clip.confidence} variant="hero" className="mt-1.5" />
-
-          <p className="mt-6 text-[15px] font-semibold leading-snug tracking-[-0.01em] text-ink">{clip.hook}</p>
-          <p className="mt-2 text-[13px] leading-snug text-muted">{clip.reason}</p>
-          <span className="mt-4 font-mono text-[10px] tracking-[0.08em] text-faint">{clip.timecode}</span>
-        </div>
+    <div
+      data-para={para}
+      className={`group absolute aspect-[9/16] will-change-transform hover:z-30 ${className}`}
+    >
+      <div
+        className={`size-full overflow-hidden rounded-[22px] bg-[#000] shadow-pop transition-transform duration-[350ms] ease-[var(--ease-out)] will-change-transform ${peek}`}
+      >
+        {children}
       </div>
     </div>
   );

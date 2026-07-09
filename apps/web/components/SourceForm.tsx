@@ -13,6 +13,13 @@ import { isAcceptedVideoFile } from "@/lib/videoFile";
 const MIN_CLIPS = 1;
 const MAX_CLIPS = 30; // продуктовый потолок (Auto = «сколько найдётся, до 30»)
 const DEFAULT_CLIPS = 8;
+const DEFAULT_MIN_SEC = 20;
+const DEFAULT_MAX_SEC = 60;
+const MIN_CLIP_SEC = 4;
+const MAX_CLIP_SEC = 180;
+// The worker pins clip_max_sec >= 10 (main.py request models). Keep the stepper from
+// reaching a value the server would 422 on, so "short clips" never breaks the upload.
+const MIN_CLIP_MAX_SEC = 10;
 // Quip is for long-form (podcasts, talks). Uploads >100 MB go via R2 multipart (parallel,
 // resumable parts) so the old 5 GB single-PUT ceiling is gone — the REAL limit is length
 // (3 h, worker-side billing.MAX_VIDEO_MINUTES). This MB number is just a sane guard against
@@ -40,8 +47,8 @@ export function SourceForm({
 }: {
   // onSubmit = YouTube-link path (best-effort import). Optional for back-compat: callers that
   // don't pass it simply don't offer the link field. Upload is the primary affordance.
-  onSubmit?: (url: string, maxClips: number) => void;
-  onSubmitFile: (file: File, maxClips: number, language: string | null) => void;
+  onSubmit?: (url: string, maxClips: number, clipMinSec?: number, clipMaxSec?: number) => void;
+  onSubmitFile: (file: File, maxClips: number, language: string | null, clipMinSec?: number, clipMaxSec?: number) => void;
   busy: boolean;
 }) {
   const t = useTranslations("sourceForm");
@@ -54,17 +61,52 @@ export function SourceForm({
   const [count, setCount] = useState(DEFAULT_CLIPS);
   const [dragging, setDragging] = useState(false);
   const [kazakh, setKazakh] = useState(false);
+  const [clipMinSec, setClipMinSec] = useState(DEFAULT_MIN_SEC);
+  const [clipMaxSec, setClipMaxSec] = useState(DEFAULT_MAX_SEC);
+  // The length fields keep a free-text draft so you can clear the box / delete the
+  // last digit while typing; the numeric value is committed (clamped) on blur, on a
+  // +/- step, and at submit. Without this a controlled number input snaps back and
+  // refuses an empty/partial state.
+  const [minDraft, setMinDraft] = useState(String(DEFAULT_MIN_SEC));
+  const [maxDraft, setMaxDraft] = useState(String(DEFAULT_MAX_SEC));
+  // Duration (seconds) of the picked file, probed client-side, so we can warn BEFORE
+  // upload if it's shorter than the minimum clip length. null = unknown / not probable.
+  const [fileDuration, setFileDuration] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const urlValid = isLikelyYoutubeUrl(url);
+  // Pre-flight: a video shorter than the minimum clip length is an impossible request
+  // (the pipeline would fail deep in select). Catch it here so we never upload+process
+  // it. Fail-open when the duration is unknown (null) — the worker still guards it.
+  const videoTooShort = file != null && fileDuration != null && fileDuration < clipMinSec;
   // A file always wins; otherwise a valid YouTube link (only if the link path is wired in).
-  const canSubmit = !busy && (file != null || (onSubmit != null && urlValid));
+  const canSubmit = !busy && !videoTooShort && (file != null || (onSubmit != null && urlValid));
   const clamp = (n: number) => Math.max(MIN_CLIPS, Math.min(MAX_CLIPS, n));
   // Auto → шлём потолок (30): воркер вернёт ДО стольких сильных моментов, сколько найдёт.
   const clipsRequested = auto ? MAX_CLIPS : count;
+  // Clip-length clamps for the typed inputs. min stays in [MIN_CLIP_SEC, max-2];
+  // max stays in [max(MIN_CLIP_MAX_SEC, min+2), MAX_CLIP_SEC] (MIN_CLIP_MAX_SEC
+  // mirrors the worker's ge=10, so a typed value can never 422). Applied on blur
+  // and again at submit (Enter-to-submit can skip the input blur).
+  const clampMinSec = (n: number) => Math.min(clipMaxSec - 2, Math.max(MIN_CLIP_SEC, n || MIN_CLIP_SEC));
+  const clampMaxSec = (min: number, n: number) =>
+    Math.min(MAX_CLIP_SEC, Math.max(Math.max(MIN_CLIP_MAX_SEC, min + 2), n || MIN_CLIP_MAX_SEC));
+  // Commit a number to min/max: clamp it, then sync BOTH the numeric state and its
+  // draft string (so a +/- step or a blur snaps the visible field to the clamped value).
+  const applyMin = (n: number) => {
+    const v = clampMinSec(n);
+    setClipMinSec(v);
+    setMinDraft(String(v));
+  };
+  const applyMax = (n: number) => {
+    const v = clampMaxSec(clipMinSec, n);
+    setClipMaxSec(v);
+    setMaxDraft(String(v));
+  };
 
   function pickFile(f: File | null) {
     setFileError(null);
+    setFileDuration(null);
     if (!f) {
       setFile(null);
       return;
@@ -80,16 +122,36 @@ export function SourceForm({
       return;
     }
     setFile(f);
+    // Probe the duration off a throwaway <video> so the min-length pre-flight can fire
+    // before we ever upload. Best-effort: containers the browser can't decode leave it null.
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    const objUrl = URL.createObjectURL(f);
+    probe.onloadedmetadata = () => {
+      const d = probe.duration;
+      setFileDuration(Number.isFinite(d) && d > 0 ? d : null);
+      URL.revokeObjectURL(objUrl);
+    };
+    probe.onerror = () => {
+      setFileDuration(null);
+      URL.revokeObjectURL(objUrl);
+    };
+    probe.src = objUrl;
   }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) return;
     // A picked file is the primary path; a YouTube link is the best-effort secondary path.
+    // Parse the drafts too: Enter-to-submit can fire before the input's blur commits.
+    const pMin = parseInt(minDraft, 10);
+    const pMax = parseInt(maxDraft, 10);
+    const safeMin = clampMinSec(Number.isNaN(pMin) ? clipMinSec : pMin);
+    const safeMax = clampMaxSec(safeMin, Number.isNaN(pMax) ? clipMaxSec : pMax);
     if (file) {
-      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null);
+      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax);
     } else if (onSubmit && urlValid) {
-      onSubmit(url.trim(), clipsRequested);
+      onSubmit(url.trim(), clipsRequested, safeMin, safeMax);
     }
   }
 
@@ -325,7 +387,92 @@ export function SourceForm({
             </span>
           </div>
         </div>
+
+        <div className="sm:col-span-2">
+          <Eyebrow tone="faint">{t("clipDuration")}</Eyebrow>
+          <div className="mt-2 flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted">{t("minClip")}</span>
+              <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
+                <IconButton
+                  onClick={() => applyMin(clipMinSec - 2)}
+                  disabled={busy || clipMinSec <= MIN_CLIP_SEC}
+                  aria-label={t("shorterMinClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Minus className="size-4" />
+                </IconButton>
+                <div className="flex items-center">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={minDraft}
+                    onChange={(e) => setMinDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
+                    onBlur={() => applyMin(parseInt(minDraft, 10) || clipMinSec)}
+                    disabled={busy}
+                    aria-label={t("minClip")}
+                    className="w-8 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
+                  />
+                  <span className="text-sm text-faint">s</span>
+                </div>
+                <IconButton
+                  onClick={() => applyMin(clipMinSec + 2)}
+                  disabled={busy || clipMinSec >= clipMaxSec - 2}
+                  aria-label={t("longerMinClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Plus className="size-4" />
+                </IconButton>
+              </div>
+            </div>
+            <span className="text-sm text-faint">-</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted">{t("maxClip")}</span>
+              <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
+                <IconButton
+                  onClick={() => applyMax(clipMaxSec - 2)}
+                  disabled={busy || clipMaxSec <= Math.max(MIN_CLIP_MAX_SEC, clipMinSec + 2)}
+                  aria-label={t("shorterMaxClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Minus className="size-4" />
+                </IconButton>
+                <div className="flex items-center">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={maxDraft}
+                    onChange={(e) => setMaxDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
+                    onBlur={() => applyMax(parseInt(maxDraft, 10) || clipMaxSec)}
+                    disabled={busy}
+                    aria-label={t("maxClip")}
+                    className="w-8 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
+                  />
+                  <span className="text-sm text-faint">s</span>
+                </div>
+                <IconButton
+                  onClick={() => applyMax(clipMaxSec + 2)}
+                  disabled={busy || clipMaxSec >= MAX_CLIP_SEC}
+                  aria-label={t("longerMaxClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Plus className="size-4" />
+                </IconButton>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
+
+      {videoTooShort && (
+        <p className="mt-4 text-sm text-warn">
+          {t("videoTooShort", { dur: Math.round(fileDuration ?? 0), min: clipMinSec })}
+        </p>
+      )}
 
       <Button
         type="submit"

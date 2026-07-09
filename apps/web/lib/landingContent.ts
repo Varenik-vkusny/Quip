@@ -159,6 +159,32 @@ export interface LandingContent {
     sub: string;
     payload: { id: "hook" | "whyItWorks" | "confidence" | "momentType"; label: string; body: string }[];
   };
+  /** Pinned horizontal film-strip: one long video unfolded into a map of moments. */
+  momentMap: {
+    heading: string;
+    sub: string;
+    cards: { tc: string; type: MomentType; title: string; confidence: number; poster: string }[];
+    more: { count: string; note: string };
+  };
+  /** Pinned mid-page pivot line; words reveal under the scrub. gold marks the accent word. */
+  manifesto: { words: { t: string; gold?: boolean }[] };
+  /** The dark «studio» window: the app shown as a product shot inside the light stage. */
+  studio: {
+    heading: string;
+    sub: string;
+    url: string;
+    createTitle: string;
+    createSub: string;
+    placeholder: string;
+    cut: string;
+    drop: string;
+    dropStrong: string;
+    month: string;
+    planTag: string;
+    videos: string;
+    minutes: string;
+    upgrade: string;
+  };
   craft: {
     eyebrow: string;
     heading: string;
@@ -232,11 +258,11 @@ const STRINGS: Record<Locale, LandingStrings> = {
       headlinePre: "Don't just get clips.",
       headlineMid: "Know ",
       headlineAccent: "why",
-      headlinePost: " they're worth posting.",
+      headlinePost: " they'll land.",
       sub: "Drop a podcast, interview, or stream. Quip cuts the few clips worth posting and reports why each one lands, so you spend your time on the edit, not the search.",
       primary: "Upload a video",
       secondary: "See how it works",
-      trust: "No card. 2 free videos / month.",
+      trust: "No card. 1 free video / month.",
     },
     clipText: {
       hero: {
@@ -342,6 +368,48 @@ const STRINGS: Record<Locale, LandingStrings> = {
         { id: "confidence", label: "Confidence", body: "An honest 0 to 100 score, so you know which clip to post first." },
         { id: "momentType", label: "Moment type", body: "Hook, emotional peak, complete thought, or strong quote." },
       ],
+    },
+    momentMap: {
+      heading: "One video. The whole map of moments.",
+      sub: "Keep scrolling: Quip unfolds an hour of conversation into a strip of strong moments, each with a timecode and a score.",
+      cards: [
+        { tc: "04:12", type: "hook", title: "The two seconds that decide everything", confidence: 91, poster: "/clips/frame-1.jpg" },
+        { tc: "11:03", type: "quote", title: "He didn't half-ass it", confidence: 94, poster: "/clips/clip-1.webp" },
+        { tc: "17:48", type: "peak", title: "Where the voice cracks", confidence: 88, poster: "/clips/clip-3.webp" },
+        { tc: "26:30", type: "thought", title: "A complete argument in 40 seconds", confidence: 86, poster: "/clips/poster-1.jpg" },
+        { tc: "38:15", type: "hook", title: "His dad's surprising reaction", confidence: 85, poster: "/clips/clip-4.webp" },
+        { tc: "49:52", type: "quote", title: "Discipline beats talent's excuses", confidence: 82, poster: "/clips/poster-2.jpg" },
+      ],
+      more: { count: "+12", note: "more moments down the map. Open any of them and pull the clip in one click." },
+    },
+    manifesto: {
+      words: [
+        { t: "Stop" },
+        { t: "guessing" },
+        { t: "what" },
+        { t: "to" },
+        { t: "post." },
+        { t: "The" },
+        { t: "reason", gold: true },
+        { t: "beats" },
+        { t: "luck." },
+      ],
+    },
+    studio: {
+      heading: "Inside: the dark studio",
+      sub: "The marketing is light; the workspace is dark, like an edit bay. Both themes switch in one click, everywhere on the site.",
+      url: "quip.ink/dashboard",
+      createTitle: "Create clips",
+      createSub: "Paste a link or upload a video. Quip finds the moments and explains each one.",
+      placeholder: "Paste a YouTube link",
+      cut: "Make clips",
+      drop: "Drag a video here, or",
+      dropStrong: "choose a file",
+      month: "This month",
+      planTag: "FREE",
+      videos: "Videos",
+      minutes: "Source minutes",
+      upgrade: "Get more limits",
     },
     craft: {
       eyebrow: "// THE CRAFT",
@@ -513,7 +581,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       sub: "Drop in a video and get a handful of clips you can stand behind, each with the reason it works and a score you can trust.",
       primary: "Try Quip free",
       secondary: "See pricing",
-      trust: "No card. 2 free videos / month. Cancel anytime.",
+      trust: "No card. 1 free video / month. Cancel anytime.",
     },
     footer: {
       tagline:
@@ -571,11 +639,11 @@ const STRINGS: Record<Locale, LandingStrings> = {
     },
     hero: {
       eyebrow: "// СТУДИЯ КЛИПОВ",
-      headlinePre: "Не просто получайте клипы.",
+      headlinePre: "Не просто клипы.",
       headlineMid: "Знайте, ",
       headlineAccent: "почему",
-      headlinePost: " их стоит постить.",
-      sub: "Загрузите подкаст, интервью или стрим. Quip нарежет те несколько клипов, что стоит выложить, и объяснит, почему каждый сработает — чтобы вы тратили время на монтаж, а не на поиск моментов.",
+      headlinePost: " они зайдут.",
+      sub: "Загрузите подкаст, интервью или стрим. Quip нарежет те несколько клипов, что стоит выложить, и объяснит, почему каждый сработает. Время уходит на монтаж, а не на поиск моментов.",
       primary: "Загрузить видео",
       secondary: "Как это работает",
       trust: "Без карты. 1 видео в месяц бесплатно.",
@@ -608,7 +676,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     },
     demo: {
       eyebrow: "Реальный прогон, от и до",
-      heading: "Вот как он режет — и почему именно так.",
+      heading: "Вот как он режет, и почему именно так.",
       sub: "На входе одно длинное видео. Quip находит моменты, режет чистые вертикальные клипы и объясняет, почему каждый сработает: хук, оценка уверенности и разбор нарезки.",
       stages: ["Загрузка", "Поиск моментов", "Нарезка вертикали"],
     },
@@ -623,7 +691,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     audience: {
       eyebrow: "// ДЛЯ КОГО",
       heading: "Для тех, кто монтирует на жизнь.",
-      sub: "Поиск моментов, вертикальный рефрейм, черновые субтитры — это медленные восемьдесят процентов работы. Quip берёт эту часть на себя и возвращает причину, почему каждый клип сработает, чтобы вы брали больше заказов, а не тонули в рутине.",
+      sub: "Поиск моментов, вертикальный рефрейм, черновые субтитры: это медленные восемьдесят процентов работы. Quip берёт эту часть на себя и возвращает причину, почему каждый клип сработает, чтобы вы брали больше заказов, а не тонули в рутине.",
       grindLabel: "Рутина сейчас",
       gainLabel: "С Quip",
       privacyLabel: "Приватность",
@@ -646,7 +714,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
           id: "creator",
           who: "Креаторы и подкастеры",
           role: "Постите каждый день в одиночку",
-          grind: "Вы пишете вдолгую, а клипы так и не выходят, потому что нарезать их самому — это весь день.",
+          grind: "Вы пишете вдолгую, а клипы так и не выходят, потому что нарезать их самому значит потратить весь день.",
           gain: "Загрузите выпуск, получите несколько клипов, за которые не стыдно, и постите каждый день без найма монтажёра.",
         },
       ],
@@ -654,7 +722,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     },
     howItWorks: {
       eyebrow: "// КАК ЭТО РАБОТАЕТ",
-      heading: "На входе — длинное видео. На выходе — клипы, которым можно доверять.",
+      heading: "На входе длинное видео. На выходе клипы, которым можно доверять.",
       sub: "Три шага, пара минут.",
       steps: [
         {
@@ -670,29 +738,69 @@ const STRINGS: Record<Locale, LandingStrings> = {
         {
           n: "03",
           title: "Доработайте и опубликуйте",
-          body: "Плавный рефрейм 9:16 за спикером, сочные субтитры, ваш стиль. Экспорт — и в ленту осознанно.",
+          body: "Плавный рефрейм 9:16 за спикером, сочные субтитры, ваш стиль. Экспорт, и в ленту осознанно.",
         },
       ],
     },
     why: {
       eyebrow: "Почему Quip",
       heading: "Каждый клип идёт со своими причинами.",
-      sub: "Большинство ИИ-нарезчиков выдают тридцать клипов и пожимают плечами. Quip даёт меньше — но каждый с хуком, оценкой уверенности, типом момента и понятной причиной, почему он сработает. Вы постите осознанно, а не на удачу, а когда клиент спросит «почему этот клип», ответ уже написан.",
+      sub: "Большинство ИИ-нарезчиков выдают тридцать клипов и пожимают плечами. Quip даёт меньше, но каждый с хуком, оценкой уверенности, типом момента и понятной причиной, почему он сработает. Вы постите осознанно, а не на удачу, а когда клиент спросит «почему этот клип», ответ уже написан.",
       payload: [
         { id: "hook", label: "Хук", body: "Цепляющая верхняя строка, написанная под этот конкретный момент." },
-        { id: "whyItWorks", label: "Почему работает", body: "Настоящая причина: интрига, развязка, напряжение — в одном предложении." },
+        { id: "whyItWorks", label: "Почему работает", body: "Настоящая причина: интрига, развязка, напряжение в одном предложении." },
         { id: "confidence", label: "Уверенность", body: "Честная оценка от 0 до 100, чтобы понять, какой клип постить первым." },
         { id: "momentType", label: "Тип момента", body: "Хук, эмоциональный пик, законченная мысль или сильная цитата." },
       ],
     },
+    momentMap: {
+      heading: "Одно видео. Вся карта моментов.",
+      sub: "Листайте дальше: Quip разворачивает час разговора в ленту сильных моментов: у каждого таймкод и оценка.",
+      cards: [
+        { tc: "04:12", type: "hook", title: "Две секунды, которые решают всё", confidence: 91, poster: "/clips/frame-1.jpg" },
+        { tc: "11:03", type: "quote", title: "Он не делал вполсилы", confidence: 94, poster: "/clips/clip-1.webp" },
+        { tc: "17:48", type: "peak", title: "Момент, где ломается голос", confidence: 88, poster: "/clips/clip-3.webp" },
+        { tc: "26:30", type: "thought", title: "Законченный аргумент за 40 секунд", confidence: 86, poster: "/clips/poster-1.jpg" },
+        { tc: "38:15", type: "hook", title: "Неожиданная реакция его отца", confidence: 85, poster: "/clips/clip-4.webp" },
+        { tc: "49:52", type: "quote", title: "Дисциплина сильнее оправданий", confidence: 82, poster: "/clips/poster-2.jpg" },
+      ],
+      more: { count: "+12", note: "моментов дальше по карте. Откройте любой и вытащите клип в один клик." },
+    },
+    manifesto: {
+      words: [
+        { t: "Хватит" },
+        { t: "гадать," },
+        { t: "что" },
+        { t: "постить." },
+        { t: "Причина", gold: true },
+        { t: "сильнее" },
+        { t: "удачи." },
+      ],
+    },
+    studio: {
+      heading: "Внутри: тёмная студия",
+      sub: "Маркетинг светлый, рабочее пространство тёмное, как монтажка. Обе темы переключаются в один клик, на всём сайте.",
+      url: "quip.ink/dashboard",
+      createTitle: "Создать клипы",
+      createSub: "Вставьте ссылку или загрузите видео. Quip найдёт моменты и объяснит каждый.",
+      placeholder: "Вставьте ссылку на YouTube",
+      cut: "Нарезать",
+      drop: "Перетащите видео сюда или",
+      dropStrong: "выберите файл",
+      month: "Этот месяц",
+      planTag: "FREE",
+      videos: "Видео",
+      minutes: "Минуты исходника",
+      upgrade: "Расширить лимиты",
+    },
     craft: {
       eyebrow: "// РЕМЕСЛО",
-      heading: "Нарезка — это просто. Мы потеем над остальным.",
+      heading: "Нарезать просто. Мы потеем над остальным.",
       features: [
         {
           id: "speaker",
           title: "Следует за спикером",
-          body: "Детекция активного спикера держит в центре нужное лицо — даже в мультикам-интервью.",
+          body: "Детекция активного спикера держит в центре нужное лицо, даже в мультикам-интервью.",
         },
         {
           id: "noFlash",
@@ -714,7 +822,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     comparison: {
       eyebrow: "// СУТЬ",
       heading: "Проблема никогда не была в количестве клипов.",
-      sub: "Проблема — понять, какой момент достоин внимания вашей аудитории.",
+      sub: "Проблема в том, чтобы понять, какой момент достоин внимания вашей аудитории.",
       cols: { quip: "Quip", them: "Массовые нарезчики" },
       rows: [
         { k: "Клипов на видео", quip: "Несколько, по оценке уверенности", them: "30+ на пролистывание" },
@@ -738,7 +846,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
     pricing: {
       eyebrow: "Тарифы",
       heading: "Простые планы. Без токенов-казино.",
-      sub: "Кредит — это одно видео, до 60 минут. Никаких токенов на распределение, никаких скрытых пейволлов. Лимит виден сразу, а кредиты pay-as-you-go не сгорают.",
+      sub: "Кредит равен одному видео, до 60 минут. Никаких токенов на распределение, никаких скрытых пейволлов. Лимит виден сразу, а кредиты pay-as-you-go не сгорают.",
       recommended: "Рекомендуем",
       plans: [
         {
@@ -817,15 +925,15 @@ const STRINGS: Record<Locale, LandingStrings> = {
     },
     faq: {
       eyebrow: "// ВОПРОСЫ",
-      heading: "Вопросы — и прямые ответы.",
+      heading: "Вопросы и прямые ответы.",
       items: [
         {
           q: "Чем Quip отличается от OpusClip или Vizard?",
-          a: "Большинство нарезчиков гонятся за количеством: тридцать клипов на разбор. Quip — за уверенностью: меньше клипов, но у каждого хук, оценка уверенности, тип момента и понятная причина, почему он работает. Добавьте рефрейм без вспышек и цену без игр с кредитами — и вы постите осознанно, а не на удачу.",
+          a: "Большинство нарезчиков гонятся за количеством: тридцать клипов на разбор. Quip гонится за уверенностью: меньше клипов, но у каждого хук, оценка уверенности, тип момента и понятная причина, почему он работает. Добавьте рефрейм без вспышек и цену без игр с кредитами, и вы постите осознанно, а не на удачу.",
         },
         {
           q: "Какие видео подходят лучше всего?",
-          a: "Длинные говорящие форматы: подкасты, интервью, стримы, лекции и вебинары — до 90 минут. Чем больше речи, тем сильнее моменты.",
+          a: "Длинные говорящие форматы: подкасты, интервью, стримы, лекции и вебинары до 90 минут. Чем больше речи, тем сильнее моменты.",
         },
         {
           q: "Какие языки поддерживаются?",
@@ -833,7 +941,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
         {
           q: "Клипы остаются моими?",
-          a: "Да. Скачали — они ваши. На платных планах экспорт без вотермарки.",
+          a: "Да. Скачали, и они ваши. На платных планах экспорт без вотермарки.",
         },
         {
           q: "Что происходит с моим видео?",
@@ -841,25 +949,25 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
         {
           q: "Что такое кредит?",
-          a: "Кредит — это одно видео, до 60 минут исходника. Видео длиннее тратят минуты пропорционально (90-минутная загрузка считается за 1,5). В плане — фиксированное число видео-кредитов в месяц, так что лимит всегда понятен. Кредиты pay-as-you-go стоят $3 за штуку и не сгорают.",
+          a: "Кредит равен одному видео, до 60 минут исходника. Видео длиннее тратят минуты пропорционально (90-минутная загрузка считается за 1,5). В плане фиксированное число видео-кредитов в месяц, так что лимит всегда понятен. Кредиты pay-as-you-go стоят $3 за штуку и не сгорают.",
         },
         {
           q: "Бесплатный план правда бесплатный?",
-          a: "Да. 1 видео в месяц — это 60 минут исходника, как угодно, без карты. На бесплатном экспорт идёт с небольшой вотермаркой; платные её убирают и экспортируют в полном 1080p.",
+          a: "Да. 1 видео в месяц даёт 60 минут исходника, как угодно, без карты. На бесплатном экспорт идёт с небольшой вотермаркой; платные её убирают и экспортируют в полном 1080p.",
         },
       ],
     },
     finalCta: {
       eyebrow: "// СТАРТ",
       heading: "Хватит гадать, какой клип постить.",
-      sub: "Загрузите видео и получите несколько клипов, за которые не стыдно — каждый с причиной, почему он работает, и с оценкой, которой можно верить.",
+      sub: "Загрузите видео и получите несколько клипов, за которые не стыдно: каждый с причиной, почему он работает, и с оценкой, которой можно верить.",
       primary: "Попробовать Quip бесплатно",
       secondary: "Смотреть тарифы",
       trust: "Без карты. 1 видео в месяц бесплатно. Отмена в любой момент.",
     },
     footer: {
       tagline:
-        "Меньше клипов — но вы знаете, почему их постить. Объяснимые ИИ-клипы из ваших длинных видео.",
+        "Меньше клипов, но вы знаете, почему их постить. Объяснимые ИИ-клипы из ваших длинных видео.",
       cols: [
         {
           title: "Продукт",
@@ -925,6 +1033,9 @@ export function getLandingContent(locale: Locale): LandingContent {
     audience: s.audience,
     howItWorks: s.howItWorks,
     why: s.why,
+    momentMap: s.momentMap,
+    manifesto: s.manifesto,
+    studio: s.studio,
     craft: s.craft,
     comparison: s.comparison,
     pricing: s.pricing,

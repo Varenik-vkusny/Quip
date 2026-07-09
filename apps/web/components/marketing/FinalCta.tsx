@@ -17,7 +17,7 @@ export async function FinalCta() {
       {/* the single closing bloom — the only ambient signal at the foot of the page */}
       <div
         aria-hidden
-        className="pointer-events-none absolute right-[6%] top-1/2 size-[560px] -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(255,90,61,.09),transparent_62%)]"
+        className="pointer-events-none absolute right-[6%] top-1/2 size-[560px] -translate-y-1/2 rounded-full bg-[radial-gradient(circle,var(--t-accent-tint),transparent_62%)]"
       />
       <Container className="relative">
         <Split variant="balanced" gap="gap-14 lg:gap-20" className="items-center">
@@ -67,7 +67,7 @@ export async function FinalCta() {
                 className="absolute -bottom-5 left-0 w-[78%]"
                 type="emotional_peak"
                 confidence={91}
-                why="The pause before the answer is the tell — viewers lean in to hear what comes next."
+                why="The pause before the answer is the tell. Viewers lean in to hear what comes next."
               />
             </div>
           </Reveal>

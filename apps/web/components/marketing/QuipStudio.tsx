@@ -51,8 +51,8 @@ const SAMPLES: Sample[] = [
     duration: "42:18",
     marks: ["00:00", "21:09", "42:18"],
     clips: [
-      { type: "hook", left: 7, width: 13, time: "02:14–02:51", title: "Three years I filmed the wrong thing", text: "Strong hook — clear without the episode's context." },
-      { type: "peak", left: 34, width: 12, time: "14:02–14:44", title: "The moment I almost quit", text: "Emotional peak — the viewer feels the stakes." },
+      { type: "hook", left: 7, width: 13, time: "02:14-02:51", title: "Three years I filmed the wrong thing", text: "Strong hook, clear without the episode's context." },
+      { type: "peak", left: 34, width: 12, time: "14:02-14:44", title: "The moment I almost quit", text: "Emotional peak. The viewer feels the stakes." },
       { type: "thought", left: 60, width: 12, time: "26:30–27:19", title: "Content isn't a lottery", text: "A complete thought you can watch on its own." },
       { type: "quote", left: 83, width: 11, time: "37:10–37:48", title: "Marketing is the truth", text: "A short quote for Reels or Shorts." },
     ],
@@ -182,7 +182,7 @@ export function QuipStudio() {
 
         <div
           ref={rootRef}
-          className="mx-auto mt-12 max-w-4xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-[0_32px_80px_-32px_rgba(0,0,0,.6)]"
+          className="mx-auto mt-12 max-w-4xl overflow-hidden rounded-lg border border-line-strong bg-surface shadow-pop"
         >
           {/* top bar: title + state + sample tabs */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-surface-2 px-5 py-4">
@@ -252,7 +252,7 @@ export function QuipStudio() {
                     ZONE_CLS[c.type],
                     linked === i
                       ? "ring-2 ring-ink ring-offset-1 ring-offset-surface-3"
-                      : "ring-1 ring-inset ring-white/0 hover:ring-white/20 focus-visible:ring-2 focus-visible:ring-ink",
+                      : "ring-1 ring-inset ring-ink/0 hover:ring-ink/20 focus-visible:ring-2 focus-visible:ring-ink",
                   )}
                   style={{ left: `${c.left}%`, width: `${c.width}%` }}
                 >

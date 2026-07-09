@@ -28,7 +28,7 @@ export function ClipMockup({
     <div
       className={cn(
         "relative aspect-[9/16] w-full overflow-hidden rounded-xl border border-line-strong bg-black @container",
-        "shadow-[0_40px_90px_-30px_rgba(0,0,0,.85)]",
+        "shadow-pop",
         className,
       )}
       role="img"

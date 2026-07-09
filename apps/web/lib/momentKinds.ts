@@ -37,3 +37,18 @@ export const KIND_KEYS = Object.keys(KIND_COLOR) as Array<keyof typeof KIND_COLO
 export function kindColor(kind: string) {
   return KIND_COLOR[kind] ?? KIND_COLOR["insight"];
 }
+
+// An expressive emoji per moment kind — legible and colourful in the outline where an abstract
+// colour code isn't (used instead of a colour dot for the moment's "emotion").
+export const KIND_EMOJI: Record<string, string> = {
+  tension: "😳",
+  quote: "💬",
+  emotional: "🥹",
+  insight: "💡",
+  funny: "😂",
+};
+
+/** Emoji for a moment kind, falling back to a neutral sparkle for unknown kinds. */
+export function kindEmoji(kind: string): string {
+  return KIND_EMOJI[kind] ?? "✨";
+}

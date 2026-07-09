@@ -500,7 +500,7 @@ export function TimelineV2({
                 }}
               >
                 <span
-                  className="absolute left-1/2 top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/85 opacity-0 transition group-hover/marker:opacity-100"
+                  className="absolute left-1/2 top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-bg/85 opacity-0 transition group-hover/marker:opacity-100"
                   aria-hidden
                 />
               </button>
@@ -522,7 +522,7 @@ export function TimelineV2({
           {/* блок шортса — «герой» дорожки (хватай и тяни) */}
           <div
             onPointerDown={onPointerDown("move")}
-            className={`absolute top-0 bottom-0 z-[3] touch-none rounded-lg border-2 border-accent bg-gradient-to-b from-accent/30 to-accent/10 shadow-[0_4px_16px_rgba(0,0,0,.45)] ring-1 ring-inset ring-white/10 ${
+            className={`absolute top-0 bottom-0 z-[3] touch-none rounded-lg border-2 border-accent bg-gradient-to-b from-accent/30 to-accent/10 shadow-card-hover ${
               busy ? "animate-pulse cursor-wait" : "cursor-grab active:cursor-grabbing"
             }`}
             style={{
@@ -537,8 +537,8 @@ export function TimelineV2({
               className="group/grip absolute -left-2.5 sm:-left-1.5 top-0 bottom-0 flex w-5 sm:w-3.5 cursor-ew-resize items-center justify-center"
             >
               <span className="flex h-9 items-center justify-center gap-[2px] rounded-full bg-accent px-1 shadow transition group-hover/grip:brightness-110">
-                <span className="h-4 w-px rounded-full bg-bg/70" />
-                <span className="h-4 w-px rounded-full bg-bg/70" />
+                <span className="h-4 w-px rounded-full bg-on-accent/70" />
+                <span className="h-4 w-px rounded-full bg-on-accent/70" />
               </span>
             </div>
             {/* ручка справа */}
@@ -547,16 +547,16 @@ export function TimelineV2({
               className="group/grip absolute -right-2.5 sm:-right-1.5 top-0 bottom-0 flex w-5 sm:w-3.5 cursor-ew-resize items-center justify-center"
             >
               <span className="flex h-9 items-center justify-center gap-[2px] rounded-full bg-accent px-1 shadow transition group-hover/grip:brightness-110">
-                <span className="h-4 w-px rounded-full bg-bg/70" />
-                <span className="h-4 w-px rounded-full bg-bg/70" />
+                <span className="h-4 w-px rounded-full bg-on-accent/70" />
+                <span className="h-4 w-px rounded-full bg-on-accent/70" />
               </span>
             </div>
             {/* длительность — пилюля сверху */}
-            <span className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded-full bg-accent px-2 py-0.5 font-mono text-[10px] font-bold text-bg shadow">
+            <span className="pointer-events-none absolute left-1/2 top-1 -translate-x-1/2 rounded-full bg-accent px-2 py-0.5 font-mono text-[10px] font-bold text-on-accent shadow">
               {busy ? t("saving") : mmss(segEnd - segStart)}
             </span>
             {!busy && segEnd - segStart <= CLIP_MIN_SEC + 0.5 && (
-              <span className="pointer-events-none absolute inset-x-0 bottom-1 text-center text-[9px] font-medium text-white/70">
+              <span className="pointer-events-none absolute inset-x-0 bottom-1 text-center text-[9px] font-medium text-ink/70">
                 {t("minSec", { n: CLIP_MIN_SEC })}
               </span>
             )}
@@ -567,15 +567,15 @@ export function TimelineV2({
             fracOf(nowSec) >= -0.001 &&
             fracOf(nowSec) <= 1.001 && (
               <div
-                className="pointer-events-none absolute top-0 bottom-0 z-[11] w-px bg-white shadow-[0_0_8px_rgba(255,255,255,.55)]"
+                className="pointer-events-none absolute top-0 bottom-0 z-[11] w-px bg-accent shadow-[0_0_8px_var(--t-accent-line)]"
                 style={{ left: pct(nowSec) }}
               >
                 {/* треугольная головка сверху — явно отличает плейхед от hover-курсора */}
-                <span className="absolute -top-px left-1/2 size-0 -translate-x-1/2 border-x-[5px] border-x-transparent border-t-[7px] border-t-white" />
+                <span className="absolute -top-px left-1/2 size-0 -translate-x-1/2 border-x-[5px] border-x-transparent border-t-[7px] border-t-accent" />
               </div>
             )}
 
-          {/* hover-курсор (следует за мышью) — тонкая ink-линия, отлична от белого плейхеда */}
+          {/* hover-курсор (следует за мышью) — тонкая ink-линия, отлична от акцентного плейхеда */}
           {hover && (
             <div
               className="pointer-events-none absolute top-0 bottom-0 z-[10] w-px bg-ink/60"

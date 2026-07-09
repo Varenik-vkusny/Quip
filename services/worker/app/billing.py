@@ -25,6 +25,8 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 
+from app.config import get_settings
+
 # Определение «1 видео». Меняешь тут — фронт (plans.ts/UsageMeter) зеркалит.
 MINUTES_PER_VIDEO = 60
 
@@ -277,6 +279,51 @@ def payg_credits_for_split(decision: QuotaDecision) -> int:
     if not decision.allowed or decision.from_payg_min <= 0:
         return 0
     return math.ceil(decision.from_payg_min / MINUTES_PER_VIDEO)
+
+
+# ─────────────────── Извлечь новый клип из неотобранного момента (гейт) ───────────────────
+# Экономика фичи «extract a clip from an un-clipped moment» (одобрено фаундером):
+#   • Извлечение БЕСПЛАТНО, пока ОБЩЕЕ число клипов джоба остаётся < cap (дефолт
+#     ``extract_free_cap`` = 30) — это в рамках уже оплаченного энтайтлмента «до 30 клипов на
+#     видео», поэтому нового риска маржи нет.
+#   • За cap → ЖЁСТКИЙ per-clip пейволл: платишь за этот конкретный лишний клип
+#     (``config.extract_clip_price_usd``, дефолт $1.00 — дёшево vs PAYG целого видео $3.00,
+#     т.к. клип переиспользует уже оплаченную транскрипцию/отбор; см. BENCHMARKS).
+#   • Извлечение доступно ТОЛЬКО платным Pro/Studio — Free/Starter видят карту моментов, но
+#     не извлекают (апселл-точка).
+# ⚠️ apps/web/lib/plans.ts ОБЯЗАН зеркалить И гейт по планам (pro/studio), И cap (extract_free_cap):
+#    это money-path, фронт и бэк не должны расходиться (см. CLAUDE.md).
+
+# Планы, которым разрешено извлечение. Литералы совпадают с ключами PLANS (pro/studio).
+_EXTRACT_PLANS: frozenset[str] = frozenset({"pro", "studio"})
+
+# Сколько клип-кредитов даёт ОДИН оплаченный «лишний клип» ($1-заказ в Polar). Клип-кредит —
+# ОТДЕЛЬНЫЙ баланс (profiles.clip_credits), тратится ТОЛЬКО на извлечение клипа за free-cap; НЕ
+# путать с PAYG-видео-кредитами ($3/видео). Разделение закрывает эксплойт «$1 → $3-видео».
+EXTRACT_CLIP_CREDITS_PER_ORDER = 1
+
+
+def can_extract_clip(plan: str) -> bool:
+    """Может ли план извлекать новые клипы из неотобранных моментов? PURE.
+
+    True ТОЛЬКО для платных тарифов извлечения (``pro``, ``studio``). Всё остальное — ``free``,
+    ``starter``, неизвестный/пустой план — ``False`` (безопасный дефолт: не выдаём платную фичу
+    даром). Литералы совпадают с ключами ``PLANS``.
+    """
+    return plan in _EXTRACT_PLANS
+
+
+def extract_requires_payment(current_clip_count: int, *, cap: int | None = None) -> bool:
+    """Нужен ли per-clip пейволл за СЛЕДУЮЩИЙ извлечённый клип при текущем числе клипов. PURE.
+
+    ``True``, когда ``current_clip_count >= cap`` — общее число клипов уже достигло/превысило
+    бесплатный энтайтлмент, значит следующий клип платный. Ниже cap → ``False`` (в рамках уже
+    оплаченного «до 30 клипов на видео»). ``cap=None`` → берётся config-кнопка
+    ``extract_free_cap`` (с env-override ``EXTRACT_FREE_CAP``); эндпоинт может передать явный cap.
+    """
+    if cap is None:
+        cap = get_settings().extract_free_cap
+    return current_clip_count >= cap
 
 
 def current_month(today: datetime.date | None = None) -> str:

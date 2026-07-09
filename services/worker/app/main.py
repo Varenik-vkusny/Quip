@@ -84,6 +84,7 @@ from app.run import DATA_ROOT
 from app.tasks import (
     render_clip_edit_job,
     render_edit_to_file,
+    render_extracted_clip_job,
     run_pipeline_job,
     run_upload_job,
     run_upload_job_from_r2,
@@ -120,6 +121,8 @@ class CreateJobBody(BaseModel):
     source_ref: str
     max_clips: int | None = Field(default=None, ge=1, le=30)  # UI-степпер; None → дефолт воркера
     language: str | None = None  # ISO-код языка (kk=казахский→Groq; None=авто-детект Deepgram)
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
 
 
 @app.get("/healthz")
@@ -348,6 +351,8 @@ def create_job(
                 body.max_clips,
                 user_id,
                 body.language,
+                body.clip_min_sec,
+                body.clip_max_sec,
             )
             db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
         except Exception as e:  # noqa: BLE001 — любой сбой диспатча = видимый failed
@@ -362,6 +367,8 @@ def create_job(
             body.max_clips,
             user_id,
             body.language,
+            body.clip_min_sec,
+            body.clip_max_sec,
         )
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
@@ -372,6 +379,8 @@ async def create_upload_job(
     file: UploadFile = File(...),
     max_clips: int | None = Form(default=None, ge=1, le=30),
     language: str | None = Form(default=None),
+    clip_min_sec: int | None = Form(default=None, ge=3, le=180),
+    clip_max_sec: int | None = Form(default=None, ge=10, le=180),
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -379,6 +388,7 @@ async def create_upload_job(
 
     Файл пишется чанками в data/<job_id>/upload.<ext> (не держим в памяти); затем
     run_upload_job готовит source.mp4/wav/meta и гоняет тот же пайплайн, что и URL-путь.
+    clip_min_sec/clip_max_sec — опциональные настройки длины клипов (None → дефолт конфига).
     """
     user_id = _resolve_user(authorization, x_user_id)
     _enforce_free_identity(authorization, user_id)
@@ -393,20 +403,33 @@ async def create_upload_job(
         while chunk := await file.read(_UPLOAD_CHUNK):
             fh.write(chunk)
     db.insert_job(job_id, "upload", filename, user_id=user_id)
-    # На Modal: web — scale-to-zero ASGI-контейнер; BackgroundTask умер бы на полпути (как и у
-    # YouTube-пути). Поэтому стейджим исходник в R2 (upload_source) и spawn'им долгоживущую
-    # upload_job (она скачает исходник из R2 на своём контейнере → run_upload_job). Локально/dev
-    # (MODAL_SPAWN не задан) — BackgroundTask на этом же процессе, как в Phase 0.
     if dispatch.spawn_enabled():
         try:
-            storage.upload_source(upload_path, job_id)  # r2-режим; иначе no-op
-            dispatch.spawn("upload_job", job_id, filename, max_clips, user_id, language)
-        except Exception as e:  # noqa: BLE001 — любой сбой диспатча = видимый failed, не вечная очередь
+            storage.upload_source(upload_path, job_id)
+            dispatch.spawn(
+                "upload_job",
+                job_id,
+                filename,
+                max_clips,
+                user_id,
+                language,
+                clip_min_sec,
+                clip_max_sec,
+            )
+        except Exception as e:  # noqa: BLE001
             db.set_failed(job_id, f"dispatch failed: {e}")
             raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
     else:
         bg.add_task(
-            run_upload_job, job_id, str(upload_path), filename, max_clips, user_id, language
+            run_upload_job,
+            job_id,
+            str(upload_path),
+            filename,
+            max_clips,
+            user_id,
+            language,
+            clip_min_sec,
+            clip_max_sec,
         )
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
@@ -425,6 +448,8 @@ class UploadUrlBody(BaseModel):
     # Размер файла (байты) — известен браузеру. >5 ГБ нельзя одним PUT (лимит R2), а крупные и
     # вообще выгоднее multipart (параллельные части + resume). None/малый → single-PUT (как раньше).
     size: int | None = Field(default=None, ge=0)
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
 
 
 @app.post("/jobs/upload-url")
@@ -494,6 +519,8 @@ class UploadCompleteBody(BaseModel):
     filename: str = "upload.mp4"
     max_clips: int | None = Field(default=None, ge=1, le=30)
     language: str | None = None
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
     # Multipart-сборка (если грузили частями): upload_id + ETag'и частей. None → single-PUT
     # (объект уже в R2, собирать нечего).
     upload_id: str | None = None
@@ -537,7 +564,14 @@ def complete_upload(
     if dispatch.spawn_enabled():
         try:
             fc_id = dispatch.spawn(
-                "upload_job", job_id, body.filename, body.max_clips, user_id, body.language
+                "upload_job",
+                job_id,
+                body.filename,
+                body.max_clips,
+                user_id,
+                body.language,
+                body.clip_min_sec,
+                body.clip_max_sec,
             )
             db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
         except Exception as e:  # noqa: BLE001 — сбой диспатча = видимый failed, не вечная очередь
@@ -545,7 +579,14 @@ def complete_upload(
             raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
     else:
         bg.add_task(
-            run_upload_job_from_r2, job_id, body.filename, body.max_clips, user_id, body.language
+            run_upload_job_from_r2,
+            job_id,
+            body.filename,
+            body.max_clips,
+            user_id,
+            body.language,
+            body.clip_min_sec,
+            body.clip_max_sec,
         )
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
@@ -681,6 +722,18 @@ async def polar_webhook(request: Request) -> dict[str, Any]:
         user_id, credits = payg
         db.add_payg_credits(user_id, credits)
         return {"ok": True, "applied": True, "user_id": user_id, "payg_credits": credits}
+
+    # Разовая оплата «лишнего клипа» ($1) → начислить клип-кредиты (ОТДЕЛЬНЫЙ баланс, тратится
+    # только на извлечение клипа за free-cap). Матч по СВОЁМУ product_id → не путается с PAYG.
+    extra = polar.parse_extra_clip_order(
+        payload,
+        product_extra_clip=os.environ.get("POLAR_PRODUCT_EXTRA_CLIP", ""),
+        credits_per_order=billing.EXTRACT_CLIP_CREDITS_PER_ORDER,
+    )
+    if extra is not None:
+        user_id, credits = extra
+        db.add_clip_credits(user_id, credits)
+        return {"ok": True, "applied": True, "user_id": user_id, "clip_credits": credits}
 
     return {"ok": True, "applied": False}
 
@@ -979,6 +1032,170 @@ def get_preview_moments(
     _require_owned_job(job_id, authorization, x_user_id)
     moments = db.get_job_artifact(job_id, "preview_moments")
     return {"moments": moments or []}
+
+
+# ──────────────────── On-demand clip extraction (POST /jobs/{id}/clips) ────────────────────
+# Вырезать НОВЫЙ клип из произвольного source-диапазона (un-clipped момент AI-карты ИЛИ drag-
+# выделение на таймлайне) с ТЕМ ЖЕ качеством границ, что у авто-клипа. Гейт денег СЕРВЕРНЫЙ
+# (обойти с фронта нельзя): извлекать могут ТОЛЬКО pro/studio (403 иначе); в рамках уже оплаченного
+# «до 30 клипов на видео» бесплатно, за cap → per-clip пейволл (402). Persist + рендер идут ровно
+# тем же путём, что авто-клипы (append_pending_clip → render_one_clip → set_clip_ready).
+
+
+class ExtractClipBody(BaseModel):
+    """Тело ``POST /jobs/{job_id}/clips``: произвольный source-диапазон [start, end] (секунды)."""
+
+    start: float
+    end: float
+
+
+def _extract_seed_from_map(job_id: str, start: float, end: float) -> dict[str, Any]:
+    """Засеять hook/why_works/reason из БЛИЖАЙШЕГО перекрывающего момента AI-карты (best-effort).
+
+    Нет карты / нет пересечения / любой сбой → пустые дефолты (извлечённый клип всё равно чистый —
+    поля объяснимости опциональны). Момент с максимальным перекрытием [start,end] выигрывает."""
+    from app.editor.video_map import load_video_map
+    from app.models import VideoMoment
+
+    try:
+        vm = load_video_map(job_id)
+    except Exception as e:  # noqa: BLE001 — карта — опциональное обогащение, не роняем извлечение
+        print(f"[extract_clip] WARN video map load failed job={job_id}: {e}")
+        return {}
+    if vm is None or vm.status != "done":
+        return {}
+    best: VideoMoment | None = None
+    best_overlap = 0.0
+    for ch in vm.chapters:
+        for mo in ch.moments:
+            overlap = min(end, mo.end) - max(start, mo.start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = mo
+    if best is None or best_overlap <= 0.0:
+        return {}
+    return {
+        "reason": best.why or best.label,
+        "hook": best.label or None,
+        "why_works": best.why or None,
+    }
+
+
+@app.post("/jobs/{job_id}/clips")
+def extract_clip(
+    job_id: str,
+    body: ExtractClipBody,
+    bg: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> ClipOut:
+    """Вырезать НОВЫЙ клип из source-диапазона [start,end] и запустить его рендер в фоне.
+
+    Гейты (СЕРВЕРНЫЕ, обойти с клиента нельзя): владелец джоба (401/403/404) → план владельца
+    ``pro``/``studio`` иначе 403 ``{"error":"upgrade_required"}`` → источник в 60-дневном окне
+    иначе 409 ``{"error":"source_expired"}`` → идемпотентность (тот же диапазон → тот же клип, 200)
+    → per-clip пейволл за cap: 402 ``{"error":"payment_required","price_usd":…}``. На успех: клип
+    добавляется pending (пустой ``video_url``), рендер спавнится в фоне (публикует ``video_url``
+    через ``set_clip_ready`` РОВНО как авто-клип), 200 с pending ``ClipOut`` (фронт стримит его как
+    обычный ещё-не-готовый клип). Границы кроятся с тем же качеством, что авто-клип
+    (range_to_segment переиспользует selection-path снап).
+    """
+    from app import artifacts
+    from app.editor.extract_clip import range_to_segment, segment_key
+    from app.pipeline.preview_moments import extract_loudness
+    from app.run import build_clip_out
+
+    # 1. Ownership-гейт (401/403/404). В dev (auth off) строка пустая → дозагружаем сырую строку
+    #    (нужен реальный owner для резолва плана + счётчик клипов), как в cancel_job.
+    row, _requester_id = _require_owned_job(job_id, authorization, x_user_id)
+    if not row:
+        fetched = db.get_job_row(job_id)
+        if fetched is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        row = fetched
+
+    # 2. Гейт плана владельца (money-path, серверный): извлекать могут ТОЛЬКО pro/studio. План
+    #    резолвится из profiles.plan владельца (jobs.user_id) — как resolve_clip_render_policy.
+    #    Нет владельца (локальный dev / ничья джоба) → как local_dev: извлечение разрешено (pro).
+    owner_id = row.get("user_id") or None
+    plan = db.get_user_plan(owner_id) if owner_id else "pro"
+    if not billing.can_extract_clip(plan):
+        raise HTTPException(status_code=403, detail={"error": "upgrade_required"})
+
+    # 4. Транскрипт (слова + длина источника) + гейт доступности источника (60-дневное окно).
+    try:
+        transcript = artifacts.load_transcript(job_id)
+    except JobError as e:
+        raise HTTPException(status_code=404, detail="transcript not found") from e
+    words = transcript.words
+    source_dur = transcript.duration
+    try:
+        src_path = artifacts.ensure_source(job_id)  # источника нет → окно истекло
+    except JobError as e:
+        raise HTTPException(status_code=409, detail={"error": "source_expired"}) from e
+    # Кривую громкости пересчитываем best-effort (уточняет снап краёв к вдоху/обрезку филлеров).
+    # Сбой ТОЛЬКО пересчёта loudness → None (клип всё равно чисто снапнут по словам); НЕ глотаем
+    # посторонние ошибки — ловим узко вокруг extract_loudness.
+    try:
+        loudness = extract_loudness(str(src_path)) or None
+    except Exception as e:  # noqa: BLE001 — только пересчёт loudness опционален (правило №8: лог)
+        print(f"[extract_clip] WARN loudness recompute failed job={job_id}: {e}")
+        loudness = None
+
+    # 5. Чистый Segment (тот же снап, что selection-path) + посев объяснимости из момента карты.
+    seed = _extract_seed_from_map(job_id, body.start, body.end)
+    seg = range_to_segment(
+        body.start,
+        body.end,
+        words,
+        loudness=loudness,
+        source_dur=source_dur,
+        reason=seed.get("reason", ""),
+        hook=seed.get("hook"),
+        why_works=seed.get("why_works"),
+    )
+
+    # 6. Идемпотентность: тот же (округлённый) диапазон уже извлечён → отдаём тот клип, не рендерим.
+    key = segment_key(seg.start, seg.end)
+    current_clips = list((db.get_job(job_id) or {}).get("clips") or [])
+    for c in current_clips:
+        if segment_key(float(c.get("start", -1.0)), float(c.get("end", -1.0))) == key:
+            return ClipOut.model_validate(c)
+
+    # 7. Пейволл за cap. До free-cap извлечение бесплатно (в рамках оплаченного «до 30 клипов»);
+    #    ≥ cap → нужен оплаченный клип-кредит ($1-заказ Polar): есть у владельца — списываем один и
+    #    продолжаем, нет — 402 (фронт ведёт на checkout). Consume ДО append (шаг 8): подтверждаем
+    #    оплату прежде чем создать клип. Без владельца (локальный dev / ничья джоба, plan=pro выше)
+    #    биллинга нет → не капим. Идемпотентный повтор (шаг 6) выходит раньше и кредит НЕ тратит.
+    settings = get_settings()
+    over_cap = billing.extract_requires_payment(len(current_clips), cap=settings.extract_free_cap)
+    if owner_id and over_cap and not db.consume_clip_credit(owner_id):
+        raise HTTPException(
+            status_code=402,
+            detail={"error": "payment_required", "price_usd": settings.extract_clip_price_usd},
+        )
+
+    # 8. Segment → ClipOut (id = следующий clip_NN), pending (video_url="") → append в строку джоба.
+    next_index = len(current_clips) + 1
+    clip_out = build_clip_out(f"clip_{next_index:02d}", seg, words, "", loudness=loudness)
+    idx = db.append_pending_clip(job_id, clip_out.model_dump())
+
+    # 9. Фоновый рендер клипа тем же путём, что пайплайн (reframe→render→upload→set_clip_ready).
+    #    На Cloud Run/Modal — spawn отдельного контейнера; локально/dev — bg.add_task. Не блокируем
+    #    ответ. Сбой спавна НЕ роняет уже добавленный клип (остаётся pending), но логируется (№8).
+    meta = artifacts.load_meta(job_id)
+    seg_dump = seg.model_dump()
+    meta_dump = meta.model_dump()
+    if dispatch.spawn_enabled():
+        try:
+            dispatch.spawn("render_extracted_clip_job", job_id, idx, seg_dump, meta_dump, owner_id)
+        except Exception as e:  # noqa: BLE001 — сбой диспатча видим (правило №8), клип уже pending
+            print(f"[extract_clip] WARN render dispatch failed job={job_id} idx={idx}: {e}")
+    else:
+        bg.add_task(render_extracted_clip_job, job_id, idx, seg_dump, meta_dump, owner_id)
+
+    # 10. Pending ClipOut (video_url="") → фронт стримит его как обычный ещё-не-готовый клип.
+    return clip_out
 
 
 # ──────────────────────────── Editor endpoints ────────────────────────────

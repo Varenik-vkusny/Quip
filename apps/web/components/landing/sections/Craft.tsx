@@ -17,17 +17,17 @@ export async function Craft() {
     <Section id="craft">
       <Container>
         <Reveal className="max-w-[38rem]">
-          <h2 className="text-[clamp(28px,3.6vw,44px)] font-bold leading-[1.08] tracking-[-0.025em] text-ink">
+          <h2 className="text-[clamp(28px,3.6vw,44px)] font-[650] leading-[1.08] tracking-[-0.024em] text-ink">
             {heading}
           </h2>
         </Reveal>
 
         <Reveal delay={0.05} className="mt-12">
-          <div className="grid overflow-hidden rounded-[18px] border border-line sm:grid-cols-2">
+          <div className="grid overflow-hidden rounded-[18px] bg-surface shadow-card sm:grid-cols-2">
             {features.map((f, i) => (
               <div
                 key={f.id}
-                className={`flex flex-col p-7 sm:p-8 ${i > 0 ? "border-t border-line" : ""} sm:border-t-0 ${
+                className={`flex flex-col p-7 sm:p-8 ${i > 0 ? "border-t" : ""} sm:border-t-0 ${
                   i >= 2 ? "sm:border-t" : ""
                 } ${i % 2 === 1 ? "sm:border-l" : ""} border-line`}
               >
@@ -41,7 +41,7 @@ export async function Craft() {
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src="/clips/poster-1.jpg"
-                        alt="A Quip clip with the active word burned in, highlighted in coral"
+                        alt="A Quip clip with the active word burned in, highlighted in the caption accent"
                         className="size-full object-cover"
                       />
                     </div>
@@ -60,7 +60,7 @@ export async function Craft() {
                     {RATIOS.map((r) => (
                       <div key={r.label} className="flex flex-col items-center gap-2.5">
                         <span
-                          className={`relative flex items-start justify-center overflow-hidden rounded-[6px] border border-line-strong bg-surface-2 pt-2 shadow-[inset_0_1px_0_rgba(242,239,233,0.05)] ${r.cls}`}
+                          className={`relative flex items-start justify-center overflow-hidden rounded-[6px] border border-line-strong bg-surface-2 pt-2 ${r.cls}`}
                         >
                           {/* the branded hook plate sits on top */}
                           <span className="h-1 w-1/2 rounded-full bg-muted/50" aria-hidden />

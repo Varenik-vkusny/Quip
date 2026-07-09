@@ -243,6 +243,46 @@ def test_parse_payg_order_ignores_subscription_event() -> None:
     assert polar.parse_payg_order(payload, product_payg="p_payg") is None
 
 
+# ─────────────────── parse_extra_clip_order (разовая оплата «лишнего клипа») ───────────────────
+# Отдельный от PAYG баланс (clip_credits). Матч по СВОЁМУ product_id → $1-клип и $3-видео не
+# путаются: заказ extra-clip НЕ начисляет PAYG-видео-кредит и наоборот.
+
+
+def test_parse_extra_clip_order_grants_clip_credit() -> None:
+    payload = {
+        "type": "order.paid",
+        "data": {"product_id": "p_extra", "customer": {"external_id": "user_x"}},
+    }
+    assert polar.parse_extra_clip_order(payload, product_extra_clip="p_extra") == ("user_x", 1)
+
+
+def test_parse_extra_clip_order_respects_quantity() -> None:
+    # Покупка нескольких клипов за раз (quantity) → соответствующее число клип-кредитов.
+    payload = {
+        "type": "order.paid",
+        "data": {"product_id": "p_extra", "quantity": 3, "customer": {"external_id": "user_x"}},
+    }
+    assert polar.parse_extra_clip_order(payload, product_extra_clip="p_extra") == ("user_x", 3)
+
+
+def test_parse_extra_clip_order_ignores_payg_product() -> None:
+    # Заказ PAYG-продукта НЕ начисляет клип-кредит (балансы разделены по product_id).
+    payload = {
+        "type": "order.paid",
+        "data": {"product_id": "p_payg", "customer": {"external_id": "u"}},
+    }
+    assert polar.parse_extra_clip_order(payload, product_extra_clip="p_extra") is None
+
+
+def test_parse_payg_order_ignores_extra_clip_product() -> None:
+    # И симметрично: заказ extra-clip-продукта НЕ начисляет PAYG-видео-кредит.
+    payload = {
+        "type": "order.paid",
+        "data": {"product_id": "p_extra", "customer": {"external_id": "u"}},
+    }
+    assert polar.parse_payg_order(payload, product_payg="p_payg") is None
+
+
 # ─────────────────────────── webhook endpoint ───────────────────────────
 
 
@@ -301,6 +341,36 @@ def test_polar_webhook_grants_payg_credits(monkeypatch) -> None:
     assert r.status_code == 200
     assert r.json()["applied"] is True
     assert db.get_profile("user_payg")["payg_credits"] == before + 1
+
+
+def test_polar_webhook_grants_clip_credits(monkeypatch) -> None:
+    # $1-заказ «лишнего клипа» → начисляет ОТДЕЛЬНЫЙ баланс clip_credits (не payg_credits).
+    from app.main import app
+
+    monkeypatch.setenv("POLAR_WEBHOOK_SECRET", _SW_SECRET)
+    monkeypatch.setenv("POLAR_PRODUCT_EXTRA_CLIP", "prod_extra")
+    uid = f"user_extra_{int(time.time())}"
+    body = json.dumps(
+        {
+            "type": "order.paid",
+            "data": {"product_id": "prod_extra", "customer": {"external_id": uid}},
+        }
+    )
+    ts = str(int(time.time()))
+    headers = {
+        "webhook-id": "msg_extra",
+        "webhook-timestamp": ts,
+        "webhook-signature": _sign(_SW_SECRET, "msg_extra", ts, body),
+        "content-type": "application/json",
+    }
+    before = db.get_profile(uid)
+    with TestClient(app) as client:
+        r = client.post("/webhooks/polar", content=body, headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "applied": True, "user_id": uid, "clip_credits": 1}
+    after = db.get_profile(uid)
+    assert after["clip_credits"] == before["clip_credits"] + 1
+    assert after["payg_credits"] == before["payg_credits"]  # PAYG-баланс не тронут
 
 
 def test_polar_webhook_rejects_bad_signature(monkeypatch) -> None:

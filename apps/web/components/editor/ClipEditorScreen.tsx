@@ -1923,7 +1923,7 @@ export default function ClipEditorScreen({
           </button>
           <a
             href={`/dashboard?job=${jobId}`}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-bg transition hover:bg-accent-2"
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-on-accent transition hover:bg-accent-2"
           >
             ← {t("allClips")}
           </a>
@@ -2140,9 +2140,9 @@ export default function ClipEditorScreen({
                         }}
                         rows={2}
                         placeholder={t("captionPlaceholder")}
-                        className="w-full resize-none rounded-lg border border-accent/60 bg-black/80 p-2 text-center text-sm font-semibold text-ink outline-none focus:ring-2 focus:ring-accent/50"
+                        className="w-full resize-none rounded-lg border border-accent/60 bg-black/80 p-2 text-center text-sm font-semibold text-white outline-none focus:ring-2 focus:ring-accent/50"
                       />
-                      <p className="mt-1 text-center text-xs text-muted">
+                      <p className="mt-1 text-center text-xs text-white/70">
                         {t("enterToSave")}
                       </p>
                     </div>

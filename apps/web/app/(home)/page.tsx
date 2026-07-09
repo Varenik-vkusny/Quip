@@ -2,24 +2,34 @@ import { buildHomeJsonLd } from "@/lib/jsonld";
 import { getOptionalUser } from "@/lib/supabase/server";
 import { Audience } from "@/components/landing/sections/Audience";
 import { Comparison } from "@/components/landing/sections/Comparison";
-import { CostAnchor } from "@/components/landing/sections/CostAnchor";
 import { Craft } from "@/components/landing/sections/Craft";
 import { Demo } from "@/components/landing/sections/Demo";
 import { Faq } from "@/components/landing/sections/Faq";
 import { FinalCta } from "@/components/landing/sections/FinalCta";
 import { Footer } from "@/components/landing/sections/Footer";
 import { Hero } from "@/components/landing/sections/Hero";
-import { HowItWorks } from "@/components/landing/sections/HowItWorks";
+import { Manifesto } from "@/components/landing/sections/Manifesto";
+import { MomentMap } from "@/components/landing/sections/MomentMap";
 import { Nav } from "@/components/landing/sections/Nav";
 import { Pricing } from "@/components/landing/sections/Pricing";
-import { WhyQuip } from "@/components/landing/sections/WhyQuip";
+import { StudioWindow } from "@/components/landing/sections/StudioWindow";
+import { ScrollFx } from "@/components/landing/fx/ScrollFx";
 
 /*
-  Home / marketing landing ("Readout" direction). Server Component so the single
-  auth seam is read here: `authed` flows into Nav, Hero, and FinalCta only. When
-  logged in their CTAs become "Open the app / Dashboard" (/dashboard), otherwise
-  "Try it free / Upload a video" (/signup). getOptionalUser is dual-mode safe
-  (returns null without touching cookies until Supabase is configured).
+  Home / marketing landing («Studio» redesign, 2026-07-09). Server Component;
+  the single auth seam is read here: `authed` flows into Nav, Hero, and FinalCta
+  only. Composition tells one story down the page:
+
+    Hero (the product + its reasoning card + the waveform river)
+    → Demo (a real run, end to end)
+    → MomentMap (pinned film-strip: one video unfolded into moments)
+    → Manifesto (the pivot line)
+    → StudioWindow (the dark studio inside the light stage + 3 steps)
+    → Craft (what we sweat) → Audience (who it's for) → Comparison (the wedge)
+    → Pricing → FAQ → FinalCta.
+
+  ScrollFx is the one client island wiring Lenis + GSAP choreography; every
+  section stays server-rendered and readable without JS.
 */
 export default async function Page() {
   const authed = Boolean(await getOptionalUser());
@@ -34,15 +44,16 @@ export default async function Page() {
           __html: JSON.stringify(buildHomeJsonLd()).replace(/</g, "\\u003c"),
         }}
       />
+      <ScrollFx />
       <Nav authed={authed} />
       <main className="relative">
         <Hero authed={authed} />
         <Demo />
-        <CostAnchor />
-        <Audience />
-        <HowItWorks />
-        <WhyQuip />
+        <MomentMap />
+        <Manifesto />
+        <StudioWindow />
         <Craft />
+        <Audience />
         <Comparison />
         <Pricing />
         <Faq />

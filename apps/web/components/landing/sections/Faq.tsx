@@ -24,7 +24,7 @@ export function Faq() {
       <Container>
         <div className="grid gap-12 lg:grid-cols-[minmax(0,32fr)_minmax(0,68fr)]">
           <Reveal>
-            <h2 className="text-[clamp(28px,3.6vw,44px)] font-bold leading-[1.08] tracking-[-0.025em] text-ink">
+            <h2 className="text-[clamp(28px,3.6vw,44px)] font-[650] leading-[1.08] tracking-[-0.024em] text-ink">
               {faq.heading}
             </h2>
           </Reveal>

@@ -239,8 +239,24 @@ class Settings(BaseSettings):
     polar_webhook_secret: str = ""  # Standard Webhooks секрет Polar.sh (whsec_...)
     polar_product_starter: str = ""  # Polar product_id → план "starter"
     polar_product_pro: str = ""  # Polar product_id → план "pro"
+    # Polar product_id разового «лишнего клипа» ($1) → начисляет profiles.clip_credits (отдельный
+    # баланс на извлечение клипа за free-cap; см. billing.EXTRACT_CLIP_CREDITS_PER_ORDER). Может
+    # быть списком id через запятую (напр. боевой + тестовый). Пусто → extra-clip вебхук инертен.
+    polar_product_extra_clip: str = ""
     supabase_url: str = ""
     supabase_service_role_key: str = ""  # 🔴 ТОЛЬКО сервер; пишет profiles.plan/usage_events
+    # ── «Извлечь новый клип из неотобранного момента» (billing.can_extract_clip /
+    #    extract_requires_payment). Извлечение БЕСПЛАТНО, пока общее число клипов джоба < этого
+    #    cap — в рамках уже оплаченного энтайтлмента «до 30 клипов на видео» (нет нового риска
+    #    маржи); ≥ cap → per-clip пейволл. ⚠️ apps/web/lib/plans.ts ОБЯЗАН зеркалить это число.
+    extract_free_cap: int = 30
+    # Цена ОДНОГО лишнего клипа за cap, USD. Лишний клип ПЕРЕИСПОЛЬЗУЕТ уже оплаченную
+    # транскрипцию + отбор моментов (доминанта COGS ~$0.26/видео, см. docs/BENCHMARKS.md §8);
+    # его маржинальная себестоимость ≈ один render-контейнер фан-аута (~$0.035, из «6× render
+    # 4vCPU ~$0.21» там же). $1.00 → очень высокая маржа И заметно ДЕШЕВЛЕ PAYG целого видео
+    # ($3.00), т.е. «доснять клип» ощущается дёшево против покупки нового видео. ⚙️ Кнопка-tunable:
+    # финализировать из render-юнит-экономики docs/BENCHMARKS.md. plans.ts зеркалит и это число.
+    extract_clip_price_usd: float = 1.0
 
     # ── облачный стейт + хранилище (boevoy / Modal). Инертны без заполнения. ──
     # storage_backend=local → клип на диске, отдаётся воркером на /media (dev, Phase 0).

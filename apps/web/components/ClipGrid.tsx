@@ -134,7 +134,7 @@ function DownloadAllMenu({
     ? t("preparingBatch", { done: batch.done, total: batch.total })
     : t("download", { count });
   const accent =
-    "inline-flex items-center justify-center gap-1.5 bg-accent text-sm font-semibold text-white " +
+    "inline-flex items-center justify-center gap-1.5 bg-accent text-sm font-semibold text-on-accent " +
     "transition duration-200 ease-snappy hover:bg-accent-2 disabled:pointer-events-none " +
     "disabled:bg-surface-2 disabled:text-faint";
 
@@ -148,7 +148,7 @@ function DownloadAllMenu({
           aria-busy={busy || undefined}
           className={`${accent} h-9 px-3.5 ${busy ? "pointer-events-none" : ""}`}
         >
-          {busy ? <Spinner size="sm" className="text-white" /> : <Download className="size-4" />}
+          {busy ? <Spinner size="sm" className="text-on-accent" /> : <Download className="size-4" />}
           {primaryLabel}
         </button>
         <button
@@ -158,7 +158,7 @@ function DownloadAllMenu({
           aria-haspopup="menu"
           aria-expanded={open}
           aria-label={t("downloadOptions")}
-          className={`${accent} h-9 border-l border-white/25 px-2`}
+          className={`${accent} h-9 border-l border-on-accent/25 px-2`}
         >
           <ChevronDown className={`size-4 transition ${open ? "rotate-180" : ""}`} />
         </button>
@@ -166,7 +166,7 @@ function DownloadAllMenu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 z-30 mt-1 min-w-[260px] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-md border border-line-strong bg-surface shadow-[0_16px_40px_-12px_rgba(0,0,0,.7)]"
+          className="absolute right-0 z-30 mt-1 min-w-[260px] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-md border border-line-strong bg-surface shadow-pop"
         >
           <DownloadAllItem
             icon={<Captions className="size-4" />}

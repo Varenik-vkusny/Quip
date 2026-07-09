@@ -159,28 +159,27 @@ def parse_plan_change(
     return (user_id, plan)
 
 
-def parse_payg_order(
-    payload: dict[str, Any], *, product_payg: str, credits_per_order: int = 1
+def _parse_one_time_order(
+    payload: dict[str, Any], *, product_ids: str, credits_per_order: int
 ) -> tuple[str, int] | None:
-    """Из Polar webhook-payload разовой оплаты достать ``(user_id, credits)``. PURE.
+    """Общий разбор разовой оплаты Polar → ``(user_id, credits)``. PURE.
 
-    PAYG = одноразовый заказ продукта ``product_payg`` (НЕ подписка) → начисляем
-    ``credits_per_order`` НЕ-сгорающих кредитов (с учётом quantity заказа, если задан).
-    None, если ивент не про разовую оплату, продукт не наш, или нет user_id.
+    Заказ (НЕ подписка) продукта из ``product_ids`` начисляет ``credits_per_order`` кредитов
+    (× quantity заказа, если задан). ``product_ids`` — id или СПИСОК id через запятую (заказ
+    любого из них засчитывается). Матч строго по ``data.product_id`` (он всегда в payload) →
+    разные балансы (PAYG-видео vs extra-clip) НЕ путаются: каждый вызывающий передаёт СВОЙ набор
+    id. None, если ивент не про разовую оплату, продукт не в наборе, или нет user_id.
     """
     event = str(payload.get("type", ""))
     if event not in _ORDER_PAID_EVENTS:
         return None
-    # ``product_payg`` может быть СПИСКОМ id через запятую (несколько PAYG-продуктов: основной
-    # + тестовый $1 и т.п.) — заказ любого из них начисляет кредиты. PURE, по product_id (он
-    # всегда в payload), без зависимости от вложенных метаданных.
-    payg_ids = {p.strip() for p in product_payg.split(",") if p.strip()}
-    if not payg_ids:
+    ids = {p.strip() for p in product_ids.split(",") if p.strip()}
+    if not ids:
         return None
     data = payload.get("data") or {}
     if not isinstance(data, dict):
         return None
-    if str(data.get("product_id", "")) not in payg_ids:
+    if str(data.get("product_id", "")) not in ids:
         return None
     user_id = _extract_user_id(data)
     if not user_id:
@@ -188,3 +187,34 @@ def parse_payg_order(
     qty = data.get("quantity")
     units = int(qty) if isinstance(qty, int) and qty > 0 else 1
     return (user_id, credits_per_order * units)
+
+
+def parse_payg_order(
+    payload: dict[str, Any], *, product_payg: str, credits_per_order: int = 1
+) -> tuple[str, int] | None:
+    """Из Polar webhook-payload разовой оплаты PAYG достать ``(user_id, credits)``. PURE.
+
+    PAYG = одноразовый заказ продукта ``product_payg`` (НЕ подписка) → начисляем
+    ``credits_per_order`` НЕ-сгорающих ВИДЕО-кредитов (с учётом quantity заказа, если задан).
+    ``product_payg`` может быть списком id через запятую (основной $3 + тестовый $1 и т.п.).
+    Начисляется в profiles.payg_credits (пул на обработку видео). None, если не наш заказ.
+    """
+    return _parse_one_time_order(
+        payload, product_ids=product_payg, credits_per_order=credits_per_order
+    )
+
+
+def parse_extra_clip_order(
+    payload: dict[str, Any], *, product_extra_clip: str, credits_per_order: int = 1
+) -> tuple[str, int] | None:
+    """Из Polar webhook-payload разовой оплаты «лишнего клипа» достать ``(user_id, credits)``. PURE.
+
+    Extra-clip = одноразовый заказ продукта ``product_extra_clip`` ($1, НЕ подписка) → начисляем
+    ``credits_per_order`` КЛИП-кредитов (с учётом quantity заказа). Это ОТДЕЛЬНЫЙ баланс
+    profiles.clip_credits: клип-кредит тратится ТОЛЬКО на извлечение клипа за free-cap (см.
+    main.extract_clip), НЕ на обработку целого видео. Разделение балансов закрывает эксплойт
+    «$1 → $3-видео»: extra-clip и PAYG матчатся по РАЗНЫМ product_id. None, если не наш заказ.
+    """
+    return _parse_one_time_order(
+        payload, product_ids=product_extra_clip, credits_per_order=credits_per_order
+    )

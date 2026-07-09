@@ -8,6 +8,7 @@ import { SignOutButton } from "@/components/auth/SignOutButton";
 import { UsagePill } from "@/components/app/UsagePill";
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { Logo } from "@/components/ui/Logo";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { siteConfig } from "@/lib/site";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
@@ -56,6 +57,7 @@ export function AppHeader() {
           {/* always-visible balance: videos + minutes left this month */}
           <UsagePill className="hidden sm:inline-flex" />
           <LocaleSwitcher className="hidden sm:inline-flex" />
+          <ThemeToggle className="hidden sm:inline-flex" />
           <div className="relative" ref={menuRef}>
             <button
               type="button"
@@ -70,7 +72,7 @@ export function AppHeader() {
             {menuOpen && (
               <div
                 role="menu"
-                className="absolute right-0 top-11 w-60 max-w-[calc(100vw-1rem)] rounded-lg border border-line bg-surface p-2 shadow-[0_24px_60px_-28px_rgba(0,0,0,.9)]"
+                className="absolute right-0 top-11 w-60 max-w-[calc(100vw-1rem)] rounded-lg border border-line bg-surface p-2 shadow-pop"
               >
                 {email && (
                   <p className="truncate border-b border-line px-3 pb-2.5 pt-1.5 text-xs text-faint">
@@ -101,11 +103,14 @@ export function AppHeader() {
                 >
                   {t("support")}
                 </a>
-                {/* Locale toggle in the menu too, so it's reachable on mobile (where the
-                    header switcher is hidden). */}
+                {/* Locale + theme toggles in the menu too, so they're reachable on mobile
+                    (where the header switchers are hidden). */}
                 <div className="mt-1 flex items-center justify-between gap-2 border-t border-line px-3 py-2.5 sm:hidden">
                   <span className="text-sm text-muted">Язык / Language</span>
-                  <LocaleSwitcher />
+                  <div className="flex items-center gap-2">
+                    <LocaleSwitcher />
+                    <ThemeToggle />
+                  </div>
                 </div>
                 <div className="px-3 py-2">
                   {isSupabaseConfigured ? (

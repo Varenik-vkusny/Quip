@@ -231,7 +231,7 @@ export function UseCasePageBody({
       <Section className="relative overflow-hidden">
         <div
           aria-hidden
-          className="pointer-events-none absolute left-1/2 top-1/2 size-[680px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(255,90,61,.10),transparent_60%)]"
+          className="pointer-events-none absolute left-1/2 top-1/2 size-[680px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,var(--t-accent-tint),transparent_60%)]"
         />
         <Container className="relative">
           <Reveal className="mx-auto max-w-2xl text-center">

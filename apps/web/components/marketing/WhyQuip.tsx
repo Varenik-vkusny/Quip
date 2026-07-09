@@ -24,7 +24,7 @@ const dims: { label: string; tone: DimTone; body: string }[] = [
   {
     label: "Why it works",
     tone: "neutral",
-    body: "The real reason — open loop, payoff, tension — in one sentence.",
+    body: "The real reason (open loop, payoff, tension) in one sentence.",
   },
   { label: "Confidence", tone: "ok", body: "An honest score, so you know which clip to post first." },
   { label: "Moment type", tone: "quote", body: "Hook, emotional peak, complete thought, or strong quote." },
@@ -44,7 +44,7 @@ export function WhyQuip() {
                     Every clip comes with <span className="text-accent">its reasons.</span>
                   </>
                 }
-                lead="Most AI clippers hand you thirty clips and a shrug. Quip hands you fewer — each with a hook, a confidence score, the moment type, and a plain reason it'll land. You post with intent, not hope."
+                lead="Most AI clippers hand you thirty clips and a shrug. Quip hands you fewer, each with a hook, a confidence score, the moment type, and a plain reason it'll land. You post with intent, not hope."
               />
             </Reveal>
 
@@ -84,7 +84,7 @@ export function WhyQuip() {
               <ReasoningCard
                 type="emotional_peak"
                 confidence={88}
-                why="Voice breaks on the word that matters — emotion is the most shareable signal there is."
+                why="Voice breaks on the word that matters. Emotion is the most shareable signal there is."
               />
             </Reveal>
             <Reveal delay={180}>

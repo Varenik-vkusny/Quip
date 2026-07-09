@@ -231,6 +231,39 @@ def set_clip_ready(job_id: str, idx: int, url: str) -> None:
         print(f"[set_clip_ready] WARN: no row updated for job={job_id} idx={idx}")
 
 
+def append_pending_clip(job_id: str, clip: dict[str, Any]) -> int:
+    """Append ONE pending clip (empty ``video_url`` + metadata) to ``jobs.clips`` (on-demand
+    extraction). Returns the NEW clip's 1-based index — the same addressing ``set_clip_ready``
+    expects (it writes ``clips[clip_index-1]``), so the follow-up render write lands on it.
+
+    Best-effort read-modify-write of the WHOLE ``clips`` column (there is no atomic append RPC).
+    # TODO(atomic): a Postgres append RPC + migration would remove the rare concurrent-append race
+    """
+    from app.errors import JobError
+
+    r = httpx.get(
+        f"{_base()}/jobs",
+        params={"id": f"eq.{job_id}", "select": "clips"},
+        headers=_headers(),
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    row = first_row(r.json())
+    if row is None:
+        raise JobError("persist", f"append_pending_clip: no job row {job_id}")
+    clips = list(row.get("clips") or [])
+    clips.append(clip)
+    p = httpx.patch(
+        f"{_base()}/jobs",
+        params={"id": f"eq.{job_id}"},
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"clips": clips},
+        timeout=_TIMEOUT,
+    )
+    p.raise_for_status()
+    return len(clips)
+
+
 def set_failed(job_id: str, error: str) -> None:
     r = httpx.patch(
         f"{_base()}/jobs",

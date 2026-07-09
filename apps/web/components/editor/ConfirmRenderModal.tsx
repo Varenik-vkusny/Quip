@@ -50,7 +50,7 @@ export function ConfirmRenderModal({
           <button
             type="button"
             onClick={onRerender}
-            className="flex-1 rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-bg transition hover:bg-accent-2 focus:outline-none focus:ring-2 focus:ring-accent/40"
+            className="flex-1 rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-on-accent transition hover:bg-accent-2 focus:outline-none focus:ring-2 focus:ring-accent/40"
           >
             {t("rerenderNow")}
           </button>

@@ -16,7 +16,7 @@ export async function Footer() {
             <p className="mt-5 text-[14px] leading-relaxed text-muted">{footer.tagline}</p>
             <a
               href="mailto:ceo@quip.ink"
-              className="mt-6 inline-block font-mono text-[12px] tracking-[0.04em] text-faint transition-colors hover:text-muted"
+              className="mt-6 inline-block text-[13.5px] text-faint transition-colors hover:text-muted"
             >
               {footer.support}
             </a>
@@ -28,7 +28,7 @@ export async function Footer() {
           <div className="grid grid-cols-2 gap-8 sm:grid-cols-3">
             {footer.cols.map((col) => (
               <div key={col.title}>
-                <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-faint">{col.title}</h3>
+                <h3 className="text-[13px] font-medium text-faint">{col.title}</h3>
                 <ul className="mt-4 flex flex-col gap-3">
                   {col.links.map((link) => (
                     <li key={link.label}>
@@ -47,8 +47,8 @@ export async function Footer() {
       <div className="border-t border-line">
         <Container>
           <div className="flex flex-col items-center justify-between gap-2 py-6 text-center sm:flex-row sm:text-left">
-            <p className="font-mono text-[11.5px] tracking-[0.04em] text-faint">{footer.stripe}</p>
-            <p className="font-mono text-[11.5px] tracking-[0.04em] text-faint">{footer.honesty}</p>
+            <p className="text-[13px] text-faint">{footer.stripe}</p>
+            <p className="text-[13px] text-faint">{footer.honesty}</p>
           </div>
         </Container>
       </div>

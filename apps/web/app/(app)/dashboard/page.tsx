@@ -17,6 +17,7 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import { Spinner } from "@/components/ui/Spinner";
 import { Split } from "@/components/ui/Split";
+import { ResultTabs } from "@/components/videomap/ResultTabs";
 import {
   cancelJob,
   clearUploadCheckpoint,
@@ -29,6 +30,7 @@ import { markReviewed, noteRecentCreated } from "@/lib/recent";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { useJob } from "@/lib/useJob";
+import { useUsage } from "@/lib/useUsage";
 
 // Heavy, phase-gated result views — NOT shown on the idle "New project" first paint (the only
 // thing a returning user sees before they submit). Code-split so their JS (and their transitive
@@ -68,10 +70,10 @@ const ClipGrid = dynamic(() => import("@/components/ClipGrid").then((m) => m.Cli
   ssr: false,
   loading: () => <ClipGridSkeleton />,
 });
-const VideoMap = dynamic(() => import("@/components/VideoMap").then((m) => m.VideoMap), {
-  ssr: false,
-  loading: () => <VideoMapSkeleton />,
-});
+const ResultsVideoMap = dynamic(
+  () => import("@/components/videomap/ResultsVideoMap").then((m) => m.ResultsVideoMap),
+  { ssr: false, loading: () => <VideoMapSkeleton /> },
+);
 
 /** Friendly label for the recent-projects list (no PII, just a hint). */
 function labelFromUrl(url: string): string {
@@ -158,11 +160,11 @@ function UploadProgress({ info }: { info: UploadProgressInfo }) {
       </div>
       {retryMsg && (
         <div
-          className="mt-3 flex items-center gap-2 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2"
+          className="mt-3 flex items-center gap-2 rounded-md border border-line bg-[color-mix(in_srgb,var(--t-warn)_8%,transparent)] px-3 py-2"
           aria-live="polite"
         >
-          <Spinner size="sm" className="text-amber-400" />
-          <span className="text-xs text-amber-300">{retryMsg}</span>
+          <Spinner size="sm" className="text-warn" />
+          <span className="text-xs text-warn">{retryMsg}</span>
         </div>
       )}
       {rateEtaLine && (
@@ -181,6 +183,7 @@ function DashboardInner() {
   const t = useTranslations("dashboard");
   const router = useRouter();
   const { job, jobId, error: pollError, reconnecting, elapsed, start, reset, reconnectNow } = useJob();
+  const { usage } = useUsage(); // owner plan → drives the Video Map's Extract gate
   const [submitting, setSubmitting] = useState(false);
   const [upload, setUpload] = useState<UploadProgressInfo | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -191,6 +194,8 @@ function DashboardInner() {
     file: File;
     maxClips: number;
     language: string | null;
+    clipMinSec?: number;
+    clipMaxSec?: number;
   } | null>(null);
   // Requested clip count (from the form) → drives the reserved skeleton count while processing.
   const [requestedClips, setRequestedClips] = useState(3);
@@ -236,13 +241,13 @@ function DashboardInner() {
     if (job?.status === "done") markReviewed(userId, job.id);
   }, [job?.id, job?.status, userId]);
 
-  async function handleSubmit(url: string, maxClips: number) {
+  async function handleSubmit(url: string, maxClips: number, clipMinSec?: number, clipMaxSec?: number) {
     if (submitting) return; // guard: не плодим параллельные джобы двойным сабмитом
     setSubmitError(null);
     setSubmitting(true);
     setRequestedClips(maxClips);
     try {
-      const { id } = await createJob({ source_type: "youtube", source_ref: url, max_clips: maxClips });
+      const { id } = await createJob({ source_type: "youtube", source_ref: url, max_clips: maxClips, clip_min_sec: clipMinSec, clip_max_sec: clipMaxSec });
       // Optimistic recents entry + refetch signal → the new project shows instantly in the list
       // (and RecentProjects refetches getMyJobs) before the server list catches up.
       noteRecentCreated({ id, label: labelFromUrl(url), at: Date.now() });
@@ -254,7 +259,7 @@ function DashboardInner() {
     }
   }
 
-  async function handleSubmitFile(file: File, maxClips: number, language: string | null = null) {
+  async function handleSubmitFile(file: File, maxClips: number, language: string | null = null, clipMinSec?: number, clipMaxSec?: number) {
     if (submitting) return; // guard двойного сабмита (форма и так дизейблится — belt+braces)
     uploadCtrl.current?.abort(); // отменить прежнюю незавершённую загрузку перед новой
     const ctrl = new AbortController();
@@ -266,9 +271,9 @@ function DashboardInner() {
     // (measured at event time in lib/api) overwrite this on the first progress event.
     setUpload({ pct: 0, loadedBytes: 0, totalBytes: file.size, elapsedSec: 0 });
     // Remember this attempt so the error screen can offer "Resume" (checkpoint-backed).
-    setPendingUpload({ file, maxClips, language });
+    setPendingUpload({ file, maxClips, language, clipMinSec, clipMaxSec });
     try {
-      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language);
+      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language, clipMinSec, clipMaxSec);
       if (ctrl.signal.aborted) return; // отменена/вытеснена — не трогаем стейт
       setUpload(null);
       setPendingUpload(null); // fully uploaded → nothing to resume
@@ -293,7 +298,7 @@ function DashboardInner() {
   function handleResume() {
     const p = pendingUpload;
     if (!p) return;
-    void handleSubmitFile(p.file, p.maxClips, p.language);
+    void handleSubmitFile(p.file, p.maxClips, p.language, p.clipMinSec, p.clipMaxSec);
   }
 
   async function handleStop() {
@@ -429,10 +434,13 @@ function DashboardInner() {
             />
           )
         ) : phase === "done" && job ? (
-          <>
-            <VideoMap jobId={job.id} clips={job.clips ?? []} />
-            <ClipGrid key={job.id} job={job} />
-          </>
+          <ResultTabs
+            clipCount={job.clips?.length ?? 0}
+            clips={<ClipGrid key={job.id} job={job} />}
+            map={
+              <ResultsVideoMap jobId={job.id} clips={job.clips ?? []} plan={usage?.plan} />
+            }
+          />
         ) : phase === "cancelled" ? (
           <div className="mx-auto max-w-xl">
             <Eyebrow tone="faint">{t("runStopped")}</Eyebrow>
