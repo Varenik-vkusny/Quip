@@ -48,9 +48,8 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
           {/* LEFT — value prop */}
           <div className="max-w-[36rem]">
             <Reveal>
-              <h1 className="text-[clamp(34px,4.1vw,46px)] font-[650] leading-[1.06] tracking-[-0.028em] text-ink [text-wrap:balance]">
-                {hero.headlinePre}
-                <br />
+              <h1 className="text-[clamp(34px,4vw,44px)] font-[650] leading-[1.06] tracking-[-0.028em] text-ink [text-wrap:balance]">
+                {hero.headlinePre}{" "}
                 {hero.headlineMid}
                 <span className="mark-accent">{hero.headlineAccent}</span>
                 {hero.headlinePost}

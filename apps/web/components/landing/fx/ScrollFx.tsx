@@ -148,7 +148,21 @@ export function ScrollFx() {
         }
       });
 
+      /* Pinned sections change the page's scroll length AFTER media/fonts load,
+         so a direct hash entry (quip.ink/#pricing) can land in a pin-spacer gap.
+         Re-measure on full load and re-aim the anchor through Lenis. */
+      const onLoad = () => {
+        ScrollTrigger.refresh();
+        if (location.hash) {
+          const el = document.querySelector<HTMLElement>(location.hash);
+          if (el) lenis.scrollTo(el, { immediate: true, offset: -80 });
+        }
+      };
+      if (document.readyState === "complete") onLoad();
+      else window.addEventListener("load", onLoad, { once: true });
+
       cleanup = () => {
+        window.removeEventListener("load", onLoad);
         ctx.revert();
         gsap.ticker.remove(tick);
         lenis.destroy();
