@@ -63,6 +63,12 @@ export function SourceForm({
   const [kazakh, setKazakh] = useState(false);
   const [clipMinSec, setClipMinSec] = useState(DEFAULT_MIN_SEC);
   const [clipMaxSec, setClipMaxSec] = useState(DEFAULT_MAX_SEC);
+  // The length fields keep a free-text draft so you can clear the box / delete the
+  // last digit while typing; the numeric value is committed (clamped) on blur, on a
+  // +/- step, and at submit. Without this a controlled number input snaps back and
+  // refuses an empty/partial state.
+  const [minDraft, setMinDraft] = useState(String(DEFAULT_MIN_SEC));
+  const [maxDraft, setMaxDraft] = useState(String(DEFAULT_MAX_SEC));
   const inputRef = useRef<HTMLInputElement>(null);
 
   const urlValid = isLikelyYoutubeUrl(url);
@@ -78,6 +84,18 @@ export function SourceForm({
   const clampMinSec = (n: number) => Math.min(clipMaxSec - 2, Math.max(MIN_CLIP_SEC, n || MIN_CLIP_SEC));
   const clampMaxSec = (min: number, n: number) =>
     Math.min(MAX_CLIP_SEC, Math.max(Math.max(MIN_CLIP_MAX_SEC, min + 2), n || MIN_CLIP_MAX_SEC));
+  // Commit a number to min/max: clamp it, then sync BOTH the numeric state and its
+  // draft string (so a +/- step or a blur snaps the visible field to the clamped value).
+  const applyMin = (n: number) => {
+    const v = clampMinSec(n);
+    setClipMinSec(v);
+    setMinDraft(String(v));
+  };
+  const applyMax = (n: number) => {
+    const v = clampMaxSec(clipMinSec, n);
+    setClipMaxSec(v);
+    setMaxDraft(String(v));
+  };
 
   function pickFile(f: File | null) {
     setFileError(null);
@@ -102,8 +120,11 @@ export function SourceForm({
     e.preventDefault();
     if (!canSubmit) return;
     // A picked file is the primary path; a YouTube link is the best-effort secondary path.
-    const safeMin = clampMinSec(clipMinSec);
-    const safeMax = clampMaxSec(safeMin, clipMaxSec);
+    // Parse the drafts too: Enter-to-submit can fire before the input's blur commits.
+    const pMin = parseInt(minDraft, 10);
+    const pMax = parseInt(maxDraft, 10);
+    const safeMin = clampMinSec(Number.isNaN(pMin) ? clipMinSec : pMin);
+    const safeMax = clampMaxSec(safeMin, Number.isNaN(pMax) ? clipMaxSec : pMax);
     if (file) {
       onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax);
     } else if (onSubmit && urlValid) {
@@ -351,7 +372,7 @@ export function SourceForm({
               <span className="text-sm text-muted">{t("minClip")}</span>
               <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
                 <IconButton
-                  onClick={() => setClipMinSec((c) => Math.max(MIN_CLIP_SEC, c - 2))}
+                  onClick={() => applyMin(clipMinSec - 2)}
                   disabled={busy || clipMinSec <= MIN_CLIP_SEC}
                   aria-label={t("shorterMinClip")}
                   size="sm"
@@ -363,21 +384,17 @@ export function SourceForm({
                   <input
                     type="text"
                     inputMode="numeric"
-                    value={clipMinSec}
-                    onFocus={(e) => e.currentTarget.select()}
-                    onChange={(e) => {
-                      const d = e.target.value.replace(/\D/g, "");
-                      if (d !== "") setClipMinSec(Math.min(MAX_CLIP_SEC, parseInt(d, 10)));
-                    }}
-                    onBlur={() => setClipMinSec((c) => clampMinSec(c))}
+                    value={minDraft}
+                    onChange={(e) => setMinDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
+                    onBlur={() => applyMin(parseInt(minDraft, 10) || clipMinSec)}
                     disabled={busy}
                     aria-label={t("minClip")}
-                    className="w-7 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
+                    className="w-8 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
                   />
                   <span className="text-sm text-faint">s</span>
                 </div>
                 <IconButton
-                  onClick={() => setClipMinSec((c) => Math.min(clipMaxSec - 2, c + 2))}
+                  onClick={() => applyMin(clipMinSec + 2)}
                   disabled={busy || clipMinSec >= clipMaxSec - 2}
                   aria-label={t("longerMinClip")}
                   size="sm"
@@ -392,9 +409,7 @@ export function SourceForm({
               <span className="text-sm text-muted">{t("maxClip")}</span>
               <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
                 <IconButton
-                  onClick={() =>
-                    setClipMaxSec((c) => Math.max(Math.max(MIN_CLIP_MAX_SEC, clipMinSec + 2), c - 2))
-                  }
+                  onClick={() => applyMax(clipMaxSec - 2)}
                   disabled={busy || clipMaxSec <= Math.max(MIN_CLIP_MAX_SEC, clipMinSec + 2)}
                   aria-label={t("shorterMaxClip")}
                   size="sm"
@@ -406,21 +421,17 @@ export function SourceForm({
                   <input
                     type="text"
                     inputMode="numeric"
-                    value={clipMaxSec}
-                    onFocus={(e) => e.currentTarget.select()}
-                    onChange={(e) => {
-                      const d = e.target.value.replace(/\D/g, "");
-                      if (d !== "") setClipMaxSec(Math.min(MAX_CLIP_SEC, parseInt(d, 10)));
-                    }}
-                    onBlur={() => setClipMaxSec((c) => clampMaxSec(clipMinSec, c))}
+                    value={maxDraft}
+                    onChange={(e) => setMaxDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
+                    onBlur={() => applyMax(parseInt(maxDraft, 10) || clipMaxSec)}
                     disabled={busy}
                     aria-label={t("maxClip")}
-                    className="w-7 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
+                    className="w-8 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
                   />
                   <span className="text-sm text-faint">s</span>
                 </div>
                 <IconButton
-                  onClick={() => setClipMaxSec((c) => Math.min(MAX_CLIP_SEC, c + 2))}
+                  onClick={() => applyMax(clipMaxSec + 2)}
                   disabled={busy || clipMaxSec >= MAX_CLIP_SEC}
                   aria-label={t("longerMaxClip")}
                   size="sm"
