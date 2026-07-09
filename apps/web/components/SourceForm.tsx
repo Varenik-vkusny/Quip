@@ -71,6 +71,13 @@ export function SourceForm({
   const clamp = (n: number) => Math.max(MIN_CLIPS, Math.min(MAX_CLIPS, n));
   // Auto → шлём потолок (30): воркер вернёт ДО стольких сильных моментов, сколько найдёт.
   const clipsRequested = auto ? MAX_CLIPS : count;
+  // Clip-length clamps for the typed inputs. min stays in [MIN_CLIP_SEC, max-2];
+  // max stays in [max(MIN_CLIP_MAX_SEC, min+2), MAX_CLIP_SEC] (MIN_CLIP_MAX_SEC
+  // mirrors the worker's ge=10, so a typed value can never 422). Applied on blur
+  // and again at submit (Enter-to-submit can skip the input blur).
+  const clampMinSec = (n: number) => Math.min(clipMaxSec - 2, Math.max(MIN_CLIP_SEC, n || MIN_CLIP_SEC));
+  const clampMaxSec = (min: number, n: number) =>
+    Math.min(MAX_CLIP_SEC, Math.max(Math.max(MIN_CLIP_MAX_SEC, min + 2), n || MIN_CLIP_MAX_SEC));
 
   function pickFile(f: File | null) {
     setFileError(null);
@@ -95,10 +102,12 @@ export function SourceForm({
     e.preventDefault();
     if (!canSubmit) return;
     // A picked file is the primary path; a YouTube link is the best-effort secondary path.
+    const safeMin = clampMinSec(clipMinSec);
+    const safeMax = clampMaxSec(safeMin, clipMaxSec);
     if (file) {
-      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, clipMinSec, clipMaxSec);
+      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax);
     } else if (onSubmit && urlValid) {
-      onSubmit(url.trim(), clipsRequested, clipMinSec, clipMaxSec);
+      onSubmit(url.trim(), clipsRequested, safeMin, safeMax);
     }
   }
 
@@ -350,7 +359,23 @@ export function SourceForm({
                 >
                   <Minus className="size-4" />
                 </IconButton>
-                <Numeral className="w-10 text-center text-sm font-semibold text-ink">{clipMinSec}s</Numeral>
+                <div className="flex items-center">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={clipMinSec}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onChange={(e) => {
+                      const d = e.target.value.replace(/\D/g, "");
+                      if (d !== "") setClipMinSec(Math.min(MAX_CLIP_SEC, parseInt(d, 10)));
+                    }}
+                    onBlur={() => setClipMinSec((c) => clampMinSec(c))}
+                    disabled={busy}
+                    aria-label={t("minClip")}
+                    className="w-7 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
+                  />
+                  <span className="text-sm text-faint">s</span>
+                </div>
                 <IconButton
                   onClick={() => setClipMinSec((c) => Math.min(clipMaxSec - 2, c + 2))}
                   disabled={busy || clipMinSec >= clipMaxSec - 2}
@@ -377,7 +402,23 @@ export function SourceForm({
                 >
                   <Minus className="size-4" />
                 </IconButton>
-                <Numeral className="w-10 text-center text-sm font-semibold text-ink">{clipMaxSec}s</Numeral>
+                <div className="flex items-center">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={clipMaxSec}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onChange={(e) => {
+                      const d = e.target.value.replace(/\D/g, "");
+                      if (d !== "") setClipMaxSec(Math.min(MAX_CLIP_SEC, parseInt(d, 10)));
+                    }}
+                    onBlur={() => setClipMaxSec((c) => clampMaxSec(clipMinSec, c))}
+                    disabled={busy}
+                    aria-label={t("maxClip")}
+                    className="w-7 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
+                  />
+                  <span className="text-sm text-faint">s</span>
+                </div>
                 <IconButton
                   onClick={() => setClipMaxSec((c) => Math.min(MAX_CLIP_SEC, c + 2))}
                   disabled={busy || clipMaxSec >= MAX_CLIP_SEC}
