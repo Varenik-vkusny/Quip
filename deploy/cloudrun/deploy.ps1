@@ -66,12 +66,19 @@ $SECRETS = "SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest," +
 # ─────────────────────────── 6. JOB-КООРДИНАТОР (import→transcribe→select→ФАН-АУТ рендера) ───────────────────────────
 # ЖИВОЙ конфиг: 8 vCPU/32Gi. Клипы НЕ рендерятся здесь: координатор спавнит контейнер-на-клип
 # (quip-render, §6b) — CLOUDRUN_JOB/REGION/RENDER_JOB это включают (cloudrun_fanout_enabled).
-# RENDER_FANOUT_MAX=6 — сколько клип-контейнеров держим параллельно (потолок под квоту CPU региона).
+# RENDER_FANOUT_MAX=12 — сколько клип-контейнеров держим параллельно (ЖИВОЕ значение; было 6).
 # RENDER_CONCURRENCY=1 = фолбэк in-process рендер (если фан-аут упал: квота/API).
 # Ephemeral-disk (Part C, 2026-07-07): source.mp4 качается на ДИСК (`type=ephemeral-disk`, gen2 beta,
 # mount=/root/data/tmp=TMPDIR), НЕ на tmpfs=RAM → большой source больше не давит на память (был OOM на
-# 2ч/1440p / много клипов). size=32Gi требует quota-increase сверх дефолтных 10Gi (Cloud Run → Quotas);
-# без квоты ставь size=10Gi (хватает source'у ≲9 ГБ). Применить к СУЩЕСТВУЮЩИМ job'ам — §6c (update, не create).
+# 2ч/1440p / много клипов). size=32Gi требует quota-increase сверх дефолтных 10Gi (Cloud Run → Quotas).
+# 🔴 УРОК 2026-07-09: РЕАЛЬНАЯ параллельность фан-аута зажата НЕ RENDER_FANOUT_MAX, а РЕГИОНАЛЬНОЙ квотой
+#   «Total Ephemeral Disk allocation» (была 100 GiB). 32Gi/контейнер × (координатор+рендеры) → 100÷32≈3
+#   контейнера МАКС, сколько ни ставь FANOUT_MAX=12. Замер: 30-клиповый джоб бежал ~2-3 параллельно, 19 мин
+#   вместо ~5. Фикс: поднять региональные квоты Total Ephemeral Disk + Total memory + Instances (Cloud
+#   Quotas API / Console → Quotas), НЕ только per-instance лимит диска. Диск/RAM держать ≈ реальной нужде
+#   (source ≤10ГБ + кадры ~9ГБ) — меньше контейнер = больше влезает в квоту = дешевле. Проверять грант:
+#   effectiveLimit по run.googleapis.com/ephemeral_disk_allocation в europe-west1.
+# Применить к СУЩЕСТВУЮЩИМ job'ам — §6c (update, не create).
 gcloud beta run jobs create quip-pipeline `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=python --args="-m,app.cloudrun_job" `
@@ -80,19 +87,20 @@ gcloud beta run jobs create quip-pipeline `
   --add-volume=name=tmp,type=ephemeral-disk,size=32Gi `
   --add-volume-mount=volume=tmp,mount-path=/root/data/tmp `
   --set-env-vars=("$ENVVARS,TMPDIR=/root/data/tmp,CLOUDRUN_JOB=quip-pipeline,CLOUDRUN_REGION=$REGION," +
-                  "CLOUDRUN_RENDER_JOB=quip-render,RENDER_FANOUT_MAX=6,RENDER_FANOUT_TIMEOUT=2600,RENDER_CONCURRENCY=1") `
+                  "CLOUDRUN_RENDER_JOB=quip-render,RENDER_FANOUT_MAX=12,RENDER_FANOUT_TIMEOUT=3600,RENDER_CONCURRENCY=1") `
   --set-secrets="$SECRETS"
 
 # ─────────────────── 6b. JOB-РЕНДЕР (контейнер-на-клип, ФАН-АУТ) — параллелизм как на Modal ───────────────────
 # Координатор спавнит ПО ОДНОМУ execution на клип (JOB_KIND=fanout_render_clip); каждый качает source
-# из R2, рендерит СВОЙ клип (stages 3–5), пишет result-dict в R2. cpu=4 (Modal тоже 4). Source теперь на
-# ephemeral-DISK (§6, не tmpfs=RAM) → mem=16Gi снова хватает (была заплатка 16→32Gi под OOM; с диском
-# память освобождается). ⚠️ Свериться с ЖИВЫМ значением памяти render (могло остаться 32Gi). task-timeout 20м + 1 ретрай.
+# из R2, рендерит СВОЙ клип (stages 3–5), пишет result-dict в R2. ⚠️ ЖИВОЕ значение = cpu=8/memory=32Gi
+# (было в скрипте 4/16 — ДРИФТ, исправлено 2026-07-09; пересоздание по старым числам ПОЛОВИНИЛО бы рендер).
+# Source на ephemeral-DISK (§6, не tmpfs=RAM). RAM 32Gi — с запасом (кадры ~9ГБ); можно ужать до ~16Gi
+# ПОСЛЕ локального теста на OOM. Диск 32Gi — см. УРОК про региональную квоту в §6. task-timeout 20м + 1 ретрай.
 gcloud beta run jobs create quip-render `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=python --args="-m,app.cloudrun_job" `
   --task-timeout=1200s --max-retries=1 --tasks=1 --parallelism=1 `
-  --cpu=4 --memory=16Gi --execution-environment=gen2 `
+  --cpu=8 --memory=32Gi --execution-environment=gen2 `
   --add-volume=name=tmp,type=ephemeral-disk,size=32Gi `
   --add-volume-mount=volume=tmp,mount-path=/root/data/tmp `
   --set-env-vars="$ENVVARS,TMPDIR=/root/data/tmp" --set-secrets="$SECRETS"

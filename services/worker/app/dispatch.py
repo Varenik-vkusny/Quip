@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 _MODAL_APP = "quip-worker"
@@ -56,10 +57,51 @@ def _cloudrun_render_job_path() -> str:
     return f"projects/{project}/locations/{region}/jobs/{job}"
 
 
+def _is_retryable_spawn_error(exc: BaseException) -> bool:
+    """Транзитивная ли это ошибка RunJob, которую БЕЗОПАСНО повторить. ``ResourceExhausted`` =
+    rate-лимит квоты ``Job run requests`` (60/мин/регион) или конкурентный лимит: запрос ОТКЛОНЁН
+    ДО создания execution → повтор не даёт двойного спавна. Матчим по имени в MRO, чтобы не тянуть
+    ``google.api_core.exceptions`` локально (её в unit-окружении нет). Прочие ошибки (неверный
+    путь/permission/логика) НЕ ретраибл — летят наверх (правило №8, не глотаем)."""
+    return any(t.__name__ == "ResourceExhausted" for t in type(exc).__mro__)
+
+
+def _spawn_retries() -> int:
+    """Сколько ПОПЫТОК спавна делаем при rate-лимите (вкл. первую). ``RENDER_SPAWN_RETRIES``,
+    деф.4; clamp >= 1 (1 = без ретрая). Kill-switch: поставить 1."""
+    try:
+        return max(1, int(os.environ.get("RENDER_SPAWN_RETRIES", "4")))
+    except ValueError:
+        return 4
+
+
+def _run_job_with_retry(call: Callable[[], Any]) -> Any:
+    """Вызвать ``call`` (RunJob) с экспоненциальным backoff на транзитивном rate-лимите
+    (``_is_retryable_spawn_error``). Всплеск спавнов при N одновременных джобах пробивает
+    ``Job run requests``=60/мин → ``ResourceExhausted``; несколько секунд паузы дают токенам
+    накопиться. Исчерпали попытки ИЛИ ошибка не-ретраибл → пробрасываем (fallback в run.py)."""
+    import time
+
+    attempts = _spawn_retries()
+    for i in range(attempts):
+        try:
+            return call()
+        except Exception as e:  # noqa: BLE001 — решаем по типу: ретраибл rate-лимит vs проброс
+            if i == attempts - 1 or not _is_retryable_spawn_error(e):
+                raise
+            delay = 2.0 * (2**i)
+            print(
+                f"[fanout] RunJob rate-limited ({type(e).__name__}); "
+                f"retry {i + 1}/{attempts - 1} in {delay:.0f}s"
+            )
+            time.sleep(delay)
+
+
 def _run_job_on(job_path: str, fn_name: str, args: tuple[Any, ...]) -> str:
     """Запустить execution job'а ``job_path`` с per-execution env-override ``JOB_KIND``+``JOB_ARGS``
     (мёржатся с базовым env job'а → секреты/конфиг деплоя выживают). Возвращает имя execution
-    (``projects/.../executions/...``) для поллинга/отмены. Общее ядро ``spawn()`` и фан-аута."""
+    (``projects/.../executions/...``) для поллинга/отмены. Общее ядро ``spawn()`` и фан-аута.
+    Сам RunJob-вызов обёрнут в ретрай на rate-лимит (см. ``_run_job_with_retry``)."""
     from google.cloud import run_v2
 
     client = run_v2.JobsClient()
@@ -76,7 +118,7 @@ def _run_job_on(job_path: str, fn_name: str, args: tuple[Any, ...]) -> str:
             ],
         ),
     )
-    op = client.run_job(request=req)
+    op = _run_job_with_retry(lambda: client.run_job(request=req))
     # metadata.name несёт имя execution сразу (не блокируемся на .result() — тот ждёт конца).
     return str(op.metadata.name)
 
