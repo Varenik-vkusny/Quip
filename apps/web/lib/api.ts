@@ -180,6 +180,8 @@ export type CreateJobInput = {
   source_type: "youtube";
   source_ref: string;
   max_clips?: number;
+  clip_min_sec?: number;
+  clip_max_sec?: number;
 };
 
 export interface UsageInfo {
@@ -605,6 +607,8 @@ async function completeMultipart(
   language: string | null | undefined,
   headers: Record<string, string>,
   signal?: AbortSignal,
+  clipMinSec?: number,
+  clipMaxSec?: number,
 ): Promise<void> {
   const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
     method: "POST",
@@ -613,6 +617,8 @@ async function completeMultipart(
       filename: file.name,
       max_clips: maxClips ?? null,
       language: language ?? null,
+      clip_min_sec: clipMinSec ?? null,
+      clip_max_sec: clipMaxSec ?? null,
       upload_id: uploadId,
       parts,
     }),
@@ -635,6 +641,8 @@ async function resumeMultipart(
   headers: Record<string, string>,
   onProgress?: (p: UploadProgressInfo) => void,
   signal?: AbortSignal,
+  clipMinSec?: number,
+  clipMaxSec?: number,
   rand?: () => number,
 ): Promise<{ id: string }> {
   const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
@@ -680,7 +688,7 @@ async function resumeMultipart(
     rand,
   });
   const all = [...preCompleted, ...newly].sort((a, b) => a.part_number - b.part_number);
-  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal);
+  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec);
   await clearCheckpoint(fingerprint);
   return { id: cp.job_id };
 }
@@ -703,6 +711,8 @@ export async function createUploadJob(
   onProgress?: (p: UploadProgressInfo) => void,
   signal?: AbortSignal,
   language?: string | null,
+  clipMinSec?: number,
+  clipMaxSec?: number,
   rand?: () => number,
 ): Promise<{ id: string }> {
   const headers = await authHeaders();
@@ -728,6 +738,8 @@ export async function createUploadJob(
         headers,
         onProgress,
         signal,
+        clipMinSec,
+        clipMaxSec,
         rand,
       );
     } catch (e) {
@@ -743,7 +755,7 @@ export async function createUploadJob(
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
     // size → воркер решает: один PUT (мелкие) или multipart-план (крупные, >100 МБ).
-    body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, size: file.size }),
+    body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, size: file.size, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null }),
     signal,
   });
   if (initRes.status === 401) throw new Error("Sign in to create clips.");
@@ -779,7 +791,7 @@ export async function createUploadJob(
         signal,
         rand,
       });
-      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal);
+      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec);
       await clearCheckpoint(fingerprint); // fully uploaded → no resume state to keep
       return { id };
     } catch (e) {
@@ -815,7 +827,7 @@ export async function createUploadJob(
     const done = await fetch(`${BASE}/jobs/${init.id}/upload-complete`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null }),
+      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null }),
       signal,
     });
     if (!done.ok) throw new Error(`Couldn’t start processing: ${done.status}`);
@@ -827,6 +839,8 @@ export async function createUploadJob(
   form.append("file", file);
   if (maxClips != null) form.append("max_clips", String(maxClips));
   if (language != null) form.append("language", language);
+  if (clipMinSec != null) form.append("clip_min_sec", String(clipMinSec));
+  if (clipMaxSec != null) form.append("clip_max_sec", String(clipMaxSec));
   const res = await xhrRequest("POST", `${BASE}/jobs/upload`, form, { headers, onProgress, signal });
   if (res.status === 401) throw new Error("Sign in to create clips.");
   if (res.status === 402) {

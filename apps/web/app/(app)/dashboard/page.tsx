@@ -194,6 +194,8 @@ function DashboardInner() {
     file: File;
     maxClips: number;
     language: string | null;
+    clipMinSec?: number;
+    clipMaxSec?: number;
   } | null>(null);
   // Requested clip count (from the form) → drives the reserved skeleton count while processing.
   const [requestedClips, setRequestedClips] = useState(3);
@@ -239,13 +241,13 @@ function DashboardInner() {
     if (job?.status === "done") markReviewed(userId, job.id);
   }, [job?.id, job?.status, userId]);
 
-  async function handleSubmit(url: string, maxClips: number) {
+  async function handleSubmit(url: string, maxClips: number, clipMinSec?: number, clipMaxSec?: number) {
     if (submitting) return; // guard: не плодим параллельные джобы двойным сабмитом
     setSubmitError(null);
     setSubmitting(true);
     setRequestedClips(maxClips);
     try {
-      const { id } = await createJob({ source_type: "youtube", source_ref: url, max_clips: maxClips });
+      const { id } = await createJob({ source_type: "youtube", source_ref: url, max_clips: maxClips, clip_min_sec: clipMinSec, clip_max_sec: clipMaxSec });
       // Optimistic recents entry + refetch signal → the new project shows instantly in the list
       // (and RecentProjects refetches getMyJobs) before the server list catches up.
       noteRecentCreated({ id, label: labelFromUrl(url), at: Date.now() });
@@ -257,7 +259,7 @@ function DashboardInner() {
     }
   }
 
-  async function handleSubmitFile(file: File, maxClips: number, language: string | null = null) {
+  async function handleSubmitFile(file: File, maxClips: number, language: string | null = null, clipMinSec?: number, clipMaxSec?: number) {
     if (submitting) return; // guard двойного сабмита (форма и так дизейблится — belt+braces)
     uploadCtrl.current?.abort(); // отменить прежнюю незавершённую загрузку перед новой
     const ctrl = new AbortController();
@@ -269,9 +271,9 @@ function DashboardInner() {
     // (measured at event time in lib/api) overwrite this on the first progress event.
     setUpload({ pct: 0, loadedBytes: 0, totalBytes: file.size, elapsedSec: 0 });
     // Remember this attempt so the error screen can offer "Resume" (checkpoint-backed).
-    setPendingUpload({ file, maxClips, language });
+    setPendingUpload({ file, maxClips, language, clipMinSec, clipMaxSec });
     try {
-      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language);
+      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language, clipMinSec, clipMaxSec);
       if (ctrl.signal.aborted) return; // отменена/вытеснена — не трогаем стейт
       setUpload(null);
       setPendingUpload(null); // fully uploaded → nothing to resume
@@ -296,7 +298,7 @@ function DashboardInner() {
   function handleResume() {
     const p = pendingUpload;
     if (!p) return;
-    void handleSubmitFile(p.file, p.maxClips, p.language);
+    void handleSubmitFile(p.file, p.maxClips, p.language, p.clipMinSec, p.clipMaxSec);
   }
 
   async function handleStop() {

@@ -485,6 +485,8 @@ def run_pipeline(
     on_cancellable: Callable[[bool], None] | None = None,
     user_id: str | None = None,
     language: str | None = None,
+    clip_min_sec: int | None = None,
+    clip_max_sec: int | None = None,
     normalize_source: Callable[[], None] | None = None,
     on_ready: Callable[[Job], None] | None = None,
 ) -> Job:
@@ -499,10 +501,11 @@ def run_pipeline(
     шаг). Джоб стартует cancellable=True (insert_job), True эмитить не нужно.
     user_id (опц.) — владелец джоба: несётся в per-clip рендер → план (вотермарка/разрешение)
     резолвится СЕРВЕРНО из profiles.plan (free прожигает вотермарку, обойти с клиента нельзя).
+    clip_min_sec/clip_max_sec (опц.) — настройки длины клипов от юзера; None → дефолт конфига.
     normalize_source(опц.) — ОТЛОЖЕННАЯ видео-нормализация аплоада в seekable source.mp4 (см.
     stage0_import.normalize_upload_source). Аплоад-путь даёт аудио+meta из СЫРОГО файла сразу
     (транскрипция стартует без ожидания ре-энкода), а source.mp4 материализуется ЗДЕСЬ — ПОСЛЕ
-    select, ПЕРЕД заливкой в R2/фан-аутом (где впервые нужен seekable mp4). YouTube/кэш: source.mp4
+    select, ПЕРЕД заливкой в R2/фан-аутом (где впервые нужен mp4). YouTube/кэш: source.mp4
     уже есть → None (no-op). Параметры _ensure_mp4 не меняются — двигается только момент запуска.
     on_ready(job) (опц.) — done-early шов для tasks.py (владелец set_done/_meter): вызывается
     СРАЗУ по готовности клипов (Job собран, job.json записан), ДО join'а preview/video_map-потока
@@ -760,6 +763,8 @@ def run_pipeline(
             # None (явная ветка «нет сигнала», не тихий фолбэк); гейт SELECT_AUDIO_AWARE — в select.
             loudness=loudness or None,
             usage_sink=usage,
+            clip_min_sec=clip_min_sec,
+            clip_max_sec=clip_max_sec,
         )
         print(f"[2] select: {len(segments)} segments")
         # ── Stage 2b (B1): Gemini-vision ревью каждого окна — ре-ранк по мультимодальному

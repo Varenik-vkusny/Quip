@@ -196,6 +196,13 @@
     "kazakh": "Казахский",
     "kazakhOn": "kk · Groq Whisper",
     "kazakhOff": "автоопределение",
+    "clipDuration": "Длина клипа",
+    "minClip": "мин",
+    "maxClip": "макс",
+    "shorterMinClip": "Короче минимум",
+    "longerMinClip": "Длиннее минимум",
+    "shorterMaxClip": "Короче максимум",
+    "longerMaxClip": "Длиннее максимум",
     "starting": "Запускаем…",
     "makeClips": "Нарезать клипы",
     "creditNote": "Длительность должна укладываться в остаток минут — короткое видео тратит только свою длину; 1 видео ≈ 60 мин."
