@@ -9,7 +9,6 @@ import { useEffect } from "react";
   on top of Lenis inertial scrolling (the "heavy, cinematic" scroll feel).
 
   Vocabulary (all transform/opacity only, emil-grade easing):
-  - [data-landing-nav]                nav morphs into a floating pill after the first fold
   - [data-para="<px>"]                hero parallax: element drifts <px> over the hero scroll
   - [data-count-to="<n>"]             mono numeral counts 0→n when it enters the viewport
   - [data-count-bar]                  sibling bar fills to the same fraction
@@ -48,17 +47,6 @@ export function ScrollFx() {
       gsap.ticker.lagSmoothing(0);
 
       const ctx = gsap.context(() => {
-        /* nav → floating pill after the first screen */
-        const nav = document.querySelector<HTMLElement>("[data-landing-nav]");
-        if (nav) {
-          ScrollTrigger.create({
-            start: 90,
-            end: "max",
-            onEnter: () => nav.dataset.pill = "1",
-            onLeaveBack: () => delete nav.dataset.pill,
-          });
-        }
-
         /* hero parallax: phones and the reason card drift at different depths */
         const hero = document.querySelector<HTMLElement>("[data-hero]");
         if (hero) {
@@ -99,6 +87,26 @@ export function ScrollFx() {
         const track = pin?.querySelector<HTMLElement>("[data-map-track]");
         if (pin && track && window.matchMedia("(min-width: 768px)").matches) {
           const distance = () => Math.max(0, track.scrollWidth - window.innerWidth);
+          const cards = gsap.utils.toArray<HTMLElement>("[data-map-card]");
+
+          // coverflow depth: the card nearest the viewport centre is full size and
+          // bright; its neighbours recede in scale and fade, so the strip reads as a
+          // focused timeline moving THROUGH the frame instead of a flat slide.
+          const applyDepth = () => {
+            const cx = window.innerWidth / 2;
+            const reach = window.innerWidth * 0.44;
+            for (const card of cards) {
+              const r = card.getBoundingClientRect();
+              const d = Math.min(1, Math.abs(r.left + r.width / 2 - cx) / reach);
+              gsap.set(card, {
+                scale: 1.06 - d * 0.26, // focused card pops above 1.0, neighbours recede
+                opacity: 1 - d * 0.62,
+                yPercent: -(1 - d) * 4, // a gentle arc: the card in focus lifts a touch
+                transformOrigin: "center 60%",
+              });
+            }
+          };
+
           gsap.to(track, {
             x: () => -distance(),
             ease: "none",
@@ -109,6 +117,8 @@ export function ScrollFx() {
               pin: true,
               scrub: 1,
               invalidateOnRefresh: true,
+              onUpdate: applyDepth,
+              onRefresh: applyDepth,
             },
           });
         }

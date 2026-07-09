@@ -35,7 +35,8 @@ export async function MomentMap() {
             {momentMap.cards.map((card) => (
               <article
                 key={card.tc}
-                className="lift w-[228px] shrink-0 snap-start overflow-hidden rounded-card bg-surface shadow-card md:w-[248px]"
+                data-map-card
+                className="w-[228px] shrink-0 snap-start overflow-hidden rounded-card bg-surface shadow-card will-change-transform md:w-[248px]"
               >
                 <div className="relative aspect-[9/12] overflow-hidden bg-surface-3">
                   <img
@@ -65,7 +66,10 @@ export async function MomentMap() {
             ))}
 
             {/* the tail: what's still unexplored on the map */}
-            <div className="grid w-[228px] shrink-0 snap-start place-items-center rounded-card shadow-[inset_0_0_0_1.5px_var(--t-line-strong)] md:w-[248px]">
+            <div
+              data-map-card
+              className="grid w-[228px] shrink-0 snap-start place-items-center rounded-card shadow-[inset_0_0_0_1.5px_var(--t-line-strong)] will-change-transform md:w-[248px]"
+            >
               <div className="px-6 text-center">
                 <div className="font-mono text-[30px] font-semibold text-faint">
                   {momentMap.more.count}

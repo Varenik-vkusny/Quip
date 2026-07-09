@@ -35,10 +35,13 @@ export function Logo() {
 }
 
 /*
-  Nav — starts as a quiet full-width bar over the hero, then MORPHS into a
-  floating glass pill once the reader commits to the page (the fastlane move,
-  done with tokens). The morph is pure CSS transitions driven by one scroll
-  boolean; motion/react only drives the mobile disclosure.
+  Nav — a fixed bar that SETTLES into a floating frosted panel once the reader
+  scrolls past the hero. The settle animates ONLY composited/paint properties
+  (background, border, shadow, backdrop-blur, transform) — never width/height/
+  margin/padding — so it can't reflow the page (the old max-width+height morph
+  flickered and juddered on scroll). A scroll hysteresis (frost on at 80px, off
+  at 36px) stops the state flapping when you hover near the threshold.
+  motion/react only drives the mobile disclosure.
 */
 export function Nav({ authed = false }: { authed?: boolean }) {
   const { nav, openApp } = getLandingContent(resolveLocale(useLocale()));
@@ -46,24 +49,20 @@ export function Nav({ authed = false }: { authed?: boolean }) {
   const [open, setOpen] = useState(false);
   const { scrollY } = useScroll();
   const reduce = useReducedMotion();
-  useMotionValueEvent(scrollY, "change", (y) => setScrolled(y > 90));
+  useMotionValueEvent(scrollY, "change", (y) =>
+    setScrolled((prev) => (prev ? y > 36 : y > 80)),
+  );
 
-  const pill = scrolled && !open;
+  const solid = scrolled || open;
 
   return (
     <header className="fixed inset-x-0 top-0 z-50">
-      <div
-        className={`mx-auto transition-[max-width,margin,border-radius,background-color,box-shadow,border-color] duration-500 ease-[var(--ease-out)] ${
-          pill
-            ? "mt-3 max-w-[900px] rounded-pill border border-line bg-surface/90 shadow-card backdrop-blur-xl"
-            : open
-              ? "max-w-full border-b border-line bg-bg/85 backdrop-blur-xl"
-              : "max-w-full border-b border-transparent bg-transparent"
-        }`}
-      >
+      <div className="mx-auto w-full max-w-[1200px] px-4 sm:px-6">
         <nav
-          className={`flex items-center justify-between gap-6 transition-[height,padding] duration-500 ease-[var(--ease-out)] ${
-            pill ? "h-[54px] px-5" : "container-page h-16"
+          className={`flex h-16 items-center justify-between gap-6 rounded-2xl border px-3 transition-[background-color,border-color,box-shadow,transform,backdrop-filter] duration-300 ease-[var(--ease-out)] will-change-transform sm:px-4 ${
+            solid
+              ? "translate-y-2.5 border-line bg-surface/80 shadow-card backdrop-blur-xl"
+              : "translate-y-0 border-transparent bg-transparent"
           }`}
         >
           <Logo />
@@ -113,7 +112,7 @@ export function Nav({ authed = false }: { authed?: boolean }) {
           </div>
         </nav>
 
-        {/* mobile disclosure menu */}
+        {/* mobile disclosure — a frosted panel floating below the bar */}
         <AnimatePresence>
           {open && (
             <motion.div
@@ -123,7 +122,7 @@ export function Nav({ authed = false }: { authed?: boolean }) {
               transition={{ duration: 0.25, ease: [0.2, 0.7, 0.2, 1] }}
               className="overflow-hidden md:hidden"
             >
-              <div className="container-page flex flex-col gap-1 pb-4 pt-2">
+              <div className="mt-2 flex flex-col gap-1 rounded-2xl border border-line bg-surface/90 p-3 shadow-card backdrop-blur-xl">
                 {nav.items.map((item) => (
                   <a
                     key={item.href}
