@@ -15,6 +15,12 @@ const MAX_CLIPS = 30; // продуктовый потолок (Auto = «ско�
 const DEFAULT_CLIPS = 8;
 const DEFAULT_MIN_SEC = 20;
 const DEFAULT_MAX_SEC = 60;
+const LS_KEY_MIN = "quip:clipMinSec";
+const LS_KEY_MAX = "quip:clipMaxSec";
+const storedMin = typeof window !== "undefined" ? Number(window.localStorage.getItem(LS_KEY_MIN)) : null;
+const storedMax = typeof window !== "undefined" ? Number(window.localStorage.getItem(LS_KEY_MAX)) : null;
+const INIT_MIN_SEC = storedMin && storedMin >= 4 && storedMin <= 180 ? storedMin : DEFAULT_MIN_SEC;
+const INIT_MAX_SEC = storedMax && storedMax >= 10 && storedMax <= 180 ? storedMax : DEFAULT_MAX_SEC;
 const MIN_CLIP_SEC = 4;
 const MAX_CLIP_SEC = 180;
 // The worker pins clip_max_sec >= 10 (main.py request models). Keep the stepper from
@@ -61,14 +67,14 @@ export function SourceForm({
   const [count, setCount] = useState(DEFAULT_CLIPS);
   const [dragging, setDragging] = useState(false);
   const [kazakh, setKazakh] = useState(false);
-  const [clipMinSec, setClipMinSec] = useState(DEFAULT_MIN_SEC);
-  const [clipMaxSec, setClipMaxSec] = useState(DEFAULT_MAX_SEC);
+  const [clipMinSec, setClipMinSec] = useState(INIT_MIN_SEC);
+  const [clipMaxSec, setClipMaxSec] = useState(INIT_MAX_SEC);
   // The length fields keep a free-text draft so you can clear the box / delete the
   // last digit while typing; the numeric value is committed (clamped) on blur, on a
   // +/- step, and at submit. Without this a controlled number input snaps back and
   // refuses an empty/partial state.
-  const [minDraft, setMinDraft] = useState(String(DEFAULT_MIN_SEC));
-  const [maxDraft, setMaxDraft] = useState(String(DEFAULT_MAX_SEC));
+  const [minDraft, setMinDraft] = useState(String(INIT_MIN_SEC));
+  const [maxDraft, setMaxDraft] = useState(String(INIT_MAX_SEC));
   // Duration (seconds) of the picked file, probed client-side, so we can warn BEFORE
   // upload if it's shorter than the minimum clip length. null = unknown / not probable.
   const [fileDuration, setFileDuration] = useState<number | null>(null);
@@ -97,11 +103,13 @@ export function SourceForm({
     const v = clampMinSec(n);
     setClipMinSec(v);
     setMinDraft(String(v));
+    window.localStorage.setItem(LS_KEY_MIN, String(v));
   };
   const applyMax = (n: number) => {
     const v = clampMaxSec(clipMinSec, n);
     setClipMaxSec(v);
     setMaxDraft(String(v));
+    window.localStorage.setItem(LS_KEY_MAX, String(v));
   };
 
   function pickFile(f: File | null) {
@@ -148,6 +156,8 @@ export function SourceForm({
     const pMax = parseInt(maxDraft, 10);
     const safeMin = clampMinSec(Number.isNaN(pMin) ? clipMinSec : pMin);
     const safeMax = clampMaxSec(safeMin, Number.isNaN(pMax) ? clipMaxSec : pMax);
+    window.localStorage.setItem(LS_KEY_MIN, String(safeMin));
+    window.localStorage.setItem(LS_KEY_MAX, String(safeMax));
     if (file) {
       onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax);
     } else if (onSubmit && urlValid) {

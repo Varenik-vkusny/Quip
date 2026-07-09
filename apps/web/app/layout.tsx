@@ -66,7 +66,10 @@ export const metadata: Metadata = {
     google: siteConfig.googleVerification,
     yandex: siteConfig.yandexVerification,
   },
-  // Favicon / app icon come from app/icon.png + app/apple-icon.png (Next file convention).
+  icons: {
+    icon: "/icon.png",
+    apple: "/logo-88.png",
+  },
 };
 
 export default function RootLayout({
