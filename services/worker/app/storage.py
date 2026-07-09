@@ -152,6 +152,51 @@ def source_object_key(job_id: str) -> str:
     return f"{job_id}/source.mp4"
 
 
+class SourceNotFoundError(Exception):
+    """source-объект джобы отсутствует в R2 (per-user дедуп нашёл строку, но R2-source уже вымело
+    ретеншном/не залился). Вызыватель (``/jobs/check-duplicate``) трактует это как «не дубликат» и
+    падает в обычную загрузку — НЕ как 500 (пропавший source — легитимный, ожидаемый исход)."""
+
+
+def _is_not_found_error_code(code: str) -> bool:
+    """PURE. R2/S3-код ошибки означает «объекта нет»? (зеркало inline-проверки в
+    ``download_fanout_result``). HeadObject на отсутствующем ключе даёт ``404``/``NotFound``,
+    GetObject — ``NoSuchKey``."""
+    return code in {"NoSuchKey", "NotFound", "404"}
+
+
+def copy_source(from_job_id: str, to_job_id: str) -> None:
+    """Server-side R2-копия source(from) → source(to) в R2 (per-user дедуп исходников).
+
+    Байты НЕ текут через процесс: используем МЕНЕДЖЕРНЫЙ ``.copy()`` (не ``copy_object``) — source
+    может быть до 10 ГиБ, что выше 5-ГиБ лимита одношотного CopyObject; ``.copy()`` авто-использует
+    UploadPartCopy для крупных объектов (те же multipart-настройки, что и трансферы source).
+
+    Только r2-режим (иначе нечего копировать server-side) → ``JobError`` (правило №8, не тихий
+    фолбэк). Пропавший source → ``SourceNotFoundError`` (вызыватель падает в обычную загрузку);
+    прочие сбои R2 → ``JobError``.
+    """
+    from botocore.exceptions import ClientError
+
+    s = get_settings()
+    if s.storage_backend != "r2":
+        raise JobError("storage", f"copy_source requires r2 backend, got {s.storage_backend!r}")
+    src_key = source_object_key(from_job_id)
+    dst_key = source_object_key(to_job_id)
+    try:
+        _r2_client().copy(
+            {"Bucket": s.r2_bucket, "Key": src_key},
+            s.r2_bucket,
+            dst_key,
+            Config=_transfer_config(),
+        )
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if _is_not_found_error_code(code):
+            raise SourceNotFoundError(from_job_id) from e
+        raise JobError("storage", f"R2 copy source {from_job_id}->{to_job_id} failed: {e}") from e
+
+
 def upload_source(local_path: Path, job_id: str) -> None:
     """Залить source.mp4 в R2 (cloud) — чтобы редактор мог пере-рендерить на другом контейнере.
 

@@ -341,6 +341,44 @@ def list_jobs_by_user(user_id: str | None, limit: int = 50) -> list[dict[str, An
     return list(r.json())
 
 
+# ─────────────────────────── per-user source dedup ───────────────────────────
+
+
+def find_duplicate_source(user_id: str, fingerprint: str) -> str | None:
+    """id самой свежей прошлой джобы ЭТОГО юзера с тем же отпечатком source (или None).
+
+    Per-user (фильтр ``user_id=eq.`` — IDOR-оракул закрыт), сортировка сервером по свежести,
+    выбор чистой ``dedup.pick_duplicate_candidate`` (тай-брейк по id → детерминизм)."""
+    from app import dedup
+
+    r = httpx.get(
+        f"{_base()}/jobs",
+        params={
+            "user_id": f"eq.{user_id}",
+            "source_fingerprint": f"eq.{fingerprint}",
+            "select": "id,created_at",
+            "order": "created_at.desc",
+            "limit": "20",
+        },
+        headers=_headers(),
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    return dedup.pick_duplicate_candidate(list(r.json()))
+
+
+def set_source_fingerprint(job_id: str, fingerprint: str) -> None:
+    """Записать отпечаток source джобы (для будущего per-user дедупа). Только эта колонка."""
+    r = httpx.patch(
+        f"{_base()}/jobs",
+        params={"id": f"eq.{job_id}"},
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"source_fingerprint": fingerprint},
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+
+
 # ─────────────────────────── job_artifacts (meta/segments/transcript) ───────────────────────────
 
 

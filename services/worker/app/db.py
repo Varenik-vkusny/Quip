@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app import cloud_state as cs
-from app import supa
+from app import dedup, supa
 from app.billing import credits_per_video
 from app.errors import JobError
 from app.models import Job
@@ -112,6 +112,14 @@ def init_db() -> None:
         _ensure_column(c, "jobs", "moments_found", "INTEGER")
         # Per-user дефолт-стиль (зеркало 0014_style_preferences.sql), jsonb→TEXT локально.
         _ensure_column(c, "profiles", "style_preferences", "TEXT")
+        # Per-user дедуп исходников (зеркало 0018_source_dedup.sql): отпечаток загруженного
+        # source ``<size>:<sha256>`` + индекс (user_id, source_fingerprint) для быстрого поиска
+        # «я это уже грузил?». Дедуп СТРОГО per-user (IDOR-оракул закрыт фильтром по user_id).
+        _ensure_column(c, "jobs", "source_fingerprint", "TEXT")
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_user_fingerprint"
+            " ON jobs (user_id, source_fingerprint)"
+        )
 
 
 def insert_job(
@@ -511,6 +519,43 @@ def list_jobs_by_user(user_id: str | None, limit: int = 50) -> list[dict[str, An
                 "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── per-user дедуп исходников (переиспользуем R2-source вместо повторной заливки) ──
+
+
+def find_duplicate_source(user_id: str, fingerprint: str) -> str | None:
+    """id САМОЙ СВЕЖЕЙ прошлой джобы ЭТОГО юзера с тем же отпечатком source (или None).
+
+    Per-user (IDOR: фильтр по ``user_id`` — не даём оракул существования чужого файла). Cloud →
+    ``cs.find_duplicate_source`` (PostgREST); иначе SQLite. Тянем до 20 кандидатов и выбираем
+    самого свежего чистой ``dedup.pick_duplicate_candidate`` (самый свежий source = лучший шанс
+    пережить 60-дневный ретеншн R2)."""
+    if cs.cloud_enabled():
+        return cs.find_duplicate_source(user_id, fingerprint)
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, created_at FROM jobs WHERE user_id=? AND source_fingerprint=?"
+            " ORDER BY created_at DESC LIMIT 20",
+            (user_id, fingerprint),
+        ).fetchall()
+    return dedup.pick_duplicate_candidate([dict(r) for r in rows])
+
+
+def set_source_fingerprint(job_id: str, fingerprint: str | None) -> None:
+    """Записать отпечаток source джобы (``<size>:<sha256>``) для будущего per-user дедупа.
+
+    Dual-mode (cloud PATCH / SQLite UPDATE). ``fingerprint is None`` → no-op (нечего писать)."""
+    if fingerprint is None:
+        return
+    if cs.cloud_enabled():
+        cs.set_source_fingerprint(job_id, fingerprint)
+        return
+    with _conn() as c:
+        c.execute(
+            "UPDATE jobs SET source_fingerprint=?, updated_at=? WHERE id=?",
+            (fingerprint, time.time(), job_id),
+        )
 
 
 # ── артефакты пайплайна (meta/segments/transcript) — durable для лёгкого API на Modal ──

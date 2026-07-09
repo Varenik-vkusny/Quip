@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import __version__, auth, billing, db, dispatch, media_token, storage
+from app import __version__, auth, billing, db, dedup, dispatch, media_token, storage
 from app.config import bootstrap_env, get_settings
 
 # Локально активируем auth/billing-гейты из .env (как env-vars в проде). Под pytest НЕ
@@ -525,6 +525,54 @@ class UploadCompleteBody(BaseModel):
     # (объект уже в R2, собирать нечего).
     upload_id: str | None = None
     parts: list[CompletedPart] | None = None
+    # Отпечаток source ``<size>:<sha256>`` для будущего per-user дедупа (клиент шлёт опционально).
+    # None → не персистим. Малформед → non-fatal (лог + пропуск): загрузка не должна падать из-за
+    # опционального сайд-канала дедупа.
+    source_fingerprint: str | None = None
+
+
+def _spawn_upload_job(
+    bg: BackgroundTasks,
+    job_id: str,
+    filename: str,
+    max_clips: int | None,
+    user_id: str | None,
+    language: str | None,
+    clip_min_sec: int | None,
+    clip_max_sec: int | None,
+) -> dict[str, Any]:
+    """Запустить upload_job на уже застейдженный в R2 source (общий хвост upload-complete и
+    check-duplicate). Modal/Cloud Run → spawn долгоживущей джобы (web scale-to-zero убил бы
+    фон-таск); always-on без spawn → bg.add_task in-process (download из R2 + run_upload_job).
+    Сбой диспатча = видимый failed + 500 (правило №8, не вечная очередь)."""
+    if dispatch.spawn_enabled():
+        try:
+            fc_id = dispatch.spawn(
+                "upload_job",
+                job_id,
+                filename,
+                max_clips,
+                user_id,
+                language,
+                clip_min_sec,
+                clip_max_sec,
+            )
+            db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
+        except Exception as e:  # noqa: BLE001 — сбой диспатча = видимый failed, не вечная очередь
+            db.set_failed(job_id, f"dispatch failed: {e}")
+            raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
+    else:
+        bg.add_task(
+            run_upload_job_from_r2,
+            job_id,
+            filename,
+            max_clips,
+            user_id,
+            language,
+            clip_min_sec,
+            clip_max_sec,
+        )
+    return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
 
 @app.post("/jobs/{job_id}/upload-complete")
@@ -548,6 +596,13 @@ def complete_upload(
     _enforce_free_identity(authorization, user_id)
     _enforce_quota(user_id)
     db.insert_job(job_id, "upload", body.filename, user_id=user_id)
+    # Отпечаток source (для будущего per-user дедупа) — ОПЦИОНАЛЬНЫЙ сайд-канал. Малформед здесь
+    # НЕ фатален: логируем и пропускаем (загрузка не должна падать из-за дедуп-метаданных).
+    if body.source_fingerprint is not None:
+        if dedup.is_valid_fingerprint(body.source_fingerprint):
+            db.set_source_fingerprint(job_id, body.source_fingerprint)
+        else:
+            print(f"[upload-complete] WARN: ignoring malformed source_fingerprint for job {job_id}")
     # Multipart: сначала собрать объект из частей (иначе upload_job скачает пусто/битое).
     if body.upload_id and body.parts:
         try:
@@ -561,34 +616,76 @@ def complete_upload(
             raise HTTPException(status_code=500, detail=f"multipart complete failed: {e}") from e
     # Modal: spawn долгоживущей upload_job. Always-on хостинг (Railway) без spawn → bg.add_task
     # in-process (download исходника из R2 + тот же run_upload_job). Симметрично create_job.
-    if dispatch.spawn_enabled():
-        try:
-            fc_id = dispatch.spawn(
-                "upload_job",
-                job_id,
-                body.filename,
-                body.max_clips,
-                user_id,
-                body.language,
-                body.clip_min_sec,
-                body.clip_max_sec,
-            )
-            db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
-        except Exception as e:  # noqa: BLE001 — сбой диспатча = видимый failed, не вечная очередь
-            db.set_failed(job_id, f"dispatch failed: {e}")
-            raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
-    else:
-        bg.add_task(
-            run_upload_job_from_r2,
-            job_id,
-            body.filename,
-            body.max_clips,
-            user_id,
-            body.language,
-            body.clip_min_sec,
-            body.clip_max_sec,
-        )
-    return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
+    return _spawn_upload_job(
+        bg,
+        job_id,
+        body.filename,
+        body.max_clips,
+        user_id,
+        body.language,
+        body.clip_min_sec,
+        body.clip_max_sec,
+    )
+
+
+class CheckDuplicateBody(BaseModel):
+    """Запрос per-user дедупа: конфиг джобы (как в upload-complete) + ОБЯЗАТЕЛЬНЫЙ отпечаток."""
+
+    filename: str = "upload.mp4"
+    max_clips: int | None = Field(default=None, ge=1, le=30)
+    language: str | None = None
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
+    source_fingerprint: str
+
+
+@app.post("/jobs/check-duplicate")
+def check_duplicate(
+    body: CheckDuplicateBody,
+    bg: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """«Я это уже грузил?» — если ДА (своя прошлая джоба с тем же отпечатком), переиспользуем её
+    R2-source (server-side копия) и сразу запускаем обработку, минуя повторную заливку байтов.
+
+    Гейты — как upload-complete (auth → анти-абьюз free → квота): дедуп СПАВНИТ платную джобу,
+    поэтому те же проверки. Дедуп СТРОГО per-user (``find_duplicate_source`` фильтрует по
+    ``user_id`` — кросс-юзерное «уже существует» было бы IDOR-оракулом существования файла).
+
+    Исходы: не r2-бэкенд (нет server-side копии) / нет матча / пропавший R2-source →
+    ``{"duplicate": false}`` (клиент грузит обычным путём); малформед отпечатка → 400.
+    """
+    user_id = _resolve_user(authorization, x_user_id)
+    _enforce_free_identity(authorization, user_id)
+    _enforce_quota(user_id)
+    if get_settings().storage_backend != "r2":
+        return {"duplicate": False}
+    if not dedup.is_valid_fingerprint(body.source_fingerprint):
+        raise HTTPException(status_code=400, detail="invalid source fingerprint")
+    match = db.find_duplicate_source(user_id, body.source_fingerprint) if user_id else None
+    if match is None:
+        return {"duplicate": False}
+    new_job_id = f"job_{uuid.uuid4().hex[:12]}"
+    try:
+        storage.copy_source(match, new_job_id)
+    except storage.SourceNotFoundError:
+        # R2-source найденной джобы уже вымело ретеншном → не дубликат: клиент грузит обычным путём.
+        print(f"[check-duplicate] source for match {match} gone from R2 — treating as no duplicate")
+        return {"duplicate": False}
+    db.insert_job(new_job_id, "upload", body.filename, user_id=user_id)
+    db.set_source_fingerprint(new_job_id, body.source_fingerprint)
+    result = _spawn_upload_job(
+        bg,
+        new_job_id,
+        body.filename,
+        body.max_clips,
+        user_id,
+        body.language,
+        body.clip_min_sec,
+        body.clip_max_sec,
+    )
+    return {**result, "duplicate": True}
 
 
 class UploadAbortBody(BaseModel):

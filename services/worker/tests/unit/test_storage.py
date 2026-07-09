@@ -1,5 +1,11 @@
 """Тесты pure-билдеров хранилища (app.storage). I/O (R2 upload) — интеграционно, не здесь."""
 
+import types
+
+import pytest
+
+from app import storage
+from app.errors import JobError
 from app.storage import (
     MULTIPART_MAX_PARTS,
     MULTIPART_MIN_PART_SIZE,
@@ -163,3 +169,78 @@ def test_part_count_invariant_holds_across_sizes() -> None:
 def test_plan_part_size_zero_is_min() -> None:
     assert plan_part_size(0) == MULTIPART_MIN_PART_SIZE
     assert plan_part_count(0, plan_part_size(0)) == 1
+
+
+# ─────────────── per-user source dedup: not-found коды + server-side R2 copy ───────────────
+# Дедуп переиспользует уже лежащий в R2 source (server-side копия ``.copy()``), НЕ гоняя байты
+# через процесс. Pure-предикат not-found + branch'и copy_source покрыты здесь; сам R2 — мок.
+
+
+def test_is_not_found_error_code_matches_r2_missing_codes() -> None:
+    from app.storage import _is_not_found_error_code
+
+    assert _is_not_found_error_code("NoSuchKey")
+    assert _is_not_found_error_code("NotFound")
+    assert _is_not_found_error_code("404")
+    assert not _is_not_found_error_code("AccessDenied")
+    assert not _is_not_found_error_code("")
+
+
+def _r2_settings() -> types.SimpleNamespace:
+    return types.SimpleNamespace(storage_backend="r2", r2_bucket="bkt")
+
+
+def test_copy_source_uses_managed_copy_with_transfer_config(monkeypatch) -> None:
+    # server-side R2 copy source(from)->source(to) через МЕНЕДЖЕРНЫЙ .copy() (авто UploadPartCopy
+    # для >5 ГиБ), НЕ через copy_object. Байты через процесс не текут.
+    monkeypatch.setattr(storage, "get_settings", _r2_settings)
+    calls: dict[str, object] = {}
+
+    class FakeClient:
+        def copy(self, CopySource, Bucket, Key, Config=None):  # noqa: N803 — boto3 kw-имена
+            calls.update(src=CopySource, bucket=Bucket, key=Key, config=Config)
+
+    monkeypatch.setattr(storage, "_r2_client", lambda: FakeClient())
+    storage.copy_source("job_from", "job_to")
+
+    assert calls["src"] == {"Bucket": "bkt", "Key": "job_from/source.mp4"}
+    assert calls["bucket"] == "bkt"
+    assert calls["key"] == "job_to/source.mp4"
+    assert calls["config"] is not None  # передан _transfer_config() (multipart-copy настройки)
+
+
+def test_copy_source_raises_source_not_found_on_missing(monkeypatch) -> None:
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(storage, "get_settings", _r2_settings)
+
+    class FakeClient:
+        def copy(self, CopySource, Bucket, Key, Config=None):  # noqa: N803
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
+
+    monkeypatch.setattr(storage, "_r2_client", lambda: FakeClient())
+    with pytest.raises(storage.SourceNotFoundError):
+        storage.copy_source("job_from", "job_to")
+
+
+def test_copy_source_wraps_generic_client_error_as_joberror(monkeypatch) -> None:
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(storage, "get_settings", _r2_settings)
+
+    class FakeClient:
+        def copy(self, CopySource, Bucket, Key, Config=None):  # noqa: N803
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "CopyObject")
+
+    monkeypatch.setattr(storage, "_r2_client", lambda: FakeClient())
+    with pytest.raises(JobError):
+        storage.copy_source("job_from", "job_to")
+
+
+def test_copy_source_requires_r2_backend(monkeypatch) -> None:
+    # local backend → server-side R2 copy невозможен → JobError (правило №8, не тихий фолбэк).
+    monkeypatch.setattr(
+        storage, "get_settings", lambda: types.SimpleNamespace(storage_backend="local")
+    )
+    with pytest.raises(JobError):
+        storage.copy_source("job_from", "job_to")
