@@ -81,6 +81,7 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
               <Phone
                 className="left-[2%] top-[64px] w-[176px] rotate-[-5deg] sm:w-[196px]"
                 para={-42}
+                peek="group-hover:-translate-y-4 group-hover:-rotate-6 group-hover:scale-[1.06]"
               >
                 <img
                   src="/clips/frame-1.jpg"
@@ -94,6 +95,7 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
               <Phone
                 className="left-[31%] top-0 z-[2] w-[210px] sm:w-[232px]"
                 para={-92}
+                peek="group-hover:-translate-y-5 group-hover:scale-[1.07]"
               >
                 <InlineClip
                   src={heroClip.src!}
@@ -105,6 +107,7 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
               <Phone
                 className="right-0 top-[84px] w-[176px] rotate-[4.5deg] sm:w-[196px]"
                 para={-58}
+                peek="group-hover:-translate-y-4 group-hover:rotate-6 group-hover:scale-[1.06]"
               >
                 <img
                   src="/clips/clip-4.webp"
@@ -156,23 +159,35 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
   );
 }
 
-/* A phone-framed clip. Rounded, hairline ring, pop shadow; hover lifts it out
-   of the fan. Parallax depth comes from ScrollFx via data-para. */
+/* A phone-framed clip in the hero fan. TWO layers on purpose: the OUTER owns
+   position + base rotation + the scroll parallax (ScrollFx writes an inline
+   transform on [data-para], so it must not share an element with the hover
+   transform or the inline style wins and hover does nothing — that was the old
+   "cards just overlap flatly" bug). The INNER carries the hover "peek": on hover
+   it lifts, scales and fans further out (direction passed per phone via `peek`),
+   so grabbing a card makes it present itself instead of flatly covering its
+   neighbours. z-index (not a transform) is bumped on the outer so it sits on top. */
 function Phone({
   children,
   className = "",
   para,
+  peek = "",
 }: {
   children: React.ReactNode;
   className?: string;
   para: number;
+  peek?: string;
 }) {
   return (
     <div
       data-para={para}
-      className={`absolute aspect-[9/16] overflow-hidden rounded-[22px] bg-[#000] shadow-pop transition-transform duration-300 ease-[var(--ease-out)] will-change-transform hover:z-[3] hover:-translate-y-1.5 hover:rotate-0 ${className}`}
+      className={`group absolute aspect-[9/16] will-change-transform hover:z-30 ${className}`}
     >
-      {children}
+      <div
+        className={`size-full overflow-hidden rounded-[22px] bg-[#000] shadow-pop transition-transform duration-[350ms] ease-[var(--ease-out)] will-change-transform ${peek}`}
+      >
+        {children}
+      </div>
     </div>
   );
 }
