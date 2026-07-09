@@ -92,7 +92,7 @@ export const PLANS: PlanDisplay[] = [
 export const PAYG = {
   pricePerVideo: 3, // USD per video (source up to 60 min)
   title: "No subscription? Pay as you go.",
-  body: "Buy videos one at a time. They never expire — one video covers up to 60 minutes of source.",
+  body: "Buy videos one at a time. They never expire. One video covers up to 60 minutes of source.",
   cta: "Buy a video",
 } as const;
 

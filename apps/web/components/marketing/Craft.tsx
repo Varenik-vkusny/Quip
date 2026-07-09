@@ -10,7 +10,7 @@ const features = [
   {
     icon: ScanFace,
     title: "Follows the speaker",
-    body: "Active-speaker detection keeps the right face centered — even in multi-cam interviews.",
+    body: "Active-speaker detection keeps the right face centered, even in multi-cam interviews.",
   },
   {
     icon: Crop,
@@ -20,7 +20,7 @@ const features = [
   {
     icon: Captions,
     title: "Captions that pop",
-    body: "The active word flares as it's spoken, burned in pixel-for-pixel — the preview is the export.",
+    body: "The active word flares as it's spoken, burned in pixel-for-pixel. The preview is the export.",
   },
   {
     icon: Ratio,
@@ -37,7 +37,7 @@ export function Craft() {
           <SectionHeading
             eyebrow="03 / The craft"
             title="The cut is the easy part. We sweat the rest."
-            lead="Reframe, captions, hooks, aspect ratios — the details that decide whether a clip looks pro or looks auto-generated."
+            lead="Reframe, captions, hooks, aspect ratios: the details that decide whether a clip looks pro or looks auto-generated."
           />
         </Reveal>
 

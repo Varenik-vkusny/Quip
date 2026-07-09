@@ -67,7 +67,7 @@ export async function FinalCta() {
                 className="absolute -bottom-5 left-0 w-[78%]"
                 type="emotional_peak"
                 confidence={91}
-                why="The pause before the answer is the tell — viewers lean in to hear what comes next."
+                why="The pause before the answer is the tell. Viewers lean in to hear what comes next."
               />
             </div>
           </Reveal>

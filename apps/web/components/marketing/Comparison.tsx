@@ -24,7 +24,7 @@ export function Comparison() {
         <Reveal>
           <SectionHeading
             title="More clips was never the problem."
-            lead="The bottleneck isn't quantity. It's knowing which moment is worth your audience's attention — and Quip optimizes for that."
+            lead="The bottleneck isn't quantity. It's knowing which moment is worth your audience's attention, and Quip optimizes for that."
           />
         </Reveal>
 
