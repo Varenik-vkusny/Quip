@@ -434,6 +434,8 @@ def run_pipeline_job(
     max_clips: int | None = None,
     user_id: str | None = None,
     language: str | None = None,
+    clip_min_sec: int | None = None,
+    clip_max_sec: int | None = None,
 ) -> None:
     def on_status(status: JobStatus, progress: int) -> None:
         db.update_status(job_id, status.value, progress)
@@ -441,12 +443,8 @@ def run_pipeline_job(
     def on_cancellable(v: bool) -> None:
         db.set_cancellable(job_id, v)
 
-    # Холдер несёт авторизованный гейтом QuotaDecision (split) от on_meta до метеринга —
-    # один источник истины списания (нет дрейфа гейт↔метеринг).
     quota: dict[str, Any] = {}
     try:
-        # done-early: set_done+_meter уходят on_ready-хуком — run_pipeline зовёт их СРАЗУ по
-        # готовности клипов и лишь ПОТОМ дожимает preview/video_map-хвост (см. run.py).
         run_pipeline(
             job_id,
             source_url=source_ref,
@@ -456,6 +454,8 @@ def run_pipeline_job(
             on_cancellable=on_cancellable,
             user_id=user_id,
             language=language,
+            clip_min_sec=clip_min_sec,
+            clip_max_sec=clip_max_sec,
             on_ready=_finalize_done(job_id, user_id, quota),
         )
     except JobError as e:
@@ -486,11 +486,9 @@ def run_upload_job_from_r2(
     max_clips: int | None = None,
     user_id: str | None = None,
     language: str | None = None,
+    clip_min_sec: int | None = None,
+    clip_max_sec: int | None = None,
 ) -> None:
-    """Фон-таск для direct-R2-upload: браузер залил исходник в R2 (presigned PUT) → качаем его на
-    этот контейнер → тот же run_upload_job. In-process аналог Modal-функции ``upload_job`` (та же
-    склейка ``download_source`` → ``run_upload_job``) для always-on хостинга без spawn (Railway).
-    """
     from pathlib import Path
 
     from app import artifacts, storage
@@ -500,11 +498,20 @@ def run_upload_job_from_r2(
     suffix = Path(filename).suffix.lower() or ".mp4"
     upload_path = out / f"upload{suffix}"
     try:
-        storage.download_source(job_id, upload_path)  # raw upload, залитый в R2 presigned PUT
-    except Exception as e:  # noqa: BLE001 — скачивание исходника из R2 упало → видимый failed
+        storage.download_source(job_id, upload_path)
+    except Exception as e:
         db.set_failed(job_id, f"source download failed: {e}")
         return
-    run_upload_job(job_id, str(upload_path), filename, max_clips, user_id, language)
+    run_upload_job(
+        job_id,
+        str(upload_path),
+        filename,
+        max_clips,
+        user_id,
+        language,
+        clip_min_sec,
+        clip_max_sec,
+    )
 
 
 def fanout_render_clip_job(
@@ -548,15 +555,9 @@ def run_upload_job(
     max_clips: int | None = None,
     user_id: str | None = None,
     language: str | None = None,
+    clip_min_sec: int | None = None,
+    clip_max_sec: int | None = None,
 ) -> None:
-    """Фон-таск для загруженного файла: БЫСТРЫЙ импорт аудио → тот же run_pipeline (без скачивания).
-
-    prepare_upload_audio готовит source.wav + meta.json ИЗ СЫРОГО файла (БЕЗ дорогого ре-энкода)
-    → run_pipeline(source_url=None) видит их как кэш Stage 0 и СРАЗУ идёт на транскрипцию (юзер
-    видит «transcribing» почти мгновенно, а не после скрытой нормализации видео). Видео-нормализация
-    в seekable source.mp4 ОТЛОЖЕНА в normalize_source: run_pipeline выполнит её ПОСЛЕ select, ПЕРЕД
-    заливкой в R2/фан-аутом (где впервые нужен mp4). Статус в БД (правило №8 — падение → failed).
-    """
     from pathlib import Path
 
     from app.pipeline.stage0_import import normalize_upload_source, prepare_upload_audio
@@ -574,10 +575,7 @@ def run_upload_job(
     quota: dict[str, Any] = {}
     try:
         db.update_status(job_id, JobStatus.downloading.value, 8)
-        # БЫСТРЫЙ Stage 0: аудио+meta из СЫРОГО файла (транскрипция стартует почти сразу). Видео-
-        # нормализация (_ensure_mp4: remux/ре-энкод) ОТЛОЖЕНА — run_pipeline выполнит её перед R2.
         prepare_upload_audio(src, out_dir, job_id=job_id, title=title)
-        # done-early: set_done+_meter уходят on_ready-хуком (тот же шов, что run_pipeline_job).
         run_pipeline(
             job_id,
             source_url=None,
@@ -587,6 +585,8 @@ def run_upload_job(
             on_cancellable=on_cancellable,
             user_id=user_id,
             language=language,
+            clip_min_sec=clip_min_sec,
+            clip_max_sec=clip_max_sec,
             normalize_source=lambda: normalize_upload_source(src, out_dir),
             on_ready=_finalize_done(job_id, user_id, quota),
         )

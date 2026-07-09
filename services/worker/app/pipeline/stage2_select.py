@@ -911,9 +911,12 @@ def select_segments(
     max_clips: int | None = None,
     loudness: list[float] | None = None,
     usage_sink: dict[str, int] | None = None,
+    clip_min_sec: int | None = None,
+    clip_max_sec: int | None = None,
 ) -> list[Segment]:
     """Gemini structured output → сырые сегменты → постобработка → list[Segment].
 
+    clip_min_sec/clip_max_sec (опц.) — настройки длины клипов от юзера; None → дефолт конфига.
     max_clips (опц.) — запрошенное юзером число клипов (UI-степпер); None → дефолт из настроек.
     loudness (опц., A3) — RMS-кривая громкости источника (dB, из preview_moments.extract_loudness):
       скармливается refine_boundaries_audio в postprocess для аудио-осознанной чистки границ.
@@ -929,17 +932,25 @@ def select_segments(
     прежний одиночный путь БАЙТ-В-БАЙТ.
     """
     s = get_settings()
+    min_sec = clip_min_sec if clip_min_sec is not None else s.clip_min_sec
+    max_sec = clip_max_sec if clip_max_sec is not None else s.clip_max_sec
+    if min_sec > max_sec:
+        raise JobError(_STAGE, "min_sec > max_sec: clip length range is inverted")
+    if min_sec > transcript.duration:
+        raise JobError(
+            _STAGE,
+            f"min_sec={min_sec:.0f}s > video duration={transcript.duration:.0f}s: "
+            "no segment can satisfy the minimum length",
+        )
     n_clips = resolve_max_clips(max_clips, s.max_clips)
     words = transcript.words
     system_prompt = load_system_prompt()
-    # A3/A4: аудио-слой границ — только при включённом тумблере и наличии кривой.
     audio = loudness if s.select_audio_aware else None
 
     if not (s.select_chunk_enabled and should_chunk(transcript)):
-        # ── одиночный вызов (короткое видео): прежний путь, байт-в-байт ──
         indexed = build_indexed_transcript(words)
         user_prompt = build_user_prompt(
-            title, transcript, indexed, n_clips, min_sec=s.clip_min_sec, max_sec=s.clip_max_sec
+            title, transcript, indexed, n_clips, min_sec=min_sec, max_sec=max_sec
         )
         text = call_gemini_structured(
             user_prompt,
@@ -955,15 +966,14 @@ def select_segments(
         return postprocess(
             raw,
             words,
-            min_sec=s.clip_min_sec,
-            max_sec=s.clip_max_sec,
+            min_sec=min_sec,
+            max_sec=max_sec,
             max_clips=n_clips,
             duration=transcript.duration,
             tail_pad=s.clip_tail_pad_sec,
             loudness=audio,
         )
 
-    # ── chunked selection (длинное видео): окна → per-window Gemini → merge → 1× postprocess ──
     windows = make_windows(
         words,
         target_sec=float(s.select_chunk_target_sec),
@@ -973,15 +983,14 @@ def select_segments(
     failures = 0
     for a, b in windows:
         w_slice = words[a : b + 1]
-        indexed = build_indexed_transcript(w_slice, start_index=a)  # индексы ОСТАЮТСЯ глобальными
-        # Метаданные промпта (язык/длина/число слов) — по ОКНУ (совпадают с поданным срезом).
+        indexed = build_indexed_transcript(w_slice, start_index=a)
         win_tr = Transcript(
             language=transcript.language,
             duration=w_slice[-1].end - w_slice[0].start,
             words=w_slice,
         )
         user_prompt = build_user_prompt(
-            title, win_tr, indexed, n_clips, min_sec=s.clip_min_sec, max_sec=s.clip_max_sec
+            title, win_tr, indexed, n_clips, min_sec=min_sec, max_sec=max_sec
         )
         win_usage: dict[str, int] | None = {} if usage_sink is not None else None
         try:
@@ -994,17 +1003,14 @@ def select_segments(
             )
             raw = json.loads(text).get("segments", [])
         except (JobError, json.JSONDecodeError) as e:
-            # Правило №8: НЕ проглатываем окно в 0 клипов — логируем и продолжаем с остальными
-            # окнами (сбой одного окна не должен обнулить весь отбор).
             failures += 1
             print(f"[2] select: window words[{a}:{b}] failed, skipping: {e}", file=sys.stderr)
             continue
         combined_raw.extend(raw)
-        if usage_sink is not None and win_usage:  # суммируем токены окон в общий счётчик стоимости
+        if usage_sink is not None and win_usage:
             for k, v in win_usage.items():
                 usage_sink[k] = usage_sink.get(k, 0) + v
 
-    # Правило №8: ВСЕ окна упали → это НЕ «0 моментов найдено», а сбой отбора → роняем джобу явно.
     if failures == len(windows):
         raise JobError(_STAGE, f"all {len(windows)} selection windows failed (see logs above)")
 
@@ -1012,13 +1018,13 @@ def select_segments(
     return postprocess(
         combined_raw,
         words,
-        min_sec=s.clip_min_sec,
-        max_sec=s.clip_max_sec,
+        min_sec=min_sec,
+        max_sec=max_sec,
         max_clips=n_clips,
         duration=transcript.duration,
         tail_pad=s.clip_tail_pad_sec,
         loudness=audio,
-        spread=True,  # кандидаты из разных окон → распределяем по таймлайну, не скучиваем
+        spread=True,
     )
 
 

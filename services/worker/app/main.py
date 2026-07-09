@@ -120,6 +120,8 @@ class CreateJobBody(BaseModel):
     source_ref: str
     max_clips: int | None = Field(default=None, ge=1, le=30)  # UI-степпер; None → дефолт воркера
     language: str | None = None  # ISO-код языка (kk=казахский→Groq; None=авто-детект Deepgram)
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
 
 
 @app.get("/healthz")
@@ -348,6 +350,8 @@ def create_job(
                 body.max_clips,
                 user_id,
                 body.language,
+                body.clip_min_sec,
+                body.clip_max_sec,
             )
             db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
         except Exception as e:  # noqa: BLE001 — любой сбой диспатча = видимый failed
@@ -362,6 +366,8 @@ def create_job(
             body.max_clips,
             user_id,
             body.language,
+            body.clip_min_sec,
+            body.clip_max_sec,
         )
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
@@ -372,6 +378,8 @@ async def create_upload_job(
     file: UploadFile = File(...),
     max_clips: int | None = Form(default=None, ge=1, le=30),
     language: str | None = Form(default=None),
+    clip_min_sec: int | None = Form(default=None, ge=3, le=180),
+    clip_max_sec: int | None = Form(default=None, ge=10, le=180),
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -379,6 +387,7 @@ async def create_upload_job(
 
     Файл пишется чанками в data/<job_id>/upload.<ext> (не держим в памяти); затем
     run_upload_job готовит source.mp4/wav/meta и гоняет тот же пайплайн, что и URL-путь.
+    clip_min_sec/clip_max_sec — опциональные настройки длины клипов (None → дефолт конфига).
     """
     user_id = _resolve_user(authorization, x_user_id)
     _enforce_free_identity(authorization, user_id)
@@ -393,20 +402,33 @@ async def create_upload_job(
         while chunk := await file.read(_UPLOAD_CHUNK):
             fh.write(chunk)
     db.insert_job(job_id, "upload", filename, user_id=user_id)
-    # На Modal: web — scale-to-zero ASGI-контейнер; BackgroundTask умер бы на полпути (как и у
-    # YouTube-пути). Поэтому стейджим исходник в R2 (upload_source) и spawn'им долгоживущую
-    # upload_job (она скачает исходник из R2 на своём контейнере → run_upload_job). Локально/dev
-    # (MODAL_SPAWN не задан) — BackgroundTask на этом же процессе, как в Phase 0.
     if dispatch.spawn_enabled():
         try:
-            storage.upload_source(upload_path, job_id)  # r2-режим; иначе no-op
-            dispatch.spawn("upload_job", job_id, filename, max_clips, user_id, language)
-        except Exception as e:  # noqa: BLE001 — любой сбой диспатча = видимый failed, не вечная очередь
+            storage.upload_source(upload_path, job_id)
+            dispatch.spawn(
+                "upload_job",
+                job_id,
+                filename,
+                max_clips,
+                user_id,
+                language,
+                clip_min_sec,
+                clip_max_sec,
+            )
+        except Exception as e:  # noqa: BLE001
             db.set_failed(job_id, f"dispatch failed: {e}")
             raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
     else:
         bg.add_task(
-            run_upload_job, job_id, str(upload_path), filename, max_clips, user_id, language
+            run_upload_job,
+            job_id,
+            str(upload_path),
+            filename,
+            max_clips,
+            user_id,
+            language,
+            clip_min_sec,
+            clip_max_sec,
         )
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
@@ -425,6 +447,8 @@ class UploadUrlBody(BaseModel):
     # Размер файла (байты) — известен браузеру. >5 ГБ нельзя одним PUT (лимит R2), а крупные и
     # вообще выгоднее multipart (параллельные части + resume). None/малый → single-PUT (как раньше).
     size: int | None = Field(default=None, ge=0)
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
 
 
 @app.post("/jobs/upload-url")
@@ -494,6 +518,8 @@ class UploadCompleteBody(BaseModel):
     filename: str = "upload.mp4"
     max_clips: int | None = Field(default=None, ge=1, le=30)
     language: str | None = None
+    clip_min_sec: int | None = Field(default=None, ge=3, le=180)
+    clip_max_sec: int | None = Field(default=None, ge=10, le=180)
     # Multipart-сборка (если грузили частями): upload_id + ETag'и частей. None → single-PUT
     # (объект уже в R2, собирать нечего).
     upload_id: str | None = None
@@ -537,7 +563,14 @@ def complete_upload(
     if dispatch.spawn_enabled():
         try:
             fc_id = dispatch.spawn(
-                "upload_job", job_id, body.filename, body.max_clips, user_id, body.language
+                "upload_job",
+                job_id,
+                body.filename,
+                body.max_clips,
+                user_id,
+                body.language,
+                body.clip_min_sec,
+                body.clip_max_sec,
             )
             db.set_function_call_id(job_id, fc_id)  # для Stop-кнопки (отмена джоба)
         except Exception as e:  # noqa: BLE001 — сбой диспатча = видимый failed, не вечная очередь
@@ -545,7 +578,14 @@ def complete_upload(
             raise HTTPException(status_code=500, detail=f"upload dispatch failed: {e}") from e
     else:
         bg.add_task(
-            run_upload_job_from_r2, job_id, body.filename, body.max_clips, user_id, body.language
+            run_upload_job_from_r2,
+            job_id,
+            body.filename,
+            body.max_clips,
+            user_id,
+            body.language,
+            body.clip_min_sec,
+            body.clip_max_sec,
         )
     return {"id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 

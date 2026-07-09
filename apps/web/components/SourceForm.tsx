@@ -13,6 +13,10 @@ import { isAcceptedVideoFile } from "@/lib/videoFile";
 const MIN_CLIPS = 1;
 const MAX_CLIPS = 30; // продуктовый потолок (Auto = «сколько найдётся, до 30»)
 const DEFAULT_CLIPS = 8;
+const DEFAULT_MIN_SEC = 20;
+const DEFAULT_MAX_SEC = 60;
+const MIN_CLIP_SEC = 4;
+const MAX_CLIP_SEC = 180;
 // Quip is for long-form (podcasts, talks). Uploads >100 MB go via R2 multipart (parallel,
 // resumable parts) so the old 5 GB single-PUT ceiling is gone — the REAL limit is length
 // (3 h, worker-side billing.MAX_VIDEO_MINUTES). This MB number is just a sane guard against
@@ -40,8 +44,8 @@ export function SourceForm({
 }: {
   // onSubmit = YouTube-link path (best-effort import). Optional for back-compat: callers that
   // don't pass it simply don't offer the link field. Upload is the primary affordance.
-  onSubmit?: (url: string, maxClips: number) => void;
-  onSubmitFile: (file: File, maxClips: number, language: string | null) => void;
+  onSubmit?: (url: string, maxClips: number, clipMinSec?: number, clipMaxSec?: number) => void;
+  onSubmitFile: (file: File, maxClips: number, language: string | null, clipMinSec?: number, clipMaxSec?: number) => void;
   busy: boolean;
 }) {
   const t = useTranslations("sourceForm");
@@ -54,6 +58,8 @@ export function SourceForm({
   const [count, setCount] = useState(DEFAULT_CLIPS);
   const [dragging, setDragging] = useState(false);
   const [kazakh, setKazakh] = useState(false);
+  const [clipMinSec, setClipMinSec] = useState(DEFAULT_MIN_SEC);
+  const [clipMaxSec, setClipMaxSec] = useState(DEFAULT_MAX_SEC);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const urlValid = isLikelyYoutubeUrl(url);
@@ -87,9 +93,9 @@ export function SourceForm({
     if (!canSubmit) return;
     // A picked file is the primary path; a YouTube link is the best-effort secondary path.
     if (file) {
-      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null);
+      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, clipMinSec, clipMaxSec);
     } else if (onSubmit && urlValid) {
-      onSubmit(url.trim(), clipsRequested);
+      onSubmit(url.trim(), clipsRequested, clipMinSec, clipMaxSec);
     }
   }
 
@@ -323,6 +329,61 @@ export function SourceForm({
             <span className="font-mono text-eyebrow uppercase tabular-nums text-faint">
               {kazakh ? t("kazakhOn") : t("kazakhOff")}
             </span>
+          </div>
+        </div>
+
+        <div className="sm:col-span-2">
+          <Eyebrow tone="faint">{t("clipDuration")}</Eyebrow>
+          <div className="mt-2 flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted">{t("minClip")}</span>
+              <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
+                <IconButton
+                  onClick={() => setClipMinSec((c) => Math.max(MIN_CLIP_SEC, c - 2))}
+                  disabled={busy || clipMinSec <= MIN_CLIP_SEC}
+                  aria-label={t("shorterMinClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Minus className="size-4" />
+                </IconButton>
+                <Numeral className="w-10 text-center text-sm font-semibold text-ink">{clipMinSec}s</Numeral>
+                <IconButton
+                  onClick={() => setClipMinSec((c) => Math.min(clipMaxSec - 2, c + 2))}
+                  disabled={busy || clipMinSec >= clipMaxSec - 2}
+                  aria-label={t("longerMinClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Plus className="size-4" />
+                </IconButton>
+              </div>
+            </div>
+            <span className="text-sm text-faint">—</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted">{t("maxClip")}</span>
+              <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
+                <IconButton
+                  onClick={() => setClipMaxSec((c) => Math.max(clipMinSec + 2, c - 2))}
+                  disabled={busy || clipMaxSec <= clipMinSec + 2}
+                  aria-label={t("shorterMaxClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Minus className="size-4" />
+                </IconButton>
+                <Numeral className="w-10 text-center text-sm font-semibold text-ink">{clipMaxSec}s</Numeral>
+                <IconButton
+                  onClick={() => setClipMaxSec((c) => Math.min(MAX_CLIP_SEC, c + 2))}
+                  disabled={busy || clipMaxSec >= MAX_CLIP_SEC}
+                  aria-label={t("longerMaxClip")}
+                  size="sm"
+                  className="size-9 text-ink hover:text-ink sm:size-7"
+                >
+                  <Plus className="size-4" />
+                </IconButton>
+              </div>
+            </div>
           </div>
         </div>
       </div>
