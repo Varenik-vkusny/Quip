@@ -36,12 +36,71 @@ Restore coord cpu: `gcloud run jobs update quip-pipeline --region=europe-west1 -
 
 ---
 
+## ✅ FOUNDER — DO THIS IN THE MORNING (the prod steps I was blocked from running)
+
+> I could NOT run any of these — the harness classifier blocks prod mutations and I can't self-grant.
+> All are on branch `feat/scaling-2026-07-10` (2 commits: `f8a5791` spawn-retry+drift, `3e476c1` segment core; WS2 dedup commit pending my review). PATH refresh + `$env:CLOUDSDK_CORE_DISABLE_PROMPTS="1"` first.
+
+### 0. (optional) unblock me for next time
+Add to `.claude/settings.local.json` `permissions.allow`: `"PowerShell(gcloud *)"`. (The `autoMode` classifier may still gate it; running commands yourself is the sure path.)
+
+### 1. THE parallelism win — pick ONE
+- **(preferred) Wait for the disk quota grant.** Check: rerun the quota-status snippet (memory already 2 TiB; waiting on `quip-disk-ew1`→2 TiB + `quip-instances-ew1`→300). When disk shows 2 TiB, the NEXT job auto-runs up to 12 parallel (RENDER_FANOUT_MAX=12 already set) — **no deploy needed**. Expedite at https://console.cloud.google.com/iam-admin/quotas?project=quip-project-500711 .
+- **(hedge, if Google is slow) Shrink container disk → ~5-6 parallel NOW under the current 100 GiB** (safe: 10GB source fits in 16Gi; reversible):
+  ```
+  gcloud beta run jobs update quip-render   --region=europe-west1 --add-volume=name=tmp,type=ephemeral-disk,size=16Gi --add-volume-mount=volume=tmp,mount-path=/root/data/tmp
+  gcloud beta run jobs update quip-pipeline --region=europe-west1 --add-volume=name=tmp,type=ephemeral-disk,size=16Gi --add-volume-mount=volume=tmp,mount-path=/root/data/tmp
+  ```
+  Rollback: same with `size=32Gi`.
+
+### 2. Benchmark on the heavy Cardi B video (the A/B you asked for)
+Get your user_id, then trigger + measure. Requires the trigger script `services/worker/tmp/trigger_upload_job.py` (I'll leave a ready copy in the repo; if absent, the full recipe is in this session's "cloud-job trigger recipe" agent output — it creates a prod job row + uploads source to R2).
+```
+# your uuid (GoTrue admin, service-role key from .env):
+$SUPA="https://mwfnjbnsowiaywkdrlyz.supabase.co"; $KEY="<SUPABASE_SERVICE_ROLE_KEY from .env>"
+$h=@{apikey=$KEY; Authorization="Bearer $KEY"}
+(Invoke-RestMethod "$SUPA/auth/v1/admin/users?per_page=200" -Headers $h).users | ?{$_.email -eq "akybaevtimur7@gmail.com"} | Select id
+# create job row + upload source (STORAGE_BACKEND forced to r2 in-process):
+cd services/worker; .\.venv\Scripts\python.exe trigger_upload_job.py "C:\Users\user\Downloads\Telegram Desktop\CARDI B_ The TRUTH Behind The End of My Relationship….mp4" "<your-uuid>" 30
+# execute the pipeline (JOB_ARGS quoting: ^@^ delimiter + escaped quotes):
+$env:envArg = '^@^JOB_KIND=upload_job@JOB_ARGS=[\"<job_id>\",\"CARDI B_...mp4\",30,\"<uuid>\"]'
+gcloud run jobs execute quip-pipeline --project=quip-project-500711 --region=europe-west1 --update-env-vars=$env:envArg
+```
+**Measure parallelism** (the whole point): after it runs, count overlapping render containers —
+```
+gcloud run jobs executions list --job=quip-render --region=europe-west1 --limit=30 --format="table(metadata.name,status.runningCount,status.succeededCount,metadata.creationTimestamp,status.completionTime)"
+```
+Overlap the create→complete windows: BASELINE was ~2-3 concurrent (measured 2026-07-09). Expect ~5-6 (disk 16Gi) or ~12 (post grant). Job wall time should drop from ~19 min → ~5-8 min for the 30-clip Cardi B.
+
+### 3. Deploy the committed code (spawn-retry + drift fix) — needs an image rebuild
+```
+gcloud builds submit services/worker --tag europe-west1-docker.pkg.dev/quip-project-500711/quip/quip:latest --region=europe-west1
+# pin the new @sha256 on all three (copy digest from build output):
+$IMG="europe-west1-docker.pkg.dev/quip-project-500711/quip/quip@sha256:<NEW>"
+gcloud run jobs update quip-pipeline --region=europe-west1 --image=$IMG
+gcloud run jobs update quip-render   --region=europe-west1 --image=$IMG
+gcloud run services update quip-api  --region=europe-west1 --image=$IMG
+```
+Rollback: same with the current digest `sha256:13db1ee4944d364986409a426d3a6e9d21de2607fb799679e0c0b52a801cbbbc`.
+
+### 4. WS2 dedup (once merged) — apply migration then the image (step 3) is enough
+Run `services/worker/migrations/0018_source_dedup.sql` in the Supabase SQL editor, then `NOTIFY pgrst, 'reload schema';`. Backend is safe (per-user, no reframe). Frontend fingerprint wiring is a documented follow-up (not built tonight).
+
+### 5. WS3 segmentation — DO NOT deploy without frame-by-frame proof (see WS3 section above)
+
+---
+
 ## 📊 BENCHMARKS (after each optimization)
 
-| Step | Config | Job wall time | Peak parallel render | Per-clip median | Quality check | Notes |
-|------|--------|---------------|----------------------|-----------------|---------------|-------|
-| BASELINE | 32GiB disk, 3-parallel cap | (measured pre-session: 30-clip job ~19min, 2-3 parallel) | 2-3 | ~50s compute | — | from 2026-07-09 log analysis |
-| (rows appended as tests run) | | | | | | |
+> ⚠️ I could NOT run the cloud A/B tonight (classifier blocked prod mutations + job triggers, and it can't be reproduced locally — parallelism is a Cloud Run scheduling property). Numbers below: BASELINE is **measured** (real prod job 2026-07-09 log analysis); "expected" rows are the arithmetic + must be confirmed by the founder running §2 above. Quota monitor ran ~2h → disk grant never landed (Google review slow).
+
+| Step | Config | Job wall time | Peak parallel render | Per-clip compute | Quality | How measured |
+|------|--------|---------------|----------------------|------------------|---------|--------------|
+| **BASELINE (measured)** | 32GiB disk, region 100GiB quota | **~19 min** (30 clips) | **2–3** | ~50s (reframe ~30s of which ASD 15–30s + encode 11–25s) | current | real job `02839ea3690c` 2026-07-09, log overlap analysis |
+| Disk 16Gi (expected) | 16GiB disk, 100GiB quota | ~8–10 min | ~5–6 | unchanged | identical (no render-code change) | **founder to confirm** (§1 hedge + §2) |
+| Disk grant (expected) | 32GiB disk, 2TiB quota | ~5 min | up to 12 | unchanged | identical | **founder to confirm** (§1 wait + §2) |
+| Segmentation WS3 (target) | tiny disk (8Gi), quota non-binding | ~5 min + big-video support | 12+ | **PSNR=inf REQUIRED** | must prove | needs verify harness + visual sign-off |
+| Spawn-retry (committed) | — | protects wall time under 5+ concurrent job starts (60/min RunJob limit) | — | — | n/a | TDD only (behavioral, no bench) |
 
 ---
 
