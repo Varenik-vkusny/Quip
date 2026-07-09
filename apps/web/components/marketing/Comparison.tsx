@@ -1,6 +1,5 @@
 import { Check, Minus } from "lucide-react";
 import { Container } from "@/components/ui/Container";
-import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Logo } from "@/components/ui/Logo";
 import { Reveal } from "@/components/ui/Reveal";
 import { Section } from "@/components/ui/Section";
@@ -24,7 +23,6 @@ export function Comparison() {
       <Container>
         <Reveal>
           <SectionHeading
-            eyebrow="04 / The difference"
             title="More clips was never the problem."
             lead="The bottleneck isn't quantity. It's knowing which moment is worth your audience's attention — and Quip optimizes for that."
           />
@@ -39,7 +37,7 @@ export function Comparison() {
                 <Logo href={null} size="sm" />
               </div>
               <div className="border-l border-line p-5">
-                <Eyebrow tone="faint">Volume clippers</Eyebrow>
+                <span className="text-[13px] font-medium text-faint">Volume clippers</span>
               </div>
             </div>
             {/* rows — stacked card on mobile, 3-col table row from sm: */}
@@ -49,15 +47,15 @@ export function Comparison() {
                 className={cn("block border-t border-line first:border-t-0 sm:border-t-0", GRID)}
               >
                 <div className="p-5 pb-2 sm:pb-5">
-                  <Eyebrow tone="faint">{r.dim}</Eyebrow>
+                  <span className="text-[13px] font-medium text-faint">{r.dim}</span>
                 </div>
                 {/* Quip column — the focal side: full-ink copy + coral check, lit surface */}
                 <div className="flex items-start gap-2.5 bg-bg px-5 pb-3 text-sm text-ink sm:border-l sm:border-line sm:py-5">
                   <Check className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
                   <span>
-                    <Eyebrow tone="faint" className="mb-1 block sm:hidden">
+                    <span className="mb-1 block text-[12px] font-medium text-faint sm:hidden">
                       Quip
-                    </Eyebrow>
+                    </span>
                     {r.quip}
                   </span>
                 </div>
@@ -65,9 +63,9 @@ export function Comparison() {
                 <div className="flex items-start gap-2.5 px-5 pb-5 text-sm text-faint sm:border-l sm:border-line sm:py-5">
                   <Minus className="mt-0.5 size-4 shrink-0 text-faint" aria-hidden />
                   <span>
-                    <Eyebrow tone="faint" className="mb-1 block sm:hidden">
+                    <span className="mb-1 block text-[12px] font-medium text-faint sm:hidden">
                       Volume clippers
-                    </Eyebrow>
+                    </span>
                     {r.them}
                   </span>
                 </div>

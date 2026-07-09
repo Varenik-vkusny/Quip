@@ -1,109 +1,110 @@
 import { Check } from "lucide-react";
 import { CheckoutCta } from "@/components/ui/CheckoutCta";
-import { Eyebrow } from "@/components/ui/Eyebrow";
-import { Numeral } from "@/components/ui/Numeral";
 import { Reveal } from "@/components/ui/Reveal";
 import { cn } from "@/lib/cn";
 import { PAYG, PLANS } from "@/lib/plans";
 import { checkoutHref, paygCheckoutHref } from "@/lib/polar";
 
 // ────────────────────────────────────────────────────────────────────────────
-// PricingCards — three plan panels (shared by landing section + /pricing) + a
-// pay-as-you-go strip. Warm Precision: hairline panels on near-black, every
-// price/limit in mono tabular numerals (the data signature), and the coral accent
-// reserved for the ONE recommended plan (badge + ring + lit surface). Panels lift
-// tactilely on hover (transform only); radius-lg discipline throughout.
+// PricingCards (/pricing): plan panels plus a pay-as-you-go strip, in visual
+// parity with the landing pricing section (components/landing/sections/Pricing.tsx):
+// soft bg-surface cards with shadow-card + rounded-card, prices in mono numerals
+// (.num), the accent spent only on the ONE recommended plan (inset ring + badge +
+// gold CTA), everything else quiet. Non-recommended cards get the .lift hover.
+// The --ease-out var is landing-scoped (.grain), so it is set locally here to keep
+// .lift transitions eased outside the landing.
 // ────────────────────────────────────────────────────────────────────────────
+
+const EASE = "[--ease-out:cubic-bezier(0.23,1,0.32,1)]";
 
 export function PricingCards() {
   return (
     <>
       <Reveal>
-        <div className="mx-auto grid max-w-6xl items-stretch gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        <div
+          className={cn(
+            "mx-auto grid max-w-6xl items-stretch gap-4 sm:grid-cols-2 lg:grid-cols-4",
+            EASE,
+          )}
+        >
           {PLANS.map((plan) => {
             const recommended = plan.recommended ?? false;
             return (
               <div
                 key={plan.id}
                 className={cn(
-                  "group relative flex flex-col rounded-lg border p-7",
-                  "transition duration-200 ease-snappy hover:-translate-y-1",
+                  "relative flex h-full flex-col overflow-hidden rounded-card bg-surface p-7 sm:p-8",
                   recommended
-                    ? "border-accent-line bg-surface-2 ring-1 ring-accent-line"
-                    : "border-line bg-surface hover:border-line-strong",
+                    ? "shadow-[var(--t-shadow-card),inset_0_0_0_1.5px_var(--t-accent-line)]"
+                    : "lift shadow-card",
                 )}
               >
-                {recommended && (
-                  // Near-black on coral: white-on-coral is only 3.09:1 (fails AA for
-                  // small text); dark text on the same coral clears 5.5:1. The coral pill
-                  // is itself the scarce signal — no decorative icon needed.
-                  <span className="absolute -top-3 left-7 inline-flex items-center rounded-pill bg-accent px-3 py-1 font-mono text-eyebrow font-semibold uppercase text-bg">
-                    Recommended
-                  </span>
-                )}
-
-                <div className="flex items-baseline justify-between gap-2">
-                  <h2 className="font-display text-h3 text-ink">{plan.name}</h2>
-                  <Eyebrow tone="faint">{recommended ? "Best value" : "Plan"}</Eyebrow>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-[1.125rem] font-semibold tracking-[-0.01em] text-ink">
+                    {plan.name}
+                  </h2>
+                  {recommended && (
+                    <span className="rounded-pill bg-accent px-2.5 py-1 text-[11px] font-semibold leading-none text-on-accent">
+                      Recommended
+                    </span>
+                  )}
                 </div>
-                <p className="mt-1 text-sm text-muted">{plan.tagline}</p>
+                <p className="mt-1.5 text-[13.5px] text-muted">{plan.tagline}</p>
 
                 <div className="mt-6 flex items-baseline gap-1.5">
-                  <Numeral className="text-display-lg font-semibold leading-none tracking-tight text-ink">
-                    ${plan.price}
-                  </Numeral>
-                  <Eyebrow tone="faint">/ month</Eyebrow>
+                  <span className="num text-[42px] font-medium text-ink">${plan.price}</span>
+                  <span className="font-mono text-[13px] text-muted">/ month</span>
                 </div>
+                <p className="mt-2 text-[13px] text-faint">{plan.limit}</p>
+                <p className="mt-1 text-xs leading-snug text-faint">{plan.limitNote}</p>
 
-                {/* Headline limit — the thing a buyer actually compares, as a readout. */}
-                <div className="mt-5 border-y border-line py-4">
-                  <Eyebrow tone="faint">Monthly limit</Eyebrow>
-                  <p className="mt-1.5 font-mono text-base font-semibold tabular-nums text-ink">
-                    {plan.limit}
-                  </p>
-                  <p className="mt-1 text-xs leading-snug text-muted">{plan.limitNote}</p>
-                </div>
-
-                {/* Recommended CTA = near-white primary (highest contrast + the site's
-                    established primary-CTA style). Coral emphasis lives in the ring +
-                    badge, keeping the accent scarce and AA-clean. */}
-                <CheckoutCta
-                  href={checkoutHref(plan.id)}
-                  variant={recommended ? "primary" : "secondary"}
-                  size="md"
-                  className="mt-6 w-full"
-                >
-                  {plan.cta}
-                </CheckoutCta>
-
-                <ul className="mt-7 space-y-3 border-t border-line pt-7">
+                <ul className="mt-7 flex flex-1 flex-col gap-3">
                   {plan.features.map((f) => (
-                    <li key={f} className="flex items-start gap-2.5 text-sm text-muted">
-                      <Check className="mt-0.5 size-4 shrink-0 text-faint" aria-hidden />
+                    <li key={f} className="flex gap-2.5 text-[14px] leading-snug text-muted">
+                      <Check
+                        className={cn(
+                          "mt-0.5 size-3.5 shrink-0",
+                          recommended ? "text-ok" : "text-faint",
+                        )}
+                        aria-hidden
+                      />
                       <span>{f}</span>
                     </li>
                   ))}
                 </ul>
+
+                {/* Recommended CTA is the one gold action (bg-accent text-on-accent via
+                    the accent button variant); everything else stays quiet. */}
+                <CheckoutCta
+                  href={checkoutHref(plan.id)}
+                  variant={recommended ? "accent" : "secondary"}
+                  size="md"
+                  className="mt-8 w-full"
+                >
+                  {plan.cta}
+                </CheckoutCta>
               </div>
             );
           })}
         </div>
       </Reveal>
 
-      {/* Pay-as-you-go — no subscription, credits never expire. A slim inline action. */}
+      {/* Pay-as-you-go strip: no subscription, credits never expire. */}
       <Reveal>
-        <div className="mx-auto mt-5 flex max-w-6xl flex-col items-start gap-5 rounded-lg border border-line bg-surface p-7 transition duration-200 ease-snappy hover:border-line-strong sm:flex-row sm:items-center sm:justify-between">
+        <div
+          className={cn(
+            "lift mx-auto mt-4 flex max-w-6xl flex-col items-start justify-between gap-4 rounded-[14px] bg-surface px-7 py-5 shadow-card sm:flex-row sm:items-center",
+            EASE,
+          )}
+        >
           <div>
-            <Eyebrow tone="faint">Pay as you go</Eyebrow>
-            <p className="mt-2 font-display text-h3 text-ink">{PAYG.title}</p>
-            <p className="mt-1 max-w-md text-sm leading-relaxed text-muted">{PAYG.body}</p>
+            <p className="text-[15px] font-semibold text-ink">{PAYG.title}</p>
+            <p className="mt-1 max-w-md text-[13.5px] leading-relaxed text-muted">{PAYG.body}</p>
           </div>
-          <div className="flex shrink-0 items-center gap-5 sm:flex-col sm:items-end sm:gap-2">
+          <div className="flex shrink-0 items-center gap-5">
             <div className="flex items-baseline gap-1.5">
-              <Numeral className="text-h2 font-semibold tracking-tight text-ink">
-                ${PAYG.pricePerVideo}
-              </Numeral>
-              <Eyebrow tone="faint">/ video</Eyebrow>
+              <span className="num text-[20px] font-medium text-ink">${PAYG.pricePerVideo}</span>
+              <span className="font-mono text-[12px] text-muted">/ video</span>
             </div>
             <CheckoutCta href={paygCheckoutHref()} variant="secondary" size="md">
               {PAYG.cta}
@@ -112,9 +113,9 @@ export function PricingCards() {
         </div>
       </Reveal>
 
-      <Eyebrow as="p" tone="faint" className="mt-8 text-center">
+      <p className="mt-6 text-center text-[13.5px] text-faint">
         Prices in USD · cancel anytime · monthly credits reset · pay-as-you-go never expires
-      </Eyebrow>
+      </p>
     </>
   );
 }
