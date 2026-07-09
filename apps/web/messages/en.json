@@ -205,7 +205,8 @@
     "longerMaxClip": "Longer maximum",
     "starting": "Starting…",
     "makeClips": "Make clips",
-    "creditNote": "Length must fit your remaining minutes — a short video uses only its length; 1 video ≈ 60 min."
+    "creditNote": "Length must fit your remaining minutes. A short video uses only its length; 1 video ≈ 60 min.",
+    "videoTooShort": "This video is only {dur}s, shorter than your minimum clip length of {min}s. Lower the minimum or upload a longer video."
   },
   "clipGrid": {
     "preparingBatch": "Preparing {done} of {total}…",

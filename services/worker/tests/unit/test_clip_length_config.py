@@ -37,7 +37,7 @@ def _raw_segment(start_word: int, end_word: int, **kw: float) -> dict:
 class TestSelectSegmentsValidation:
     def test_raises_when_min_exceeds_duration(self) -> None:
         tr = Transcript(language="en", duration=10.0, words=_words(10))
-        with pytest.raises(JobError, match="no segment can satisfy"):
+        with pytest.raises(JobError, match="shorter than the minimum"):
             select_segments(tr, "title", clip_min_sec=30, clip_max_sec=60)
 
     def test_raises_when_min_exceeds_max(self) -> None:

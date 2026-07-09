@@ -939,8 +939,9 @@ def select_segments(
     if min_sec > transcript.duration:
         raise JobError(
             _STAGE,
-            f"min_sec={min_sec:.0f}s > video duration={transcript.duration:.0f}s: "
-            "no segment can satisfy the minimum length",
+            f"This video is only {transcript.duration:.0f}s long, shorter than the minimum "
+            f"clip length of {min_sec:.0f}s. Upload a longer video (Quip is built for "
+            "podcasts, interviews and talks) or lower the minimum clip length.",
         )
     n_clips = resolve_max_clips(max_clips, s.max_clips)
     words = transcript.words

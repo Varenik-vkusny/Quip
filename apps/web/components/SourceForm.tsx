@@ -69,11 +69,18 @@ export function SourceForm({
   // refuses an empty/partial state.
   const [minDraft, setMinDraft] = useState(String(DEFAULT_MIN_SEC));
   const [maxDraft, setMaxDraft] = useState(String(DEFAULT_MAX_SEC));
+  // Duration (seconds) of the picked file, probed client-side, so we can warn BEFORE
+  // upload if it's shorter than the minimum clip length. null = unknown / not probable.
+  const [fileDuration, setFileDuration] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const urlValid = isLikelyYoutubeUrl(url);
+  // Pre-flight: a video shorter than the minimum clip length is an impossible request
+  // (the pipeline would fail deep in select). Catch it here so we never upload+process
+  // it. Fail-open when the duration is unknown (null) — the worker still guards it.
+  const videoTooShort = file != null && fileDuration != null && fileDuration < clipMinSec;
   // A file always wins; otherwise a valid YouTube link (only if the link path is wired in).
-  const canSubmit = !busy && (file != null || (onSubmit != null && urlValid));
+  const canSubmit = !busy && !videoTooShort && (file != null || (onSubmit != null && urlValid));
   const clamp = (n: number) => Math.max(MIN_CLIPS, Math.min(MAX_CLIPS, n));
   // Auto → шлём потолок (30): воркер вернёт ДО стольких сильных моментов, сколько найдёт.
   const clipsRequested = auto ? MAX_CLIPS : count;
@@ -99,6 +106,7 @@ export function SourceForm({
 
   function pickFile(f: File | null) {
     setFileError(null);
+    setFileDuration(null);
     if (!f) {
       setFile(null);
       return;
@@ -114,6 +122,21 @@ export function SourceForm({
       return;
     }
     setFile(f);
+    // Probe the duration off a throwaway <video> so the min-length pre-flight can fire
+    // before we ever upload. Best-effort: containers the browser can't decode leave it null.
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    const objUrl = URL.createObjectURL(f);
+    probe.onloadedmetadata = () => {
+      const d = probe.duration;
+      setFileDuration(Number.isFinite(d) && d > 0 ? d : null);
+      URL.revokeObjectURL(objUrl);
+    };
+    probe.onerror = () => {
+      setFileDuration(null);
+      URL.revokeObjectURL(objUrl);
+    };
+    probe.src = objUrl;
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -444,6 +467,12 @@ export function SourceForm({
           </div>
         </div>
       </div>
+
+      {videoTooShort && (
+        <p className="mt-4 text-sm text-warn">
+          {t("videoTooShort", { dur: Math.round(fileDuration ?? 0), min: clipMinSec })}
+        </p>
+      )}
 
       <Button
         type="submit"
