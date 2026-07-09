@@ -9,6 +9,7 @@ import {
   useReducedMotion,
 } from "motion/react";
 import { List, X } from "@phosphor-icons/react/dist/ssr";
+import Image from "next/image";
 import { useLocale } from "next-intl";
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
@@ -16,19 +17,17 @@ import { resolveLocale } from "@/i18n/locale";
 import { getLandingContent, ROUTES } from "@/lib/landingContent";
 import { PrimaryCTA } from "../components/CTA";
 
-/* Brand mark — Signal Gold rounded square + ink play triangle. Inline SVG so it
-   follows the theme tokens (gold flips shade between stage and studio). */
 export function Logo() {
   return (
     <a href="#top" className="flex items-center gap-2.5" aria-label="Quip home">
-      <span className="grid size-7 place-items-center rounded-[9px] bg-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.35),inset_0_-1px_0_rgba(0,0,0,0.12)]">
-        <svg width="11" height="13" viewBox="0 0 12 14" fill="none" aria-hidden>
-          <path
-            d="M1.5 1.9c0-.9 1-1.5 1.8-1L11 5.8c.8.5.8 1.7 0 2.2l-7.7 4.9c-.8.5-1.8-.1-1.8-1V1.9Z"
-            fill="var(--t-on-accent)"
-          />
-        </svg>
-      </span>
+      <Image
+        src="/icon.png"
+        alt=""
+        width={28}
+        height={28}
+        className="shrink-0 rounded-[7px]"
+        aria-hidden
+      />
       <span className="text-[19px] font-bold tracking-[-0.02em] text-ink">Quip</span>
     </a>
   );
