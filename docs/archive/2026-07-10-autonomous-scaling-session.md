@@ -83,8 +83,21 @@ gcloud run services update quip-api  --region=europe-west1 --image=$IMG
 ```
 Rollback: same with the current digest `sha256:13db1ee4944d364986409a426d3a6e9d21de2607fb799679e0c0b52a801cbbbc`.
 
-### 4. WS2 dedup (once merged) — apply migration then the image (step 3) is enough
-Run `services/worker/migrations/0018_source_dedup.sql` in the Supabase SQL editor, then `NOTIFY pgrst, 'reload schema';`. Backend is safe (per-user, no reframe). Frontend fingerprint wiring is a documented follow-up (not built tonight).
+### 4. WS2 dedup — COMMITTED (`879c834`), backend done. To ship: migration + image (step 3).
+Run `services/worker/migrations/0018_source_dedup.sql` in the Supabase SQL editor, then `NOTIFY pgrst, 'reload schema';`, then deploy the image (step 3). Backend is safe (per-user, IDOR-oracle-closed, no reframe, 20 tests). New endpoint `POST /jobs/check-duplicate`. Frontend fingerprint wiring (`apps/web/lib/contentFingerprint.ts` + dashboard call) is a documented follow-up (not built tonight — see the dedup blueprint in this session).
+
+---
+
+## 🧾 SESSION RESULT — branch `feat/scaling-2026-07-10` (4 commits, all `just check` green)
+| Commit | What | State |
+|---|---|---|
+| `f8a5791` | spawn-retry (RunJob ResourceExhausted backoff) + deploy.ps1 drift fix + runbook | ready to deploy (step 3) |
+| `3e476c1` | WS3 segment-extraction CORE (frame-exact math + I/O, 198 tests) | foundation only — NOT wired, needs render-proof + your sign-off |
+| `6500375` | founder morning-actions runbook + headless trigger script | docs |
+| `879c834` | WS2 per-user dedup backend (dedup.py, storage/db/cloud_state, migration 0018, endpoint, 20 tests) | ready to deploy (migration + step 3) |
+| — | quota: memory→2TiB GRANTED; disk→2TiB + instances→300 PENDING Google review (>2h, slow) | you expedite in Console or use the §1 disk-16Gi hedge |
+| — | ROOT CAUSE: regional ephemeral-disk quota 100GiB ÷ 32GiB/container = ~3 parallel (not RENDER_FANOUT_MAX=12) | the real "dumb error" — fixed by quota grant OR §1 hedge OR WS3 |
+Nothing deployed by me (classifier-blocked). All safe on the branch; `git checkout main` reverts everything.
 
 ### 5. WS3 segmentation — DO NOT deploy without frame-by-frame proof (see WS3 section above)
 
