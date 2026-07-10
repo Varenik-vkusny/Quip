@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     # ~$9/1M = ×10 к стоимости LLM молча. 2.5-flash стабильна на платном ключе, дёшева.
     llm_model: str = "gemini-2.5-flash"
     llm_max_output_tokens: int = 16000
+    # Reasoning для стадии ОТБОРА (Машина A, спека 2026-07-11 §5.1): thinking_budget>0 включает
+    # «thinking» у Gemini 2.5 Flash. Отбор «какой момент виральный» — задача НА РАССУЖДЕНИЕ; раньше
+    # было 0 (выкл) → модель брала первый «складный» кусок = generic (кейс clip_10). Отдельный knob:
+    # узкие вызовы (hook-regen/chapters) остаются на 0 (CoT не нужен). Дороже, но качество отбора —
+    # приоритет. 0 = прежнее поведение.
+    select_thinking_budget: int = 8192
 
     @field_validator("llm_model", mode="after")
     @classmethod

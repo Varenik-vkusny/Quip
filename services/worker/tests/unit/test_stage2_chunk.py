@@ -202,7 +202,15 @@ def _fake_gemini(fail_starts: frozenset[int] = frozenset(), usage: dict | None =
     ОДИН валидный сегмент в этом окне. fail_starts → JobError для этих окон (тест правила №8).
     """
 
-    def fake(user_prompt, *, system_prompt, response_schema, stage="select", usage_sink=None):  # type: ignore[no-untyped-def]
+    def fake(
+        user_prompt,
+        *,
+        system_prompt,
+        response_schema,
+        stage="select",
+        usage_sink=None,
+        thinking_budget=0,
+    ):  # type: ignore[no-untyped-def]  # noqa: E501
         idxs = [int(m) for m in re.findall(r"\[(\d+)\]", user_prompt)]
         a = min(idxs)
         if a in fail_starts:
@@ -235,6 +243,7 @@ def _chunk_settings(**over):  # type: ignore[no-untyped-def]
         select_chunk_enabled=True,
         select_chunk_target_sec=240,
         select_chunk_overlap_sec=48,
+        select_thinking_budget=0,
     )
     base.update(over)
     return SimpleNamespace(**base)

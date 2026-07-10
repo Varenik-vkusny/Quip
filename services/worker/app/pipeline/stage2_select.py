@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.errors import JobError
 from app.models import ClipType, Segment, Transcript, Word
+from app.pipeline.cut_boundary import _is_sentence_end, snap_start_off_banlist
 
 _STAGE = "select"
 # Потолок попыток на primary. Долбимся МНОГО (Google регулярно отдаёт транзиентные 429/503 —
@@ -36,8 +37,6 @@ _MAX_ATTEMPTS = 20
 _FALLBACK_MODELS = ("gemini-2.5-flash-lite",)
 
 # ─────────────────────────── pure-постобработка (unit-тесты) ───────────────────────────
-
-_SENT_END = (".", "!", "?")
 
 # A2: слова-паразиты (filler). Deepgram `filler_words=true` (stage1_transcribe) отдаёт им реальные
 # таймстемпы, но inline в транскрипте — их ничто детерминированно не срезает у краёв клипа. Набор
@@ -148,10 +147,6 @@ def resolve_max_clips(requested: int | None, default: int, *, lo: int = 1, hi: i
     """
     n = default if requested is None else requested
     return max(lo, min(hi, n))
-
-
-def _is_sentence_end(text: str) -> bool:
-    return text.strip().rstrip("\"'»").endswith(_SENT_END)
 
 
 def _primary_speaker(words: list[Word], start_idx: int, end_idx: int) -> int | None:
@@ -512,6 +507,11 @@ def postprocess(
             # A1: детерминированный снап к границам предложений (start первым — от него зависит
             # speaker-aware логика конца). A2: аудио-слой поверх (no-op без loudness).
             si = snap_start_index(words, si)
+            # Машина B (спека §6): реснэп с ЗАПРЕЩЁННОГО зачина (союз/дейктик/филлер) — клип не
+            # открывается словом-связкой (прямой кейс clip_10 «Тут я сначала…»). snap_start_index
+            # даёт лишь ГРАНИЦУ предложения; это гарантирует, что предложение — не «вода». No-op на
+            # чистом зачине. ei ещё сырой (LLM) — служит верхней границей, дальше него не уходим.
+            si = snap_start_off_banlist(words, si, ei)
             ei = snap_end_index(words, ei, start_idx=si, min_dur_sec=min_sec)
             if loudness:
                 si, ei = refine_boundaries_audio(words, loudness, si, ei)
@@ -809,13 +809,15 @@ def build_user_prompt(
         f"{lang_reminder}\n"
         f"Word-indexed transcript (each line starts with the index of its first word):\n"
         f"{indexed}\n\n"
-        f"HARD length limit: every clip MUST be between {min_sec:.0f} and {max_sec:.0f} seconds. "
-        f"Vertical shorts loop instantly, so a clip longer than {max_sec:.0f}s will be REJECTED. "
-        f"If a strong moment runs longer, pick the single strongest {min_sec:.0f}-{max_sec:.0f}s "
-        f"window inside it (clean sentence start AND clean sentence end) instead of skipping it.\n"
-        f"Surface up to {max_clips} of the strongest non-overlapping moments as word index "
-        f"ranges. Include every genuinely strong standalone moment (the user will choose among "
-        f"them) — do NOT artificially limit to a few; but never pad with weak ones."
+        f"LENGTH: the ARC decides the clip length — pick the SHORTEST cut that keeps the hook AND "
+        f"the full payoff (completion % beats raw seconds). Every clip MUST be between "
+        f"{min_sec:.0f} and {max_sec:.0f} seconds: a clip over {max_sec:.0f}s is rejected (hard "
+        f"cap), so if a moment runs longer pick a tighter self-contained sub-window (clean hook "
+        f"start AND clean payoff end) — but NEVER truncate the payoff, and NEVER pad a thin moment "
+        f"to reach {min_sec:.0f} seconds.\n"
+        f"Surface up to {max_clips} of the strongest non-overlapping moments as word index ranges, "
+        f"spread across the WHOLE video — include every genuinely strong standalone moment (the "
+        f"user will choose among them), but never pad with weak ones."
     )
 
 
@@ -826,6 +828,7 @@ def call_gemini_structured(
     response_schema: type[BaseModel],
     stage: str = _STAGE,
     usage_sink: dict[str, int] | None = None,
+    thinking_budget: int = 0,
 ) -> str:
     """Вызов Gemini structured output с ретраями → сырой JSON-текст ответа.
 
@@ -848,10 +851,12 @@ def call_gemini_structured(
         response_mime_type="application/json",
         response_schema=response_schema,
         max_output_tokens=s.llm_max_output_tokens,
-        # thinking_budget=0 ВЫКЛЮЧАЕТ «thinking» у Gemini 2.5 Flash. Иначе thinking-токены
-        # съедают max_output_tokens → на сам structured-JSON остаётся мало → ответ
-        # обрывается на полуслове («Unterminated string»). Для выбора индексов CoT не нужен.
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        # thinking_budget управляет «thinking» у Gemini 2.5 Flash. 0 = ВЫКЛ (узкие вызовы
+        # hook-regen/chapters — CoT не нужен). Стадия ОТБОРА передаёт s.select_thinking_budget>0:
+        # «какой момент виральный» — задача на РАССУЖДЕНИЕ (спека §5.1). ВАЖНО: thinking НЕ должен
+        # съедать max_output_tokens и обрывать JSON («Unterminated string») — 16000 с запасом на
+        # structured-ответ (~n_clips сегментов); проверяем на реальном прогоне.
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
     )
 
     resp: Any = None
@@ -959,6 +964,7 @@ def select_segments(
             response_schema=_LlmSelection,
             stage=_STAGE,
             usage_sink=usage_sink,
+            thinking_budget=s.select_thinking_budget,
         )
         try:
             raw = json.loads(text).get("segments", [])
@@ -1001,6 +1007,7 @@ def select_segments(
                 response_schema=_LlmSelection,
                 stage=_STAGE,
                 usage_sink=win_usage,
+                thinking_budget=s.select_thinking_budget,
             )
             raw = json.loads(text).get("segments", [])
         except (JobError, json.JSONDecodeError) as e:
