@@ -81,44 +81,71 @@ export function ScrollFx() {
           });
         });
 
-        /* moment map: pin the stage, pan the film-strip horizontally.
-           md+ only — on mobile the strip is a native swipe gallery instead. */
-        const pin = document.querySelector<HTMLElement>("[data-map-pin]");
-        const track = pin?.querySelector<HTMLElement>("[data-map-track]");
-        if (pin && track && window.matchMedia("(min-width: 768px)").matches) {
-          const distance = () => Math.max(0, track.scrollWidth - window.innerWidth);
-          const cards = gsap.utils.toArray<HTMLElement>("[data-map-card]");
+        /* moment reel: fly the camera down a 3D corridor of clips (the hour of
+           conversation, unfolded into depth). Pure CSS-3D transforms driven per
+           frame; GSAP only owns the scrubbed "camera" value + the pin. md+ only —
+           on mobile / reduced-motion the same cards stay a native swipe strip. */
+        const reel = document.querySelector<HTMLElement>("[data-reel-pin]");
+        const scene = reel?.querySelector<HTMLElement>("[data-reel-scene]");
+        if (reel && scene && window.matchMedia("(min-width: 768px)").matches) {
+          const cards = gsap.utils.toArray<HTMLElement>("[data-reel-card]");
+          const STEP = 440; // scroll distance (px) the camera travels per clip
+          reel.classList.add("reel-on");
+          const travel = Math.max(1, cards.length - 1) * STEP;
 
-          // coverflow depth: the card nearest the viewport centre is full size and
-          // bright; its neighbours recede in scale and fade, so the strip reads as a
-          // focused timeline moving THROUGH the frame instead of a flat slide.
-          const applyDepth = () => {
-            const cx = window.innerWidth / 2;
-            const reach = window.innerWidth * 0.44;
-            for (const card of cards) {
-              const r = card.getBoundingClientRect();
-              const d = Math.min(1, Math.abs(r.left + r.width / 2 - cx) / reach);
-              gsap.set(card, {
-                scale: 1.06 - d * 0.26, // focused card pops above 1.0, neighbours recede
-                opacity: 1 - d * 0.62,
-                yPercent: -(1 - d) * 4, // a gentle arc: the card in focus lifts a touch
-                transformOrigin: "center 60%",
-              });
-            }
+          // Perf-safe pseudo-3D: depth is faked with translate + scale + opacity
+          // ONLY (GPU-composited, cheap). No perspective / preserve-3d / rotateY —
+          // those are GPU-bound and fall back to ~2fps software rendering without
+          // GPU accel. The focal clip is large, centred and lit; UPCOMING moments
+          // recede up-and-right toward a vanishing point (a receding trail, so they
+          // never pile on the focal clip); a clip that PASSES the camera swells and
+          // flies off down-left. Reads as flying forward along the reel of moments.
+          const VPx = 320; // trail vanishing point, right of + above the focal clip
+          const VPy = -340;
+          const render = (cam: number) => {
+            const p = cam / STEP; // fractional focal index
+            cards.forEach((el, i) => {
+              const rel = i - p; // 0 = focal, + upcoming (recede), - already passed
+              let scale: number;
+              let x: number;
+              let y: number;
+              let opacity: number;
+              if (rel >= 0) {
+                scale = 1.06 * Math.pow(0.68, rel);
+                const t = 1 - scale / 1.06; // 0 at the focal clip → ~1 far up the trail
+                x = VPx * t;
+                y = VPy * t;
+                opacity = Math.max(0, Math.min(1, 1 - (rel - 2.8) / 1.1));
+              } else {
+                const a = -rel; // how far it has flown past the camera
+                scale = 1.06 * (1 + a * 0.4); // swell + peel off toward lower-left
+                x = -VPx * a * 0.5;
+                y = a * 74;
+                opacity = Math.max(0, 1 - a / 0.7);
+              }
+              el.style.transform =
+                `translate(calc(-50% + ${x.toFixed(1)}px), calc(-50% + ${y.toFixed(1)}px)) ` +
+                `scale(${scale.toFixed(3)})`;
+              el.style.opacity = opacity.toFixed(3);
+              el.style.zIndex = String(3000 - Math.round(Math.abs(rel) * 100));
+              el.classList.toggle("reel-focus", Math.abs(rel) < 0.42);
+            });
           };
+          render(0);
 
-          gsap.to(track, {
-            x: () => -distance(),
+          const cam = { v: 0 };
+          gsap.to(cam, {
+            v: travel + 220,
             ease: "none",
             scrollTrigger: {
-              trigger: pin,
+              trigger: reel,
               start: "top top",
-              end: () => `+=${distance()}`,
+              end: () => `+=${Math.round((travel + 220) * 0.72)}`,
               pin: true,
-              scrub: 1,
+              scrub: 0.5,
               invalidateOnRefresh: true,
-              onUpdate: applyDepth,
-              onRefresh: applyDepth,
+              onUpdate: () => render(cam.v),
+              onRefresh: () => render(cam.v),
             },
           });
         }

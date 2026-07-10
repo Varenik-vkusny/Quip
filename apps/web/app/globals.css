@@ -347,6 +347,28 @@ input[type="range"].range-touch::-moz-range-thumb {
   }
 }
 
+/* hero entrance — LOAD-triggered, never IntersectionObserver-gated, so it can
+   never stall the way a whileInView reveal does in a background/bfcache/headless
+   tab. Content is visible by DEFAULT (base computed opacity is 1); JS + motion-ok
+   layers a one-shot rise ON TOP via `animation` (which always completes on load).
+   Reduced-motion or no-JS => no animation, content simply visible. Stagger comes
+   from an inline animation-delay per element. */
+@media (prefers-reduced-motion: no-preference) {
+  .js .hero-rise {
+    animation: heroRise 0.7s var(--ease-out-strong) both;
+  }
+}
+@keyframes heroRise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* manifesto words start dimmed ONLY when JS can bring them back (ScrollFx scrub);
    crawlers, no-JS, and reduced-motion always read the full line. */
 @media (prefers-reduced-motion: no-preference) {
@@ -449,4 +471,81 @@ input[type="range"].range-touch::-moz-range-thumb {
 .edge-fade {
   -webkit-mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
   mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+}
+
+/* ─────────────────── MomentMap "Reel": 3D flythrough ───────────────────
+   The hour of conversation as a corridor of vertical clips receding into
+   space; ScrollFx flies the camera along it and ignites each moment as it
+   passes the focal plane. Pure CSS 3D (GPU-composited transforms) + GSAP,
+   NO WebGL. Progressive enhancement: by DEFAULT the same cards are a
+   readable horizontal swipe strip (no-JS / reduced-motion / crawlers /
+   mobile). ScrollFx adds `.reel-on` to switch them into the 3D corridor. */
+.reel-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.reel-scene {
+  display: flex;
+  width: 100%;
+  gap: 1.25rem;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding-inline: max(24px, calc((100vw - 1200px) / 2 + 32px));
+  padding-bottom: 6px;
+  scrollbar-width: none;
+}
+.reel-scene::-webkit-scrollbar {
+  display: none;
+}
+.reel-card {
+  flex: 0 0 auto;
+  width: 224px;
+  scroll-snap-align: start;
+}
+
+/* ── enhanced: the same cards become a 3D corridor ── */
+.reel-on .reel-stage {
+  display: block;
+}
+.reel-on .reel-scene {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: visible;
+  padding: 0;
+}
+.reel-on .reel-card {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: 224px;
+  margin: 0;
+  transform-origin: center center;
+  will-change: transform, opacity;
+  transition: box-shadow 0.35s var(--ease-out-strong);
+}
+.reel-on .reel-card.reel-focus {
+  box-shadow:
+    var(--t-shadow-pop),
+    0 0 0 1.5px var(--t-accent-line);
+}
+/* the moment "ignites" — its timecode chip flips to gold at the focal plane */
+.reel-tc {
+  transition:
+    background-color 0.35s var(--ease-out-strong),
+    color 0.35s var(--ease-out-strong);
+}
+.reel-on .reel-card.reel-focus .reel-tc {
+  background: var(--t-accent);
+  color: var(--t-on-accent);
+}
+
+/* edge vignette so clips melt into the page instead of hard-clipping */
+.reel-vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background: radial-gradient(125% 78% at 50% 47%, transparent 50%, var(--t-bg) 90%);
 }

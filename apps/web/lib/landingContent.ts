@@ -254,7 +254,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       tryFree: "Try it free",
     },
     hero: {
-      eyebrow: "// CLIP STUDIO",
+      eyebrow: "For podcasters, editors & studios",
       headlinePre: "Don't just get clips.",
       headlineMid: "Know ",
       headlineAccent: "why",
@@ -638,7 +638,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
       tryFree: "Попробовать бесплатно",
     },
     hero: {
-      eyebrow: "// СТУДИЯ КЛИПОВ",
+      eyebrow: "Для подкастеров, монтажёров и студий",
       headlinePre: "Не просто клипы.",
       headlineMid: "Знайте, ",
       headlineAccent: "почему",
