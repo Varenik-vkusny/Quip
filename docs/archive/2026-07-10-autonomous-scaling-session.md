@@ -110,7 +110,7 @@ Nothing deployed by me (classifier-blocked). All safe on the branch; `git checko
 | Step | Config | Job wall time | Peak parallel render | Per-clip compute | Quality | How measured |
 |------|--------|---------------|----------------------|------------------|---------|--------------|
 | **BASELINE (measured)** | 32GiB disk, region 100GiB quota | **~19 min** (30 clips) | **2–3** | ~50s (reframe ~30s of which ASD 15–30s + encode 11–25s) | current | real job `02839ea3690c` 2026-07-09, log overlap analysis |
-| Disk 16Gi (expected) | 16GiB disk, 100GiB quota | ~8–10 min | ~5–6 | unchanged | identical (no render-code change) | **founder to confirm** (§1 hedge + §2) |
+| **Disk 16Gi (MEASURED 2026-07-10 06:32–06:48)** | 16GiB disk, 100GiB quota | **16 min total / ~12 min render phase** | **5–6 (measured 5 live)** | unchanged, **0/30 clip failures** | identical (no render-code change) | **REAL prod A/B on founder's Cardi B upload (job_31b01c6ede07, coord quip-pipeline-7hj79). vs baseline: concurrency ~2×, render phase ~1.65×, total ~1.5× (total diluted by fixed transcribe/select ~4min + preview tail).** |
 | Disk grant (expected) | 32GiB disk, 2TiB quota | ~5 min | up to 12 | unchanged | identical | **founder to confirm** (§1 wait + §2) |
 | Segmentation WS3 (target) | tiny disk (8Gi), quota non-binding | ~5 min + big-video support | 12+ | **PSNR=inf REQUIRED** | must prove | needs verify harness + visual sign-off |
 | Spawn-retry (committed) | — | protects wall time under 5+ concurrent job starts (60/min RunJob limit) | — | — | n/a | TDD only (behavioral, no bench) |
