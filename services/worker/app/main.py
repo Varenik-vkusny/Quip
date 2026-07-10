@@ -30,7 +30,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1498,19 +1498,28 @@ def export_clip_captioned_mp4(
     out_rel = f"clips/{clip_id}_captioned.mp4"
     dst = store.data_root() / job_id / out_rel
     # FAST PATH (Level 1, 2026-07-10): un-edited clip (version==1) with a fresh baked captioned in
-    # R2 → STREAM it, skip the on-demand subtitle-burn (~5-15s). Stale-proof gate (fast_export).
+    # R2 → STREAM it straight from R2 to the client, skipping the on-demand burn. Stale-proof
+    # gate (fast_export). ⚠️ We stream (NOT download-to-disk): on Cloud Run the local FS is tmpfs
+    # (RAM), so writing each ~40MB file there and never deleting it OOM-killed the box under
+    # concurrent downloads (empty-body 500s). StreamingResponse holds only ~1MB/chunk in memory.
     # Best-effort: any miss/error falls through to the on-demand render below (never a wrong file).
     if fast_export.should_serve_cached_captioned(db.get_clip_edit_row(job_id, clip_id)):
         try:
-            if not (dst.exists() and dst.stat().st_size > 0):
-                dst.parent.mkdir(parents=True, exist_ok=True)  # fresh api box has no clips/ dir
-                storage.download_clip(job_id, clip_id, dst, variant="captioned")
-            if dst.exists() and dst.stat().st_size > 0:
+            streamed = storage.open_clip_stream(job_id, clip_id, variant="captioned")
+            if streamed is not None:
+                body_iter, size = streamed
                 return _no_referrer(
-                    FileResponse(str(dst), media_type="video/mp4", filename=f"{clip_id}.mp4")
+                    StreamingResponse(
+                        body_iter,
+                        media_type="video/mp4",
+                        headers={
+                            "Content-Length": str(size),
+                            "Content-Disposition": f'attachment; filename="{clip_id}.mp4"',
+                        },
+                    )
                 )
         except Exception as e:  # noqa: BLE001 — cache best-effort; fall through to full render
-            print(f"[export] cached captioned serve failed {job_id}/{clip_id} → full render: {e}")
+            print(f"[export] cached captioned stream failed {job_id}/{clip_id} → full render: {e}")
     try:
         render_edit_to_file(job_id, clip_id, with_subtitles=True, out_rel=out_rel)
     except JobError as e:

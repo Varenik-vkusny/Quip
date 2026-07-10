@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -460,6 +461,37 @@ def download_clip(job_id: str, clip_id: str, dest: Path, *, variant: str = "") -
         )
     except Exception as e:  # noqa: BLE001
         raise JobError("storage", f"R2 download clip {job_id}/{clip_id} failed: {e}") from e
+
+
+def open_clip_stream(
+    job_id: str, clip_id: str, *, variant: str = "", chunk_size: int = 1024 * 1024
+) -> tuple[Iterator[bytes], int] | None:
+    """Открыть baked-клип из R2 как ПОТОК (генератор чанков) + его размер — для отдачи скачивания
+    БЕЗ записи на диск. На Cloud Run локальная ФС = tmpfs (RAM): скачивать 40МБ-файл в неё И копить
+    между запросами (файлы не удаляются) → под конкуррентной нагрузкой инстанс OOM'ится. Стрим из
+    R2 держит в памяти лишь ~``chunk_size``. ``None`` — объекта нет (вызыватель падает в полный
+    рендер). Иные ошибки → JobError (№8, не тихо)."""
+    from botocore.exceptions import ClientError
+
+    s = get_settings()
+    key = storage_object_key(job_id, clip_id, variant=variant)
+    try:
+        obj = _r2_client().get_object(Bucket=s.r2_bucket, Key=key)
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if code in {"NoSuchKey", "NotFound", "404"}:
+            return None
+        raise JobError("storage", f"R2 open clip {job_id}/{clip_id} failed: {e}") from e
+    body = obj["Body"]
+    size = int(obj["ContentLength"])
+
+    def _iter() -> Iterator[bytes]:
+        try:
+            yield from body.iter_chunks(chunk_size=chunk_size)
+        finally:
+            body.close()
+
+    return _iter(), size
 
 
 def fanout_result_key(job_id: str, clip_index: int) -> str:
