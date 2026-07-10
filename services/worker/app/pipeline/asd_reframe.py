@@ -14,7 +14,7 @@ import glob
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +35,11 @@ def _ffmpeg(cmd: list[str]) -> None:
         raise JobError(_STAGE, f"ffmpeg exit code {proc.returncode}: {(proc.stderr or '')[-300:]}")
 
 
-def _crop_faces(track: dict[str, Any], frames: list[Any], crop_scale: float) -> np.ndarray:
-    """Дорожка → стек кадров лица 224×224 (BGR), in-memory. Логика 1:1 как crop_video LR-ASD."""
+def _crop_faces(
+    track: dict[str, Any], get_frame: Callable[[int], Any], crop_scale: float
+) -> np.ndarray:
+    """Дорожка → стек кадров лица 224×224 (BGR). ``get_frame(i)`` отдаёт кадр i ЛЕНИВО (не держим
+    все кадры клипа в RAM — иначе OOM на 4K/длинных). Кроп-математика 1:1 как crop_video LR-ASD."""
     import cv2  # noqa: PLC0415
     from scipy import signal  # noqa: PLC0415
 
@@ -48,7 +51,7 @@ def _crop_faces(track: dict[str, Any], frames: list[Any], crop_scale: float) -> 
         bs = s[i]
         bsi = int(bs * (1 + 2 * crop_scale))
         pad = ((bsi, bsi), (bsi, bsi), (0, 0))
-        img = np.pad(frames[int(fr)], pad, "constant", constant_values=110)
+        img = np.pad(get_frame(int(fr)), pad, "constant", constant_values=110)
         my, mx = y[i] + bsi, x[i] + bsi
         face = img[
             int(my - bs) : int(my + bs * (1 + 2 * crop_scale)),
@@ -137,14 +140,11 @@ def score_tracks_in_segment(
                 "panic",
             ]
         )
-        frames = []
-        for fpath in sorted(glob.glob(str(fdir / "*.jpg"))):
-            img = cv2.imread(fpath)
-            if img is None:
-                raise JobError(_STAGE, f"cannot read frame {fpath}")
-            frames.append(img)
+        # СТРИМИНГ: держим только ПУТИ к JPG (снапшот порядка ОДИН раз), НЕ пиксели → RAM детекта
+        # плоская независимо от длины/разрешения (был список ВСЕХ кадров = OOM 37ГБ на 60с 4K).
+        jpg_paths = sorted(glob.glob(str(fdir / "*.jpg")))
         _phase_add("sample", time.monotonic() - t0)
-        if not frames:
+        if not jpg_paths:
             return []
 
         t0 = time.monotonic()
@@ -154,7 +154,10 @@ def score_tracks_in_segment(
         )
         frame_faces: list[list[dict[str, Any]]] = []
         with mp_vision.FaceDetector.create_from_options(opts) as det:
-            for i, img in enumerate(frames):
+            for i, fpath in enumerate(jpg_paths):
+                img = cv2.imread(fpath)  # ОДИН кадр в полёте (не копим) — тот же decode, что и был
+                if img is None:
+                    raise JobError(_STAGE, f"cannot read frame {fpath}")
                 rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 res = det.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
                 ff: list[dict[str, Any]] = []
@@ -188,11 +191,22 @@ def score_tracks_in_segment(
         )
         t0 = time.monotonic()
         sr, audio = wavfile.read(wav) if score_asd else (0, None)
+
+        # Ленивый провайдер кадров для кропа: перечитываем нужный кадр с ДИСКА (JPG уже там), НЕ
+        # держим весь список в RAM. _crop_faces берёт по одному → пик RAM = стек 224×224 кропов
+        # дорожки (сотни МБ), а не полные кадры (десятки ГБ на 4K). Cache НЕ делаем: он держал бы
+        # полные кадры = снова OOM на длинной непрерывной дорожке.
+        def get_frame(idx: int) -> Any:
+            img = cv2.imread(jpg_paths[idx])
+            if img is None:
+                raise JobError(_STAGE, f"cannot read frame {jpg_paths[idx]}")
+            return img
+
         out: list[SpeakerTrack] = []
         for tr in tracks:
             if score_asd:
                 assert audio is not None  # score_asd → wav прочитан выше
-                faces224 = _crop_faces(tr, frames, crop_scale)
+                faces224 = _crop_faces(tr, get_frame, crop_scale)
                 a0 = int(tr["frame"][0] / fps * sr)
                 a1 = int((tr["frame"][-1] + 1) / fps * sr)
                 sc = score_track(faces224, audio[a0:a1])
