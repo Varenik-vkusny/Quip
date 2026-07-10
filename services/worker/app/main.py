@@ -1503,6 +1503,7 @@ def export_clip_captioned_mp4(
     if fast_export.should_serve_cached_captioned(db.get_clip_edit_row(job_id, clip_id)):
         try:
             if not (dst.exists() and dst.stat().st_size > 0):
+                dst.parent.mkdir(parents=True, exist_ok=True)  # fresh api box has no clips/ dir
                 storage.download_clip(job_id, clip_id, dst, variant="captioned")
             if dst.exists() and dst.stat().st_size > 0:
                 return _no_referrer(
