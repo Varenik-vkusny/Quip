@@ -489,7 +489,7 @@ _между кадрами_ → промах ±1 кадр → вспышка. Н
 | GET       | `/jobs/{id}/timeline` · `/chapters`                                      | TimelineData / AI-карта видео (кэш + bg-генерация)                                      |
 | GET/PATCH | `/jobs/{id}/clips/{clip}/edit`                                           | ClipEdit (создаёт дефолт при первом вызове) / патч                                      |
 | GET       | `…/clips/{clip}/ass` · `/export.srt`                                     | ASS для libass-превью / SRT-экспорт                                                     |
-| GET       | `…/clips/{clip}/export/clean.mp4` · `/captioned.mp4`                     | clean = рендер без субтитров; captioned = **fast-path**: НЕредактир. клип (`version==1`+`render_status==done`) отдаётся из R2 БЕЗ рендера (L1, 2026-07-10), иначе on-demand прожиг |
+| GET       | `…/clips/{clip}/export/clean.mp4` · `/captioned.mp4`                     | clean = рендер без субтитров; captioned = **fast-path**: НЕредактир. клип (`version==1`+`render_status==done`) → **302-редирект на CDN** (api 0 байт; L1, 2026-07-10), иначе on-demand прожиг |
 | POST      | `…/clips/{clip}/edit/{trim,add-section,extend,crop,aspect,set-interval}` | Правки рецепта                                                                          |
 | POST      | `…/clips/{clip}/hook/regenerate`                                         | Регенерация хука (узкий Gemini, W4)                                                     |
 | POST/GET  | `…/clips/{clip}/agent/{start,active,{run},{run}/cancel}`                 | Чат-агент (W3)                                                                          |

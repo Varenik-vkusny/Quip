@@ -93,8 +93,10 @@
 - **Скачивание клипа «С СУБТИТРАМИ» — МГНОВЕННОЕ (пре-выжиг L1+L2, 2026-07-10, LIVE).** Раньше
   `/export/captioned.mp4` жёг субтитры **on-demand на api-контейнере `quip-api`** → под нагрузкой он
   OOM'ил (1CPU/4Gi, лог `Memory limit of 4096 MiB exceeded`) → **504**. Теперь:
-  **(L1)** для НЕредактированного клипа (`version==1` && `render_status=="done"`) эндпоинт отдаёт
-  готовый R2-объект БЕЗ рендера (`fast_export.should_serve_cached_captioned`); **(L2)** фан-аут
+  **(L1)** для НЕредактированного клипа (`version==1` && `render_status=="done"`) эндпоинт даёт
+  **302-редирект на публичный CDN-URL** (`storage.clip_read_url`) — api-контейнер отдаёт 0 байт (⚠️ НЕ
+  качать файл через контейнер: на Cloud Run ФС=RAM → OOM под конкуррентной нагрузкой, см. JOURNAL);
+  **(L2)** фан-аут
   пре-выжигает captioned сразу после `set_clip_ready` (`run.py:render_one_clip` → `ensure_edit` +
   `render_clip_edit_job`, kill-switch `PREBAKE_CAPTIONED=0`). Пруф: **159с→2.5с** (~50-90×), свежая
   джоба → клипы `bake=done v=1` на фан-ауте → скачивание 2.6-3.8с. Band-aid: `quip-api` поднят
@@ -102,7 +104,8 @@
   крутится на джобе **`quip-pipeline`** (её `CLOUDRUN_JOB=quip-pipeline`, роль по `JOB_KIND`), НЕ на
   `quip-render` → L2-код деплой на `quip-pipeline`. Деплой всех 3 workload'ов = `gcloud builds submit
   services/worker --tag …/quip:latest` → `gcloud run jobs update quip-pipeline|quip-render --image=@<sha>`
-  + `gcloud run services update quip-api --image=@<sha>` (образ `sha256:3bc8f20b`). Источники:
+  + `gcloud run services update quip-api --image=@<sha>` (образ `sha256:55afadac`, api rev 00029,
+  8Gi/2CPU). Источники:
   `main.py:export_clip_captioned_mp4`, `fast_export.py`, `run.py`, `tasks.py:render_clip_edit_job`.
   Детали/пруфы → `docs/JOURNAL.md` «2026-07-10».
 - **Латентность фронта воркера (perf, 2026-06-18):** функция `web` (FastAPI) теперь
