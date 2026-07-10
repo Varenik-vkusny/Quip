@@ -3,10 +3,13 @@
 I/O (скачать baked-клип, запустить ffmpeg) — в tasks.render_edit_to_file, не здесь.
 """
 
+import pytest
+
 from app.fast_export import (
     build_composite_ass_cmd,
     can_composite_captions,
     edit_matches_baked,
+    should_serve_cached_captioned,
 )
 from app.models import (
     CaptionStyle,
@@ -134,3 +137,23 @@ def test_composite_cmd_defaults_crf_preset() -> None:
     cmd = build_composite_ass_cmd("a.mp4", "subtitles=a.ass", "b.mp4")
     assert cmd[cmd.index("-crf") + 1] == "20"
     assert cmd[cmd.index("-preset") + 1] == "veryfast"
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (None, False),  # no clip_edits row
+        ({}, False),  # empty row
+        ({"version": 1, "render_status": "done", "render_url": "r2://x/c.mp4"}, True),
+        ({"version": 1, "render_status": "done", "render_url": ""}, False),  # done but no url
+        ({"version": 1, "render_status": "done", "render_url": None}, False),
+        ({"version": 1, "render_status": "rendering", "render_url": "r2://x"}, False),  # not done
+        ({"version": 1, "render_status": "failed", "render_url": None}, False),
+        ({"version": 1, "render_status": None, "render_url": None}, False),  # never rendered
+        # version > 1 == user-edited at least once → distrust snapshot, re-render fresh
+        ({"version": 2, "render_status": "done", "render_url": "r2://x"}, False),
+        ({"version": 5, "render_status": "done", "render_url": "r2://x"}, False),
+    ],
+)
+def test_should_serve_cached_captioned(row: dict[str, object] | None, expected: bool) -> None:
+    assert should_serve_cached_captioned(row) is expected

@@ -219,6 +219,17 @@ def render_one_clip(
     # после заливки → GET /jobs отдаёт его готовым, пока остальные ещё рендерятся (status
     # остаётся "rendering" до set_done). out.name == job_id (на фан-аут-контейнере и локально).
     db.set_clip_ready(out.name, clip_index, video_url)
+    # Level 2 (2026-07-10): best-effort pre-bake the captioned variant so the FIRST grid "download
+    # with subtitles" is instant (/export/captioned.mp4 fast-path) instead of an on-demand
+    # subtitle-burn. Composite-ASS over the just-rendered clean clip (~5-15s, no reframe). Must
+    # not fail the clip (clean = deliverable) → log + continue. Kill-switch PREBAKE_CAPTIONED=0.
+    if os.environ.get("PREBAKE_CAPTIONED", "1") != "0":
+        try:
+            from app.tasks import render_clip_edit_job  # local import: run↔tasks cycle
+
+            render_clip_edit_job(out.name, clip_id)  # → _captioned.mp4 in R2 + render_status=done
+        except Exception as e:  # noqa: BLE001 — pre-bake is an optimization; clip already delivered
+            print(f"  {clip_id}: WARN captioned pre-bake failed: {e}")
     n_fit = sum(1 for r in regions if r.mode == "fit")
     print(
         f"  {clip_id}: {seg.start:.1f}-{seg.end:.1f} face={face_found} "

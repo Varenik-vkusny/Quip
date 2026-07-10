@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import __version__, auth, billing, db, dedup, dispatch, media_token, storage
+from app import __version__, auth, billing, db, dedup, dispatch, fast_export, media_token, storage
 from app.config import bootstrap_env, get_settings
 
 # Локально активируем auth/billing-гейты из .env (как env-vars в проде). Под pytest НЕ
@@ -1496,14 +1496,27 @@ def export_clip_captioned_mp4(
     except (FileNotFoundError, KeyError, JobError) as e:
         raise HTTPException(status_code=404, detail="clip/segment not found") from e
     out_rel = f"clips/{clip_id}_captioned.mp4"
+    dst = store.data_root() / job_id / out_rel
+    # FAST PATH (Level 1, 2026-07-10): un-edited clip (version==1) with a fresh baked captioned in
+    # R2 → STREAM it, skip the on-demand subtitle-burn (~5-15s). Stale-proof gate (fast_export).
+    # Best-effort: any miss/error falls through to the on-demand render below (never a wrong file).
+    if fast_export.should_serve_cached_captioned(db.get_clip_edit_row(job_id, clip_id)):
+        try:
+            if not (dst.exists() and dst.stat().st_size > 0):
+                storage.download_clip(job_id, clip_id, dst, variant="captioned")
+            if dst.exists() and dst.stat().st_size > 0:
+                return _no_referrer(
+                    FileResponse(str(dst), media_type="video/mp4", filename=f"{clip_id}.mp4")
+                )
+        except Exception as e:  # noqa: BLE001 — cache best-effort; fall through to full render
+            print(f"[export] cached captioned serve failed {job_id}/{clip_id} → full render: {e}")
     try:
         render_edit_to_file(job_id, clip_id, with_subtitles=True, out_rel=out_rel)
     except JobError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    path = store.data_root() / job_id / out_rel
-    if not path.exists():
+    if not dst.exists():
         raise HTTPException(status_code=500, detail="render produced no captioned mp4")
-    return _no_referrer(FileResponse(str(path), media_type="video/mp4", filename=f"{clip_id}.mp4"))
+    return _no_referrer(FileResponse(str(dst), media_type="video/mp4", filename=f"{clip_id}.mp4"))
 
 
 # ──────────────── Editor handoff (EDL / FCPXML / markers / VTT / package.zip) ────────────────

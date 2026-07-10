@@ -12,6 +12,8 @@ baked-клип, запустить ffmpeg) живёт в ``tasks.render_edit_to_
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.models import ClipEdit
 
 # Baked-клип всегда рендерится в 9:16 (run.render_one_clip: clamp_output_dims(1080,1920,...)).
@@ -65,6 +67,27 @@ def can_composite_captions(
     if not baked_clip_exists:
         return False
     return edit_matches_baked(edit, seg_start=seg_start, seg_end=seg_end, tol=tol)
+
+
+def should_serve_cached_captioned(edit_row: dict[str, Any] | None) -> bool:
+    """PURE. True ⇔ a baked captioned artifact provably matches the CURRENT edit-state, so
+    ``/export/captioned.mp4`` may STREAM it (skip the on-demand subtitle-burn re-render).
+
+    Gate (ALL required — conservative, correctness over speed):
+      • ``edit_row`` exists (clip has a ``clip_edits`` row);
+      • ``version == 1`` → clip was NEVER user-edited (``ensure_edit`` seeds version=1; the first
+        real ``save_edit`` → 2). So the fan-out / first-export bake (done at version=1) still
+        matches. We do NOT track a per-render version, so any ``version > 1`` (edited ≥ once) →
+        we distrust the snapshot and the caller re-renders fresh (no stale caption, ever);
+      • ``render_status == "done"`` AND ``render_url`` set → a captioned object is in R2.
+    Retention never deletes clip keys → ``status == "done"`` ⇒ the object is present. Any miss →
+    False → caller renders on-demand (today's path).
+    """
+    if not edit_row:
+        return False
+    if edit_row.get("version") != 1:
+        return False
+    return edit_row.get("render_status") == "done" and bool(edit_row.get("render_url"))
 
 
 def build_composite_ass_cmd(
