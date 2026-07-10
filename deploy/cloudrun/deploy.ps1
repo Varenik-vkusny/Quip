@@ -82,7 +82,7 @@ $SECRETS = "SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest," +
 gcloud beta run jobs create quip-pipeline `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=python --args="-m,app.cloudrun_job" `
-  --task-timeout=10800s --max-retries=1 --tasks=1 --parallelism=1 `
+  --task-timeout=28800s --max-retries=1 --tasks=1 --parallelism=1 `
   --cpu=8 --memory=32Gi --execution-environment=gen2 `
   --add-volume=name=tmp,type=ephemeral-disk,size=32Gi `
   --add-volume-mount=volume=tmp,mount-path=/root/data/tmp `
