@@ -4,7 +4,8 @@
 > чтения + «как ставить задачу агенту» + §«Documentation system» — как устроены доки). Затем — правила
 > ниже. Система целиком вглубь → `docs/CORE_ARCHITECTURE_AND_FEATURES.md`; полная история → `docs/JOURNAL.md`.
 >
-> ⚠️ **Реальность (2026-06-24):** продукт ЖИВОЙ — Vercel `quip-app` (автодеплой на push в `main`),
+> ⚠️ **Реальность (2026-06-24):** продукт ЖИВОЙ — Vercel `quip-app` (⚠️ 2026-07-10: деплой фронта ТОЛЬКО
+> вручную через терминал `vercel deploy --prod`, push в `main` фронт НЕ авто-деплоит),
 > Modal `quip-worker`, Supabase (миграции 0001–0014) + R2 + **Polar-биллинг ВКЛЮЧЁН**. Git-remote для
 > пуша = `cloud` (`github.com/akybaevtimur1/Quip`); старый `Varenik-vkusny` suspended. Пометки в истории
 > «auth/оплата = Phase 1+, не трогай» — устарели, всё отгружено.
