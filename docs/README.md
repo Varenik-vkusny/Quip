@@ -5,7 +5,8 @@
 > history, and what you must NOT break. If a doc contradicts this file, **this file wins** for
 > "current reality"; the older doc is kept only for the *why*/history.
 >
-> Last reality check: **2026-06-24.** Docs were reorganized on 2026-06-24 — see **§"Documentation
+> Last reality check: **2026-07-10** (instant captioned download L1+L2 + api 8Gi/2CPU shipped — see
+> Current reality §). Docs were reorganized on 2026-06-24 — see **§"Documentation
 > system"** below for where everything lives and how it stays current. All point-in-time history moved
 > to **`docs/archive/`**; this index + the living docs in `docs/` root are the source of truth.
 
@@ -89,6 +90,21 @@
   (functions `web` / `run_job` / `upload_job` / `render_job` / **`reframe_render_clip`** (per-clip
   fan-out) / **`preview_job`**; `/healthz` → 200). Redeploy = `modal deploy deploy/modal/worker.py`
   (on Windows set `PYTHONIOENCODING=utf-8` first).
+- **Скачивание клипа «С СУБТИТРАМИ» — МГНОВЕННОЕ (пре-выжиг L1+L2, 2026-07-10, LIVE).** Раньше
+  `/export/captioned.mp4` жёг субтитры **on-demand на api-контейнере `quip-api`** → под нагрузкой он
+  OOM'ил (1CPU/4Gi, лог `Memory limit of 4096 MiB exceeded`) → **504**. Теперь:
+  **(L1)** для НЕредактированного клипа (`version==1` && `render_status=="done"`) эндпоинт отдаёт
+  готовый R2-объект БЕЗ рендера (`fast_export.should_serve_cached_captioned`); **(L2)** фан-аут
+  пре-выжигает captioned сразу после `set_clip_ready` (`run.py:render_one_clip` → `ensure_edit` +
+  `render_clip_edit_job`, kill-switch `PREBAKE_CAPTIONED=0`). Пруф: **159с→2.5с** (~50-90×), свежая
+  джоба → клипы `bake=done v=1` на фан-ауте → скачивание 2.6-3.8с. Band-aid: `quip-api` поднят
+  **4→8Gi, 1→2CPU** (настоящий фикс = L1/L2 уводят рендер с api-бокса). ⚠️ **ГОТЧА:** фан-аут рендера
+  крутится на джобе **`quip-pipeline`** (её `CLOUDRUN_JOB=quip-pipeline`, роль по `JOB_KIND`), НЕ на
+  `quip-render` → L2-код деплой на `quip-pipeline`. Деплой всех 3 workload'ов = `gcloud builds submit
+  services/worker --tag …/quip:latest` → `gcloud run jobs update quip-pipeline|quip-render --image=@<sha>`
+  + `gcloud run services update quip-api --image=@<sha>` (образ `sha256:3bc8f20b`). Источники:
+  `main.py:export_clip_captioned_mp4`, `fast_export.py`, `run.py`, `tasks.py:render_clip_edit_job`.
+  Детали/пруфы → `docs/JOURNAL.md` «2026-07-10».
 - **Латентность фронта воркера (perf, 2026-06-18):** функция `web` (FastAPI) теперь
   **`min_containers=1` (всегда тёплая) + `@modal.concurrent(max_inputs=100)`**. Раньше была
   scale-to-zero без concurrency → холодный старт **~5с перед стартом загрузки** (замер: cold 4.9s
