@@ -225,8 +225,13 @@ def render_one_clip(
     # not fail the clip (clean = deliverable) → log + continue. Kill-switch PREBAKE_CAPTIONED=0.
     if os.environ.get("PREBAKE_CAPTIONED", "1") != "0":
         try:
+            from app.editor import store as _edit_store  # local import: run↔editor cycle
             from app.tasks import render_clip_edit_job  # local import: run↔tasks cycle
 
+            # A FRESH auto clip has NO clip_edits row yet; render_edit_to_file does load_edit and
+            # raises "no edit" if absent (then render_clip_edit_job swallows it → silent no-bake).
+            # Seed the default edit (v1) first so the bake actually runs + sets render_status=done.
+            _edit_store.ensure_edit(out.name, clip_id)
             render_clip_edit_job(out.name, clip_id)  # → _captioned.mp4 in R2 + render_status=done
         except Exception as e:  # noqa: BLE001 — pre-bake is an optimization; clip already delivered
             print(f"  {clip_id}: WARN captioned pre-bake failed: {e}")
