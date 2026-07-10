@@ -26,14 +26,39 @@ import { backoffDelay, classifyPartError, fileFingerprint } from "./uploadResili
 // База воркера: реальный worker через env, иначе встроенный мок (/api/mock).
 const BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "/api/mock";
 
+/** PURE. Обновлять ли access_token ПЕРЕД использованием? True, если он истекает в пределах `skewMs`
+ *  (или уже просрочен). Multi-GB заливка (минуты-часы) переживает ~1ч токен → финализация
+ *  (`upload-complete`) со снимком токена со старта ловит 401. Обновляем проактивно у границы. */
+export function shouldRefreshToken(
+  expiresAtSec: number | undefined | null,
+  nowMs: number,
+  skewMs = 120_000,
+): boolean {
+  if (!expiresAtSec) return false;
+  return expiresAtSec * 1000 - nowMs <= skewMs;
+}
+
 /** Текущий Supabase access_token (когда auth настроен), иначе null (dev / auth не подключён).
  *  Единый источник токена: используется и для Authorization-заголовка, и для `?token=` на
- *  медиа-URL (`<video src>` / нативные скачивания не могут выставить заголовок). */
+ *  медиа-URL (`<video src>` / нативные скачивания не могут выставить заголовок).
+ *  У границы истечения — проактивный `refreshSession` (иначе долгая заливка финалит протухшим → 401);
+ *  падение refresh → отдаём текущий токен (никогда не роняем авторизацию в null из-за рефреша). */
 export async function getAccessToken(): Promise<string | null> {
   if (!isSupabaseConfigured) return null;
   try {
-    const { data } = await createSupabaseBrowserClient().auth.getSession();
-    return data.session?.access_token ?? null;
+    const client = createSupabaseBrowserClient();
+    const { data } = await client.auth.getSession();
+    const session = data.session;
+    if (!session) return null;
+    if (shouldRefreshToken(session.expires_at, Date.now())) {
+      try {
+        const { data: r } = await client.auth.refreshSession();
+        return r.session?.access_token ?? session.access_token;
+      } catch {
+        return session.access_token;
+      }
+    }
+    return session.access_token;
   } catch {
     return null;
   }
@@ -488,7 +513,8 @@ async function uploadPartsResilient(
   const refreshPartUrl = async (n: number): Promise<string> => {
     const r = await fetch(`${BASE}/jobs/${opts.jobId}/upload-parts`, {
       method: "POST",
-      headers: { ...opts.headers, "Content-Type": "application/json" },
+      // Fresh auth: on a very long upload the start-of-upload token can expire before a URL renewal.
+      headers: { ...opts.headers, ...(await authHeaders()), "Content-Type": "application/json" },
       body: JSON.stringify({ upload_id: opts.uploadId, part_numbers: [n] }),
       signal: internal.signal,
     });
@@ -612,7 +638,10 @@ async function completeMultipart(
 ): Promise<void> {
   const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
     method: "POST",
-    headers: { ...headers, "Content-Type": "application/json" },
+    // Re-fetch auth FRESH here: this runs at the very END of a possibly multi-GB upload, long after
+    // `headers` was snapshotted at upload start — the snapshot's ~1h token may have expired → 401.
+    // Fresh authHeaders() overrides; `...headers` stays as the dev/no-auth fallback ({}).
+    headers: { ...headers, ...(await authHeaders()), "Content-Type": "application/json" },
     body: JSON.stringify({
       filename: file.name,
       max_clips: maxClips ?? null,
@@ -647,7 +676,7 @@ async function resumeMultipart(
 ): Promise<{ id: string }> {
   const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
     method: "POST",
-    headers: { ...headers, "Content-Type": "application/json" },
+    headers: { ...headers, ...(await authHeaders()), "Content-Type": "application/json" },
     // No part_numbers ⇒ server returns fresh URLs for every not-yet-completed part (the resume case).
     body: JSON.stringify({ upload_id: cp.upload_id, size: file.size }),
     signal,

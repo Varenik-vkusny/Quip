@@ -4,6 +4,7 @@ import {
   clipCaptionedExportUrl,
   clipCleanExportUrl,
   clipSrtUrl,
+  shouldRefreshToken,
   withToken,
 } from "./api";
 
@@ -52,6 +53,37 @@ describe("captionedDownloadUrl", () => {
     expect(captionedDownloadUrl(BASE, JOB, CLIP, null, false)).toBe(
       clipCaptionedExportUrl(BASE, JOB, CLIP),
     );
+  });
+});
+
+describe("shouldRefreshToken (proactive refresh so long uploads don't finalize with a dead token)", () => {
+  const NOW = 1_000_000; // ms; token expiries below are seconds relative to NOW/1000 = 1000s
+
+  it("no expiry info → don't force a refresh", () => {
+    expect(shouldRefreshToken(undefined, NOW)).toBe(false);
+    expect(shouldRefreshToken(null, NOW)).toBe(false);
+    expect(shouldRefreshToken(0, NOW)).toBe(false);
+  });
+
+  it("token comfortably valid (10 min out) → no refresh", () => {
+    expect(shouldRefreshToken(NOW / 1000 + 600, NOW)).toBe(false);
+  });
+
+  it("token within the 120s skew → refresh (this is the 9GB-upload finalize case)", () => {
+    expect(shouldRefreshToken(NOW / 1000 + 60, NOW)).toBe(true);
+  });
+
+  it("token already expired → refresh", () => {
+    expect(shouldRefreshToken(NOW / 1000 - 100, NOW)).toBe(true);
+  });
+
+  it("exactly at the skew boundary → refresh (<=)", () => {
+    expect(shouldRefreshToken(NOW / 1000 + 120, NOW)).toBe(true);
+  });
+
+  it("respects a custom skew window", () => {
+    expect(shouldRefreshToken(NOW / 1000 + 200, NOW, 300_000)).toBe(true);
+    expect(shouldRefreshToken(NOW / 1000 + 200, NOW, 60_000)).toBe(false);
   });
 });
 
