@@ -30,7 +30,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1497,29 +1497,20 @@ def export_clip_captioned_mp4(
         raise HTTPException(status_code=404, detail="clip/segment not found") from e
     out_rel = f"clips/{clip_id}_captioned.mp4"
     dst = store.data_root() / job_id / out_rel
-    # FAST PATH (Level 1, 2026-07-10): un-edited clip (version==1) with a fresh baked captioned in
-    # R2 → STREAM it straight from R2 to the client, skipping the on-demand burn. Stale-proof
-    # gate (fast_export). ⚠️ We stream (NOT download-to-disk): on Cloud Run the local FS is tmpfs
-    # (RAM), so writing each ~40MB file there and never deleting it OOM-killed the box under
-    # concurrent downloads (empty-body 500s). StreamingResponse holds only ~1MB/chunk in memory.
-    # Best-effort: any miss/error falls through to the on-demand render below (never a wrong file).
+    # FAST PATH (Level 1): un-edited clip with a baked captioned in R2 → 302-REDIRECT to the public
+    # CDN URL. The api box transfers ZERO bytes → can't OOM. (Serving it THROUGH the box, whether
+    # download-to-tmpfs or streaming, OOM-killed it: Cloud Run local FS is RAM; 40MB × concurrency
+    # exhausted it → empty-body 500s.) Clip is already public on the CDN (CORS on) → both fetch and
+    # native download follow the redirect. Stale-proof gate; best-effort → falls through to render.
     if fast_export.should_serve_cached_captioned(db.get_clip_edit_row(job_id, clip_id)):
         try:
-            streamed = storage.open_clip_stream(job_id, clip_id, variant="captioned")
-            if streamed is not None:
-                body_iter, size = streamed
-                return _no_referrer(
-                    StreamingResponse(
-                        body_iter,
-                        media_type="video/mp4",
-                        headers={
-                            "Content-Length": str(size),
-                            "Content-Disposition": f'attachment; filename="{clip_id}.mp4"',
-                        },
-                    )
+            return _no_referrer(
+                RedirectResponse(
+                    storage.clip_read_url(job_id, clip_id, variant="captioned"), status_code=302
                 )
+            )
         except Exception as e:  # noqa: BLE001 — cache best-effort; fall through to full render
-            print(f"[export] cached captioned stream failed {job_id}/{clip_id} → full render: {e}")
+            print(f"[export] cached captioned redirect failed {job_id}/{clip_id}: {e}")
     try:
         render_edit_to_file(job_id, clip_id, with_subtitles=True, out_rel=out_rel)
     except JobError as e:
