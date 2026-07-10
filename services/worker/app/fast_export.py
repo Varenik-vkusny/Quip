@@ -70,22 +70,19 @@ def can_composite_captions(
 
 
 def should_serve_cached_captioned(edit_row: dict[str, Any] | None) -> bool:
-    """PURE. True ⇔ a baked captioned artifact provably matches the CURRENT edit-state, so
-    ``/export/captioned.mp4`` may STREAM it (skip the on-demand subtitle-burn re-render).
+    """PURE. True ⇔ a baked captioned object exists (``render_status == "done"`` + ``render_url``),
+    so ``/export/captioned.mp4`` 302-redirects to the CDN instead of re-rendering.
 
-    Gate (ALL required — conservative, correctness over speed):
-      • ``edit_row`` exists (clip has a ``clip_edits`` row);
-      • ``version == 1`` → clip was NEVER user-edited (``ensure_edit`` seeds version=1; the first
-        real ``save_edit`` → 2). So the fan-out / first-export bake (done at version=1) still
-        matches. We do NOT track a per-render version, so any ``version > 1`` (edited ≥ once) →
-        we distrust the snapshot and the caller re-renders fresh (no stale caption, ever);
-      • ``render_status == "done"`` AND ``render_url`` set → a captioned object is in R2.
-    Retention never deletes clip keys → ``status == "done"`` ⇒ the object is present. Any miss →
-    False → caller renders on-demand (today's path).
+    We DELIBERATELY do NOT gate on ``version == 1`` (2026-07-11). The on-demand re-render of an
+    EDITED clip is NOT viable on the api box for big-source jobs: the endpoint downloads the whole
+    source (measured a ~10GB upload) into Cloud Run's RAM-backed FS → OOM/503, and the render runs
+    >300s > the request timeout. So the re-render path is a GUARANTEED failure (503 + "expired"
+    media-token) for those clips — serving the last baked is strictly better. Trade-off: for a clip
+    edited AFTER its last render this serves the last-RENDERED version (re-rendering in the editor
+    refreshes the baked). A truly un-baked clip (``render_status != "done"``) still falls through to
+    the on-demand render below. Retention never deletes clip keys → ``status == "done"`` ⇒ present.
     """
     if not edit_row:
-        return False
-    if edit_row.get("version") != 1:
         return False
     return edit_row.get("render_status") == "done" and bool(edit_row.get("render_url"))
 

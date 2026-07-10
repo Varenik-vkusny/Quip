@@ -150,9 +150,12 @@ def test_composite_cmd_defaults_crf_preset() -> None:
         ({"version": 1, "render_status": "rendering", "render_url": "r2://x"}, False),  # not done
         ({"version": 1, "render_status": "failed", "render_url": None}, False),
         ({"version": 1, "render_status": None, "render_url": None}, False),  # never rendered
-        # version > 1 == user-edited at least once → distrust snapshot, re-render fresh
-        ({"version": 2, "render_status": "done", "render_url": "r2://x"}, False),
-        ({"version": 5, "render_status": "done", "render_url": "r2://x"}, False),
+        # edited clips (version > 1) WITH a baked now serve too (2026-07-11): on-demand re-render of
+        # big-source clips OOM/503s on the api box → serving the last baked beats a guaranteed fail.
+        ({"version": 2, "render_status": "done", "render_url": "r2://x"}, True),
+        ({"version": 5, "render_status": "done", "render_url": "r2://x"}, True),
+        ({"version": 9, "render_status": "rendering", "render_url": "r2://x"}, False),  # mid-render
+        ({"version": 9, "render_status": None, "render_url": None}, False),  # un-baked → render
     ],
 )
 def test_should_serve_cached_captioned(row: dict[str, object] | None, expected: bool) -> None:

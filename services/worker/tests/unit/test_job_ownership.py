@@ -86,7 +86,7 @@ def test_media_ticket_scoped_owner_only(monkeypatch, tmp_path):
     tok = client.get(f"/jobs/{job}/media-token", headers=_bearer(a))
     assert tok.status_code == 200
     body = tok.json()
-    assert body["expires_in"] == 300 and isinstance(body["token"], str)
+    assert body["expires_in"] == 1200 and isinstance(body["token"], str)
     mt = body["token"]
     served = client.get(f"/jobs/{job}/source.mp4", params={"mt": mt}, follow_redirects=False)
     assert served.status_code in (200, 302)

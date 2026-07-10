@@ -22,7 +22,8 @@ import json
 import os
 import time
 
-DEFAULT_TTL = 300  # сек (5 мин): хватает на старт <video>/download, окно утечки узкое
+DEFAULT_TTL = 1200  # сек (20 мин): переживает медленную отдачу/on-demand рендер → юзер не видит
+# «expired» посреди скачивания (2026-07-11); тикет job-scoped + opaque → окно утечки всё ещё узкое
 _DERIVE_LABEL = b"quip-media-token-v1"  # доменная метка деривации (см. media_token_secret)
 
 
