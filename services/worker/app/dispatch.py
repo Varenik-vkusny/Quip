@@ -177,6 +177,15 @@ def cloudrun_fanout_enabled() -> bool:
     )
 
 
+def segment_fanout_enabled() -> bool:
+    """Резать ли КАЖДОМУ клипу per-clip СЕГМЕНТ source (координатор) вместо скачивания ВСЕГО source
+    на каждый рендер-контейнер. Контейнер качает десятки МБ вместо ГБ → большие видео влезают +
+    контейнер можно ужать (32→~8Gi) → в разы больше параллельности. Требует контейнерный фан-аут;
+    флаг ``SEGMENT_FANOUT=1`` (по умолчанию ВЫКЛ — прод-путь не меняется до E2E + визуального
+    сайн-оффа). Нарезка B-frame-safe (segment_extract)."""
+    return cloudrun_fanout_enabled() and os.environ.get("SEGMENT_FANOUT", "0").strip() == "1"
+
+
 def _fanout_max_in_flight() -> int:
     """Сколько клип-контейнеров держим ПАРАЛЛЕЛЬНО (потолок скользящего окна — под квоту CPU
     региона, чтобы не заспавнить сразу 20 execution'ов → ResourceExhausted).

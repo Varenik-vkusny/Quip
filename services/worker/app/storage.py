@@ -444,6 +444,42 @@ def download_source(job_id: str, dest: Path) -> None:
     print(f"[storage] download {key} {size_mb:.1f}MB in {elapsed:.1f}s ({mbps:.1f} MB/s)")
 
 
+def segment_object_key(job_id: str, clip_index: int) -> str:
+    """R2-ключ per-clip сегмента source для контейнерного сегмент-фан-аута. PURE."""
+    return f"{job_id}/_segments/clip_{clip_index:02d}.mp4"
+
+
+def upload_segment(local_path: Path, job_id: str, clip_index: int) -> None:
+    """Залить per-clip сегмент в R2 (контейнер качает ТОЛЬКО его, не весь source).
+    local-режим: no-op. JobError при сбое (правило №8)."""
+    s = get_settings()
+    if s.storage_backend != "r2":
+        return
+    try:
+        _r2_client().upload_file(
+            str(local_path),
+            s.r2_bucket,
+            segment_object_key(job_id, clip_index),
+            ExtraArgs={"ContentType": "video/mp4"},
+            Config=_transfer_config(),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise JobError("storage", f"R2 upload segment {job_id}/{clip_index} failed: {e}") from e
+
+
+def download_segment(job_id: str, clip_index: int, dest: Path) -> None:
+    """Скачать per-clip сегмент из R2 в dest (вместо всего source). JobError (№8)."""
+    s = get_settings()
+    key = segment_object_key(job_id, clip_index)
+    t0 = time.monotonic()
+    try:
+        _r2_client().download_file(s.r2_bucket, key, str(dest), Config=_transfer_config())
+    except Exception as e:  # noqa: BLE001
+        raise JobError("storage", f"R2 download segment {job_id}/{clip_index} failed: {e}") from e
+    mb, sec = dest.stat().st_size / 1e6, time.monotonic() - t0
+    print(f"[storage] download {key} {mb:.1f}MB in {sec:.1f}s")
+
+
 def download_clip(job_id: str, clip_id: str, dest: Path, *, variant: str = "") -> None:
     """Скачать готовый baked-клип из R2 в dest (для composite-ASS fast-path рендера субтитров).
 

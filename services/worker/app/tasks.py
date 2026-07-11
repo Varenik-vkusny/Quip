@@ -520,32 +520,48 @@ def fanout_render_clip_job(
     seg: dict[str, Any],
     meta: dict[str, Any],
     user_id: str | None = None,
+    keyframe_time: float | None = None,
 ) -> None:
-    """Stages 3–5 ОДНОГО клипа в СВОЁМ Cloud Run job-контейнере (контейнерный фан-аут рендера —
-    аналог Modal ``reframe_render_clip``). ``source.mp4`` из R2 (``artifacts.ensure_source``,
-    залит координатором ДО фан-аута). Результат НЕ возвращается по RPC (координатор и клип на РАЗНЫХ
-    контейнерах) → пишется в R2 (``storage.upload_fanout_result``); координатор читает и собирает
-    список (``dispatch.map_render_clips_cloudrun``). Per-clip провал контейнирован
-    ``render_one_clip_contained`` (пустой ``video_url``) → результат ВСЕГДА пишется, джоб не валится
-    (правило №8). Падение ДО записи (напр. source download) → нет объекта → координатор синтезирует
-    failed_clip_result. НЕ трогает stage3/stage5 (инвариант кадровой сетки цел)."""
+    """Stages 3–5 ОДНОГО клипа в СВОЁМ Cloud Run job-контейнере (контейнерный фан-аут рендера).
+
+    ``keyframe_time is None`` (прежний путь) → тянем ВЕСЬ ``source.mp4`` из R2 (``ensure_source``).
+    ``keyframe_time`` задан (SEGMENT-режим, флаг SEGMENT_FANOUT) → координатор уже нарезал per-clip
+    сегмент; качаем ТОЛЬКО его (десятки МБ вместо ГБ) и пере-якорим клип на origin сегмента
+    (``shift_segment``, покадрово-точно) → контейнер можно ужать + большие видео влезают.
+
+    Результат в R2 (``upload_fanout_result``) — координатор и клип на РАЗНЫХ контейнерах, не по RPC;
+    координатор читает список (``map_render_clips_cloudrun``). Per-clip провал контейнирован
+    ``render_one_clip_contained`` (пустой ``video_url``); падение ДО записи → координатор даёт
+    failed_clip_result (правило №8). НЕ трогает stage3/stage5 (инвариант сетки цел)."""
     from app import artifacts, storage
     from app.models import Segment
     from app.run import render_one_clip_contained
 
     t0 = time.monotonic()
-    src = artifacts.ensure_source(job_id)  # source из R2 на свежий контейнер (как editor-render)
-    result = render_one_clip_contained(
-        src.parent,
-        src.name,
-        clip_index,
-        Segment.model_validate(seg),
-        SourceMeta.model_validate(meta),
-        user_id,
-    )
+    seg_model = Segment.model_validate(seg)
+    meta_model = SourceMeta.model_validate(meta)
+    if keyframe_time is not None:
+        from app.pipeline.segment_extract import shift_segment
+
+        seg_dir = artifacts.job_dir(job_id)
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        seg_path = seg_dir / f"_seg_{clip_index:02d}.mp4"
+        storage.download_segment(job_id, clip_index, seg_path)
+        shifted = shift_segment(seg_model, keyframe_time, meta_model.fps)
+        result = render_one_clip_contained(
+            seg_dir, seg_path.name, clip_index, shifted, meta_model, user_id
+        )
+    else:
+        src = artifacts.ensure_source(job_id)  # весь source из R2 (как editor-render)
+        result = render_one_clip_contained(
+            src.parent, src.name, clip_index, seg_model, meta_model, user_id
+        )
     storage.upload_fanout_result(job_id, clip_index, result)
     total = time.monotonic() - t0
-    _rlog.info("[fanout] clip_%02d done total=%.1fs", clip_index, total)
+    _rlog.info(
+        "[fanout] clip_%02d done total=%.1fs%s", clip_index, total,
+        " seg" if keyframe_time is not None else "",
+    )  # fmt: skip
 
 
 def render_extracted_clip_job(

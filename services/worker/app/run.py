@@ -102,6 +102,39 @@ def clip_spawn_args(
     return [(job_id, i, seg.model_dump(), md, user_id) for i, seg in enumerate(segments, start=1)]
 
 
+def _spawn_args_segmented(
+    job_id: str,
+    out: Path,
+    source_name: str,
+    segments: list[Segment],
+    meta: SourceMeta,
+    user_id: str | None,
+) -> list[tuple[str, int, dict[str, Any], dict[str, Any], str | None, float]]:
+    """SEGMENT-фан-аут spawn args: координатор (source локально) режет КАЖДОМУ клипу B-frame-safe
+    сегмент [ближайший кейфрейм ≤ seg.start … seg.end+margin] (`segment_extract`), льёт в R2 и несёт
+    ``keyframe_time`` 6-м элементом кортежа → контейнер качает ТОЛЬКО свой сегмент (не весь
+    source) и пере-якорит клип ``shift_segment``. fps ТОЧНЫЙ из meta (CFR-инвариант
+    кадровой сетки). Кортеж на 1 длиннее ``clip_spawn_args`` (kt) → ``fanout_render_clip_job`` берёт
+    его 6-м параметром (default None = полный source). Сбой нарезки → исключение вверх → координатор
+    падает в in-process рендер полного source (правило №8, без потери джоба)."""
+    from app.pipeline import segment_extract as se
+
+    src = out / source_name
+    md = meta.model_dump()
+    args: list[tuple[str, int, dict[str, Any], dict[str, Any], str | None, float]] = []
+    for i, seg in enumerate(segments, start=1):
+        kt = se.find_preceding_keyframe(src, seg.start, meta.duration, meta.fps)
+        seg_mp4 = out / f"_seg_{i:02d}.mp4"
+        ex_end = se.extraction_end(
+            seg.end, trailing_margin_sec=se.TRAILING_MARGIN_SEC, duration=meta.duration
+        )
+        se.extract_segment(src, seg_mp4, kt, ex_end)
+        storage.upload_segment(seg_mp4, job_id, i)
+        seg_mp4.unlink(missing_ok=True)  # освобождаем сразу (диск координатора = RAM на Cloud Run)
+        args.append((job_id, i, seg.model_dump(), md, user_id, kt))
+    return args
+
+
 def build_clip_out(
     clip_id: str,
     seg: Segment,
@@ -455,9 +488,15 @@ def _render_all_clips(
         # cv2/ffmpeg-многопоточный). Фан-аут сломался (квота/API) → деградация в in-process рендер
         # главного контейнера (НЕ валим джоб, правило №8).
         try:
-            results = dispatch.map_render_clips_cloudrun(
-                job_id, clip_spawn_args(job_id, segments, meta, user_id)
-            )
+            # SEGMENT-фан-аут (флаг SEGMENT_FANOUT): координатор режет per-clip сегмент, контейнер
+            # качает только его. Иначе — прежний путь (контейнер тянет весь source). Обе ветки идут
+            # через ТЕ ЖЕ stage3/stage5 (инвариант сетки цел) — отличается лишь вход контейнера.
+            spawn: list[tuple[Any, ...]]
+            if dispatch.segment_fanout_enabled():
+                spawn = _spawn_args_segmented(job_id, out, source_name, segments, meta, user_id)
+            else:
+                spawn = clip_spawn_args(job_id, segments, meta, user_id)
+            results = dispatch.map_render_clips_cloudrun(job_id, spawn)
         except Exception as e:  # noqa: BLE001 — фан-аут упал → in-process рендер, не валим джоб
             print(f"[render] container fan-out failed ({e}); in-process render fallback")
             results = _render_clips_in_process(
