@@ -1506,13 +1506,17 @@ def export_clip_captioned_mp4(
     # download-to-tmpfs or streaming, OOM-killed it: Cloud Run local FS is RAM; 40MB × concurrency
     # exhausted it → empty-body 500s.) Clip is already public on the CDN (CORS on) → both fetch and
     # native download follow the redirect. Stale-proof gate; best-effort → falls through to render.
-    if fast_export.should_serve_cached_captioned(db.get_clip_edit_row(job_id, clip_id)):
+    _cap_row = db.get_clip_edit_row(job_id, clip_id)
+    if fast_export.should_serve_cached_captioned(_cap_row):
         try:
-            return _no_referrer(
-                RedirectResponse(
-                    storage.clip_read_url(job_id, clip_id, variant="captioned"), status_code=302
-                )
+            # ?v=<version> cache-bust (как get_render): без него Cloudflare-edge мог отдать
+            # УСТАРЕВШИЙ baked-captioned (тот же R2-ключ) после ре-рендера → скачанный фрейминг
+            # отставал от превью. version инкрементится на каждой правке → гарантированный CDN-miss.
+            url = storage.with_cache_bust(
+                storage.clip_read_url(job_id, clip_id, variant="captioned"),
+                (_cap_row or {}).get("version"),
             )
+            return _no_referrer(RedirectResponse(url, status_code=302))
         except Exception as e:  # noqa: BLE001 — cache best-effort; fall through to full render
             print(f"[export] cached captioned redirect failed {job_id}/{clip_id}: {e}")
     try:
