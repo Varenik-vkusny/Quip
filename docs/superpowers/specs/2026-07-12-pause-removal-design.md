@@ -1,6 +1,21 @@
 # Удаление пауз (Pause Removal) — Design Spec
 
-**Дата:** 2026-07-12 · **Ветка:** `feat/pause-removal` · **Статус:** design (автономный ночной прогон; на утреннее ревью основателя)
+**Дата:** 2026-07-12 · **Ветка:** `feat/pause-removal` · **Статус:** ✅ **Phase 1a РЕАЛИЗОВАНА**
+(per-clip, backend+frontend, гейт зелёный, доказано локально); Phase 1b (глобально на загрузке) и
+Phase 2 (клиентский preview) — НЕ сделаны. На утреннее ревью основателя.
+
+> **Что сделано (ветка `feat/pause-removal`):**
+> - `be7058d` — ядро `editor/silence.py` (`compute_silence_cuts`/`apply_silence`, TDD 12 тестов) +
+>   `ClipEdit.silence_config` (codegen) + интеграция в `render_edit_to_file` (подмена
+>   `source_intervals` через `apply_silence` → captions/reframe/render_timeline авто-сжимаются) +
+>   эндпоинт `POST /clips/{id}/edit/silence`.
+> - `f00e569` — вкладка «Паузы» (`PausesTab.tsx`) в редакторе: тумблер + слайдер плотности +
+>   advanced (max_pause/padding) + `setClipSilence` API + i18n en/ru.
+> - **Доказано локально:** клип 60.0с → 57.7с (7 frame-snapped интервалов, стыки чистые — нет флеша,
+>   субтитры выровнены). Плотная речь Маргулана → мало гэпов (−2.27с); на контенте с паузами больше.
+> **НЕ сделано (следующие шаги):** Phase 1b — глобальный тумблер на загрузке (нужен `apply_silence` в
+> `run.py:render_one_clip` + проброс `remove_pauses` job-параметра; клип-эдит создаётся ЛЕНИВО, поэтому
+> первичный рендер идёт мимо него — это отдельная поверхность). Phase 2 — клиентский live-skip превью.
 
 > Заменяет/уточняет наброски Phase-2 из `2026-06-28-silence-removal-design.md` (тот предшествовал
 > NLE-редактору и боялся reframe-ремаппинга как «hard part» — теперь это решено движком).
