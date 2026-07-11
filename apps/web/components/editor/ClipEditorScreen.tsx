@@ -36,7 +36,7 @@ import {
 } from "@/lib/api";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { patchAssStyles } from "@/lib/assStyle";
-import { pickActiveOverride } from "@/lib/reframeFrame";
+import { findShotOverride, pickActiveOverride, upsertShotOverride } from "@/lib/reframeFrame";
 import { type ClipCache, createClipCache } from "@/lib/clipCache";
 import type {
   CaptionReply,
@@ -60,7 +60,7 @@ import { type Tab, TABS, EditorRail } from "./EditorRail";
 import { type EditorAction } from "@/lib/editorShortcuts";
 import { useEditorShortcuts } from "./useEditorShortcuts";
 import { useEditHistory } from "./useEditHistory";
-import { type FitRegion } from "./FitTimeline";
+import { type FitRegion, type SelectedShot } from "./FitTimeline";
 import { Inspector } from "./Inspector";
 import { OverlaySelectionBox } from "./OverlaySelectionBox";
 import type { SubRects } from "@/lib/overlayBox";
@@ -302,6 +302,9 @@ export default function ClipEditorScreen({
   const [editingReply, setEditingReply] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [nowSec, setNowSec] = useState(0);
+  // P1: the shot the top Frame controls + preview drag-to-pan bind to (null = whole clip). Keyed by
+  // source-range so it survives a reframe refetch; cleared when the clip changes (effect below).
+  const [selectedShot, setSelectedShot] = useState<SelectedShot | null>(null);
   // Драг позиции субтитров/хука НЕ держим в state — гайд-линии двигаются императивно по ref
   // (см. блок «драг субтитров/хука по видео»): иначе ререндер на каждый move = лаги/прыжки.
 
@@ -345,6 +348,14 @@ export default function ClipEditorScreen({
   const outerStart = edit?.source_intervals[0]?.source_start ?? 0;
   const outerEnd =
     edit?.source_intervals[edit.source_intervals.length - 1]?.source_end ?? 0;
+
+  // P1: the selected shot is keyed to THIS clip's shot ranges → drop it whenever the clip changes.
+  // "adjust state on prop change" (React pattern, not an effect — avoids the cascading-render lint).
+  const [prevSelClipId, setPrevSelClipId] = useState(clipId);
+  if (prevSelClipId !== clipId) {
+    setPrevSelClipId(clipId);
+    setSelectedShot(null);
+  }
 
   const stopPoll = useCallback(() => {
     if (pollRef.current) {
@@ -1260,12 +1271,15 @@ export default function ClipEditorScreen({
   }, [jobId, clipId, refreshAss, failOr409, flushPending, commitEdit, recordSnapshot]);
 
   // ── кадр (таб «Кадр») ──
-  const handleFrameApply = useCallback(
+  // Единый путь применения кадрирования на ДИАПАЗОН source — весь клип ИЛИ один шот (P1, DRY).
+  // Диапазон = [outerStart,outerEnd) для всего клипа, либо [source_start,source_end) выбранного шота.
+  // upsertShotOverride (чистая, TDD) вливает patch в ОДИН override этого диапазона, СОХРАНЯЯ поля,
+  // которых нет в patch (сменил фон → пан не стёрся, и наоборот), и НЕ трогает другие шоты. Затем
+  // читаем слитый override обратно и шлём его в setCropOverride (сервер сам режет по диапазону).
+  const applyFraming = useCallback(
     async (
-      mode: "auto" | "fill" | "fit",
-      center: number | null,
-      centerB: number | null,
-      fitStyle?: string,
+      range: { source_start: number; source_end: number },
+      patch: { mode?: "auto" | "fill" | "fit"; center?: number | null; fit_style?: string },
     ) => {
       if (!edit) return;
       setError(null);
@@ -1274,20 +1288,23 @@ export default function ClipEditorScreen({
       try {
         await flushPending();
         const v = editRef.current?.version ?? edit.version ?? 1;
+        const current = editRef.current?.reframe_overrides ?? edit.reframe_overrides ?? [];
+        const next = upsertShotOverride(current, range, patch);
+        const merged = findShotOverride(next, range); // null ⇒ mode:auto стёр override
+        const mode = patch.mode ?? merged?.mode ?? "fill";
         const newEdit = await setCropOverride(jobId, clipId, v, {
-          source_start: outerStart,
-          source_end: outerEnd,
-          mode,
-          center,
-          center_b: centerB,
-          fit_style: fitStyle,
+          source_start: range.source_start,
+          source_end: range.source_end,
+          mode: (mode === "fit" || mode === "auto" ? mode : "fill") as "auto" | "fill" | "fit",
+          center: merged?.center ?? null,
+          center_b: merged?.center_b ?? null,
+          fit_style: merged?.fit_style ?? null,
         });
         commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
         setDirty(true);
         setPixelDirty(true); // crop/frame override changes mp4 pixels → re-render required
-        // mode:"auto" → бэкенд чистит override → план возвращается к слежению за лицом; mode:wide/fill
-        // → план перекрашивается. Без перечитки rawRegions осталось бы «всё wide» и трекинг пропадал
-        // (баг: whole-video Wide → Auto не возвращал слежение). Зеркалит handleApplyRange.
+        // mode:"auto" → бэкенд чистит override → план возвращается к слежению за лицом; wide/fill
+        // → план перекрашивается. Без перечитки rawRegions осталось бы «всё wide» и трекинг пропадал.
         await loadReframe();
       } catch (e) {
         failOr409(e);
@@ -1295,51 +1312,51 @@ export default function ClipEditorScreen({
         setRecomputingFrame(false);
       }
     },
-    [
-      edit,
-      jobId,
-      clipId,
-      outerStart,
-      outerEnd,
-      failOr409,
-      flushPending,
-      loadReframe,
-      commitEdit,
-      recordSnapshot,
-    ],
+    [edit, jobId, clipId, failOr409, flushPending, loadReframe, commitEdit, recordSnapshot],
   );
 
-  // ── FitTimeline (#1): форсировать кадр на source-диапазон ШОТОВ ──
-  // Зеркалит handleFrameApply, но диапазон приходит от мини-таймлайна (выделенные
-  // регионы → source-время), а не весь клип. mode:"auto" → бэкенд чистит override в
-  // диапазоне. После применения перечитываем reframe-план → полоса + превью обновятся.
+  // ── таб «Кадр», верхняя панель: применяет к ВЫБРАННОМУ шоту (если выбран в полосе), иначе к клипу ──
+  const handleFrameApply = useCallback(
+    (
+      mode: "auto" | "fill" | "fit",
+      center: number | null,
+      _centerB: number | null,
+      fitStyle?: string,
+    ) => {
+      const range = selectedShot
+        ? { source_start: selectedShot.source_start, source_end: selectedShot.source_end }
+        : { source_start: outerStart, source_end: outerEnd };
+      return applyFraming(range, { mode, center, fit_style: fitStyle });
+    },
+    [applyFraming, selectedShot, outerStart, outerEnd],
+  );
+
+  // ── FitTimeline: форсировать режим на source-диапазон ШОТОВ (Wide/Tight/Auto + Apply) ──
+  // Через тот же общий builder → теперь НЕСЁТ существующий center/fit_style на диапазоне вместо
+  // затирания их null (старый баг «per-shot смена стирала пан»).
   const handleApplyRange = useCallback(
-    async (sourceStart: number, sourceEnd: number, mode: "fit" | "fill" | "auto") => {
-      if (!edit) return;
-      setError(null);
-      recordSnapshot(); // pre-range content → one undo step (before any mutation)
-      setRecomputingFrame(true);
-      try {
-        await flushPending();
-        const v = editRef.current?.version ?? edit.version ?? 1;
-        const newEdit = await setCropOverride(jobId, clipId, v, {
-          source_start: sourceStart,
-          source_end: sourceEnd,
-          mode,
-          center: null,
-          center_b: null,
-        });
-        commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
-        setDirty(true);
-        setPixelDirty(true); // per-shot crop override changes mp4 pixels → re-render required
-        await loadReframe(); // полоса + превью отражают новый план
-      } catch (e) {
-        failOr409(e);
-      } finally {
-        setRecomputingFrame(false);
+    (sourceStart: number, sourceEnd: number, mode: "fit" | "fill" | "auto") =>
+      applyFraming({ source_start: sourceStart, source_end: sourceEnd }, { mode }),
+    [applyFraming],
+  );
+
+  // ── P1: выбрать один шот в полосе → верхние Frame-контролы + драг-пан превью привязаны к нему ──
+  // Сикаем превью на начало шота, чтобы юзер ВИДЕЛ, что кадрирует (и драг-пан имел смысл).
+  const handleSelectShot = useCallback(
+    (shot: SelectedShot | null) => {
+      setSelectedShot(shot);
+      if (shot) {
+        const v = videoRef.current;
+        if (v && shot.source_start >= outerStart && shot.source_start < outerEnd) {
+          try {
+            v.currentTime = shot.source_start + 0.02; // чуть внутрь шота
+          } catch {
+            // до loadedmetadata seek может бросить — не критично (плейхед догонит при загрузке)
+          }
+        }
       }
     },
-    [edit, jobId, clipId, failOr409, flushPending, loadReframe, commitEdit, recordSnapshot],
+    [outerStart, outerEnd],
   );
 
   // ── соотношение сторон (T5): меняет выход + PlayRes ASS → рефетчим ASS ──
@@ -1813,6 +1830,40 @@ export default function ClipEditorScreen({
     return stable;
   }, [frameAt, nowSec, outerStart]);
 
+  // ── P1: seed the Frame controls for the SELECTED shot + wire preview drag-to-pan ──
+  // The override currently on the selected shot (null = AI/auto). Seeds the top mode/crop/bg controls
+  // and provides the pan center the preview drag starts from.
+  const selectedOverride = selectedShot
+    ? findShotOverride(edit?.reframe_overrides ?? [], selectedShot)
+    : null;
+  const selectedShotFrame = selectedShot
+    ? frameAt((selectedShot.source_start + selectedShot.source_end) / 2)
+    : null;
+  const selectedShotSeed = selectedShot
+    ? {
+        mode: (selectedOverride
+          ? selectedOverride.mode === "fit"
+            ? "fit"
+            : "fill"
+          : "auto") as "auto" | "fill" | "fit",
+        center: selectedOverride?.center ?? selectedShotFrame?.cx ?? 0.5,
+        fitStyle: selectedOverride?.fit_style ?? selectedShotFrame?.fitStyle ?? "blur_zoom",
+      }
+    : null;
+  // Drag-to-pan only makes sense for a selected FILL shot (fit/wide has no crop center).
+  const panEnabled = !!selectedShot && selectedShotFrame?.mode === "fill";
+  const panCx = selectedShotFrame?.cx ?? 0.5;
+  const handlePanCommit = useCallback(
+    (cx: number) => {
+      if (!selectedShot) return;
+      void applyFraming(
+        { source_start: selectedShot.source_start, source_end: selectedShot.source_end },
+        { mode: "fill", center: cx },
+      );
+    },
+    [applyFraming, selectedShot],
+  );
+
   // ── Shots-таб: что рисуем в полосе пошотового кадрирования ──
   // Нормально берём AI-шоты (rawRegions от /reframe). НО /reframe гоняет тяжёлый CV на лету
   // (PySceneDetect + ASD) и на «холодном» клипе медленный/падает → loadReframe глотает в null →
@@ -1904,6 +1955,9 @@ export default function ClipEditorScreen({
           shotVariant={usingFallbackShots ? "manual" : "ai"}
           shotLoading={reframeLoading}
           onApplyShotRange={handleApplyRange}
+          selectedShot={selectedShot}
+          selectedShotSeed={selectedShotSeed}
+          onSelectShot={handleSelectShot}
         />
       )}
     </>
@@ -2030,6 +2084,9 @@ export default function ClipEditorScreen({
                 frameAt={frameAt}
                 onTimeChange={setNowSec}
                 aspectClass={aspectClass}
+                panEnabled={panEnabled}
+                panCx={panCx}
+                onPanCommit={handlePanCommit}
               >
                   {/* imperative alignment guides (z-20): live INSIDE the render box so they position
                       relative to the video (offsetParent), UNDER the selection boxes (z-30). Driven

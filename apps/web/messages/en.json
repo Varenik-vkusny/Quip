@@ -449,8 +449,11 @@
       "cropRight": "right",
       "framingUpdatesLive": "Framing updates live. Auto restores the AI’s per-shot decision.",
       "resetToAuto": "Reset to Auto",
+      "editingShot": "Shot {n} · {range}",
+      "wholeClip": "Whole clip",
+      "editWholeClipHint": "Editing this shot — tap to edit the whole clip instead",
       "perShotFraming": "Per-shot framing",
-      "perShotDesc": "The mode above applies to the whole clip. Below, override individual <b>shots</b> — the cuts between camera angles. Pick shots on the bar (the white line shows where you are) and force <b>Wide</b>, <b>Tight</b> or <b>Auto</b>. Need a boundary the detector merged away? Use <b>Split here</b> to cut a shot at the playhead, then force either half."
+      "perShotDesc": "Click a shot on the bar to aim the controls above at just that shot — the white line shows where you are. With nothing selected they apply to the whole clip. You can also force <b>Wide</b>, <b>Tight</b> or <b>Auto</b> on a selection here. Need a boundary the detector merged away? Use <b>Split here</b> to cut a shot at the playhead, then force either half."
     },
     "shots": {
       "detecting": "Detecting the shots in this clip…",
@@ -588,6 +591,7 @@
       "unmute": "Unmute",
       "fullscreen": "Fullscreen",
       "exitFullscreen": "Exit fullscreen",
+      "dragToPan": "Drag to pan",
       "overlayGroupAria": "{label}: drag to move, corner to resize, side to change width",
       "changeWidthAria": "Change {label} width",
       "resizeTextAria": "Resize {label} text"

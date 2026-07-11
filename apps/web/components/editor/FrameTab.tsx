@@ -6,8 +6,17 @@ import { Button } from "@/components/ui/Button";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import type { Aspect } from "@/lib/api";
+import { mmss } from "@/lib/format";
 import type { ClipEdit, CropOverride, SourceInterval } from "@/lib/types";
-import { FitTimeline, type FitRegion, type ForceMode } from "./FitTimeline";
+import { FitTimeline, type FitRegion, type ForceMode, type SelectedShot } from "./FitTimeline";
+
+// P1: seed values that pre-fill the Frame controls for the SELECTED shot (so the tiles/slider/bg
+// reflect that shot's current framing, not the whole clip's).
+export interface SelectedShotSeed {
+  mode: FrameMode;
+  center: number;
+  fitStyle: string;
+}
 
 // label = brand token (kept as-is); hint text resolves from editor.frame.<hintKey>.
 const ASPECTS: { value: Aspect; label: string; hintKey: string }[] = [
@@ -53,6 +62,9 @@ export function FrameTab({
   shotVariant,
   shotLoading,
   onApplyShotRange,
+  selectedShot,
+  selectedShotSeed,
+  onSelectShot,
 }: {
   edit: ClipEdit;
   outerStart: number;
@@ -74,6 +86,10 @@ export function FrameTab({
   shotVariant?: "ai" | "manual";
   shotLoading?: boolean;
   onApplyShotRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
+  // ── P1: per-shot binding — the mode/crop/bg controls act on the SELECTED shot when one is picked ──
+  selectedShot?: SelectedShot | null;
+  selectedShotSeed?: SelectedShotSeed | null;
+  onSelectShot?: (shot: SelectedShot | null) => void;
 }) {
   const t = useTranslations("editor.frame");
   const aspect = (edit.aspect as Aspect) ?? "9:16";
@@ -87,6 +103,27 @@ export function FrameTab({
   const [mode, setMode] = useState<FrameMode>(cm === "fill" || cm === "fit" ? cm : "auto");
   const [center, setCenter] = useState(current?.center ?? 0.5);
   const [fitStyle, setFitStyle] = useState(current?.fit_style ?? "blur_zoom");
+
+  // ── P1: re-seed the controls when the edit target changes (whole clip ↔ a specific shot) ──
+  // "adjust state on prop change" (React pattern, not an effect): when the selection identity flips,
+  // pre-fill mode/center/fitStyle from that target so the tiles/slider/bg reflect what's being edited.
+  const selKey = selectedShot
+    ? `${selectedShot.source_start.toFixed(3)}-${selectedShot.source_end.toFixed(3)}`
+    : "clip";
+  const [prevSelKey, setPrevSelKey] = useState(selKey);
+  if (prevSelKey !== selKey) {
+    setPrevSelKey(selKey);
+    // Uses the raw setters (not the change handlers) → this re-seed never fires onApply.
+    if (selectedShot && selectedShotSeed) {
+      setMode(selectedShotSeed.mode);
+      setCenter(selectedShotSeed.center);
+      setFitStyle(selectedShotSeed.fitStyle);
+    } else {
+      setMode(cm === "fill" || cm === "fit" ? cm : "auto");
+      setCenter(current?.center ?? 0.5);
+      setFitStyle(current?.fit_style ?? "blur_zoom");
+    }
+  }
 
   // touched guard — only apply on user-initiated changes, not initial mount
   const touchedRef = useRef(false);
@@ -196,7 +233,28 @@ export function FrameTab({
       </section>
 
       <section className="space-y-2">
-        <Eyebrow tone="muted">{t("frameMode")}</Eyebrow>
+        {/* P1: the frame-mode / crop / background controls act on the SELECTED shot when one is
+            picked in the strip below, else the whole clip. The header names the current target. */}
+        <div className="flex items-center justify-between gap-2">
+          <Eyebrow tone="muted">{t("frameMode")}</Eyebrow>
+          {selectedShot ? (
+            <button
+              type="button"
+              onClick={() => onSelectShot?.(null)}
+              className="max-w-[62%] truncate rounded-full border border-accent-line bg-surface-3 px-2 py-0.5 text-[10px] font-semibold text-accent transition hover:brightness-110"
+              title={t("editWholeClipHint")}
+            >
+              {t("editingShot", {
+                n: selectedShot.index + 1,
+                range: `${mmss(selectedShot.t0)}–${mmss(selectedShot.t1)}`,
+              })}
+            </button>
+          ) : (
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+              {t("wholeClip")}
+            </span>
+          )}
+        </div>
         {/* Compact labeled tiles (segmented) — replaces 4 stacked full-width radio cards.
             Selected tile uses the shared pattern (border-accent-line + bg-surface-3); the
             description is shown ONCE for the selected mode below, not on every card. */}
@@ -302,6 +360,8 @@ export function FrameTab({
           variant={shotVariant}
           loading={shotLoading}
           onApplyRange={onApplyShotRange}
+          selectedShot={selectedShot}
+          onSelectShot={onSelectShot}
         />
       </section>
     </div>

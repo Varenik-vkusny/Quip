@@ -4,6 +4,7 @@ import { Loader2, Scissors } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { mmss } from "@/lib/format";
+import { shotIsManual } from "@/lib/reframeFrame";
 import type { CropOverride, SourceInterval } from "@/lib/types";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -38,6 +39,15 @@ export interface FitRegion {
 
 export type ForceMode = "fit" | "fill" | "auto";
 
+/** A single shot picked in the strip (source-range keyed; carries clip-time t0/t1 for the label). */
+export interface SelectedShot {
+  source_start: number;
+  source_end: number;
+  index: number;
+  t0: number;
+  t1: number;
+}
+
 export interface FitTimelineProps {
   /** Регионы reframe-плана (клип-время t0/t1/mode). null/пусто → ничего не рисуем. */
   regions: FitRegion[] | null;
@@ -55,6 +65,10 @@ export interface FitTimelineProps {
   loading?: boolean;
   /** Применить режим к source-диапазону выделенных регионов. mode:"auto" чистит override. */
   onApplyRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
+  /** P1: шот, к которому привязаны верхние Frame-контролы + драг-пан превью (null = весь клип). */
+  selectedShot?: SelectedShot | null;
+  /** P1: клик по одному блоку → выбрать этот шот (или null при range-драге/сбросе). */
+  onSelectShot?: (shot: SelectedShot | null) => void;
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
@@ -124,6 +138,8 @@ export function FitTimeline({
   variant = "ai",
   loading = false,
   onApplyRange,
+  selectedShot,
+  onSelectShot,
 }: FitTimelineProps) {
   const t = useTranslations("editor.shots");
   // User-facing framing-mode label (fit→Wide, fill→Tight, split→Split; unknown → raw).
@@ -137,7 +153,7 @@ export function FitTimeline({
   // отображения/выделения — НЕ мутируем `regions`. Округляем до мс, чтобы не плодить
   // почти-совпадающие резы и не делать нулевых блоков.
   const [userSplits, setUserSplits] = useState<number[]>([]);
-  const dragRef = useRef<{ anchor: number } | null>(null);
+  const dragRef = useRef<{ anchor: number; moved: boolean } | null>(null);
 
   // суммарная клип-длительность = конец последнего региона (= длина клипа в reframe-плане)
   const clipDur = useMemo(() => {
@@ -201,7 +217,7 @@ export function FitTimeline({
       if (idx === null) return;
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
-      dragRef.current = { anchor: idx };
+      dragRef.current = { anchor: idx, moved: false };
       setSel({ from: idx, to: idx });
     },
     [busy, regionAtX],
@@ -213,20 +229,42 @@ export function FitTimeline({
       if (!drag) return;
       const idx = regionAtX(e.clientX);
       if (idx === null) return;
+      if (idx !== drag.anchor) drag.moved = true;
       setSel({ from: Math.min(drag.anchor, idx), to: Math.max(drag.anchor, idx) });
     },
     [regionAtX],
   );
 
-  const endDrag = useCallback((e: React.PointerEvent) => {
-    if (!dragRef.current) return;
-    try {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {
-      /* capture мог не стоять */
-    }
-    dragRef.current = null;
-  }, []);
+  const endDrag = useCallback(
+    (e: React.PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      try {
+        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        /* capture мог не стоять */
+      }
+      dragRef.current = null;
+      // Клик по ОДНОМУ блоку (без драга) → выбрать этот шот: верхние Frame-контролы + драг-пан
+      // превью привязываются к нему. Range-драг (moved) — мультивыбор для кнопки Apply → снимаем
+      // одиночный выбор, чтобы верхняя панель не думала, что редактирует один шот.
+      if (!drag.moved) {
+        const blk = blocks[drag.anchor];
+        if (blk) {
+          onSelectShot?.({
+            source_start: clipTimeToSource(blk.t0, intervals),
+            source_end: clipTimeToSource(blk.t1, intervals),
+            index: drag.anchor,
+            t0: blk.t0,
+            t1: blk.t1,
+          });
+        }
+      } else {
+        onSelectShot?.(null);
+      }
+    },
+    [blocks, intervals, onSelectShot],
+  );
 
   const apply = useCallback(() => {
     if (!sel || blocks.length === 0 || busy) return;
@@ -312,6 +350,16 @@ export function FitTimeline({
       ? blocks.findIndex((b) => playheadClipT >= b.t0 && playheadClipT < b.t1)
       : -1;
 
+  // Блок, привязанный к верхним Frame-контролам (по source-диапазону; переживает пересчёт плана).
+  const selShotIdx =
+    selectedShot != null
+      ? blocks.findIndex(
+          (b) =>
+            Math.abs(clipTimeToSource(b.t0, intervals) - selectedShot.source_start) < 0.05 &&
+            Math.abs(clipTimeToSource(b.t1, intervals) - selectedShot.source_end) < 0.05,
+        )
+      : -1;
+
   // подпись выделения. Без резов блок = шот/часть → старый текст. С резами в наборе есть
   // подблоки → нейтральное «part(s)», чтобы номера-блоков не путались с номерами шотов.
   const hasSplits = userSplits.length > 0;
@@ -360,6 +408,12 @@ export function FitTimeline({
           const ov = regionOverride(blk, intervals, overrides);
           const selected = sel !== null && i >= sel.from && i <= sel.to;
           const isActive = i === activeIdx;
+          const isEditing = i === selShotIdx; // привязан к верхним Frame-контролам
+          // provenance: шот "manual", если override покрывает его середину (совпадает с рендером).
+          const manual = shotIsManual(overrides, {
+            source_start: clipTimeToSource(blk.t0, intervals),
+            source_end: clipTimeToSource(blk.t1, intervals),
+          });
           // эффективный режим: override приоритетнее AI-плана
           const effMode = ov ? ov.mode : blk.mode;
           const tint = MODE_TINT[effMode] ?? "bg-surface-3";
@@ -390,6 +444,13 @@ export function FitTimeline({
                 </>
               )}
               {ov && <span className="absolute inset-x-0 top-0 h-1 bg-accent" aria-hidden />}
+              {/* provenance: "manual" — маленькая точка в углу (шот с ручным override). */}
+              {manual && (
+                <span
+                  className="pointer-events-none absolute right-1 top-1 size-1.5 rounded-full bg-accent"
+                  aria-hidden
+                />
+              )}
               {/* подблок (результат «Split here») — пунктирная левая кромка как маркер реза */}
               {blk.split && i > 0 && (
                 <span
@@ -397,7 +458,7 @@ export function FitTimeline({
                   aria-hidden
                 />
               )}
-              {isActive && !selected && (
+              {isActive && !selected && !isEditing && (
                 <span
                   className="pointer-events-none absolute inset-0 ring-2 ring-inset ring-ink/70"
                   aria-hidden
@@ -406,6 +467,13 @@ export function FitTimeline({
               {selected && (
                 <span
                   className="pointer-events-none absolute inset-0 bg-accent/25 ring-2 ring-inset ring-accent"
+                  aria-hidden
+                />
+              )}
+              {/* редактируемый шот (привязан к верхним Frame-контролам) — стойкое кольцо-акцент */}
+              {isEditing && !selected && (
+                <span
+                  className="pointer-events-none absolute inset-0 ring-2 ring-inset ring-accent"
                   aria-hidden
                 />
               )}

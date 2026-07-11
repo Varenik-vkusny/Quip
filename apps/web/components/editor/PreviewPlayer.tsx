@@ -34,6 +34,9 @@ export function PreviewPlayer({
   frameAt,
   onTimeChange,
   aspectClass = "aspect-[9/16]",
+  panEnabled = false,
+  panCx = 0.5,
+  onPanCommit,
   children,
 }: {
   src: string;
@@ -50,6 +53,12 @@ export function PreviewPlayer({
    *  Рендер-бокс HEIGHT-driven и ограничен обе стороны (h-full + max-h-full + max-w-full +
    *  aspect), центрирован в флекс-контейнере → contain'ится в ЛЮБОЙ (в т.ч. широкой) колонке. */
   aspectClass?: string;
+  /** P1: a FILL shot is selected → horizontal drag on the video pans that shot's crop center. */
+  panEnabled?: boolean;
+  /** Current crop center [0..1] of the selected shot — the drag starts here. */
+  panCx?: number;
+  /** Commit the panned center on pointer-up (writes the shot's override). */
+  onPanCommit?: (cx: number) => void;
   children?: React.ReactNode;
 }) {
   const t = useTranslations("editor.preview");
@@ -73,6 +82,20 @@ export function PreviewPlayer({
     frameRef.current = frame ?? null;
   }, [frame]);
 
+  // ── P1 drag-to-pan (fill shot) ──────────────────────────────────────────────────────────────
+  // The dragged center is held in a ref and applied IMPERATIVELY inside applyCrop — NEVER routed
+  // through React state during the gesture (that reintroduces the known preview-lag/flash). `active`
+  // is a LATCH: it stays on from pointer-down until the settled React `frame` catches up to the
+  // committed center (post-round-trip), so the crop never snaps back to the old center mid-commit.
+  const panRef = useRef<{ active: boolean; cx: number }>({ active: false, cx: panCx });
+  const panDragRef = useRef<{
+    startX: number;
+    startCx: number;
+    width: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false); // a drag ended → swallow the trailing click (no play toggle)
+
   // Apply the crop to the DOM imperatively (no React state) so it lands on the SAME presented frame
   // as the pixels. React no longer controls objectFit/objectPosition/opacity on the master (nor the
   // aux opacity) — this owns them — so a lagged re-render can't repaint the new shot in the old
@@ -84,7 +107,9 @@ export function PreviewPlayer({
       if (!v) return;
       const m = f?.mode ?? "fill";
       v.style.objectFit = m === "fit" ? "contain" : "cover";
-      v.style.objectPosition = m === "fill" ? `${(f?.cx ?? 0.5) * 100}% 50%` : "";
+      // During a pan drag (latch active) the fill crop follows the dragged center, not the frame's.
+      const fillCx = panRef.current.active ? panRef.current.cx : (f?.cx ?? 0.5);
+      v.style.objectPosition = m === "fill" ? `${fillCx * 100}% 50%` : "";
       v.style.opacity = m === "split" ? "0" : "";
       const aux = auxARef.current;
       if (aux) {
@@ -110,6 +135,73 @@ export function PreviewPlayer({
     },
     [videoRef],
   );
+
+  // ── P1 drag-to-pan handlers (attached to the master <video> only when panEnabled) ──
+  // Dragging right grabs the frame and moves it right → reveals content on the LEFT → cx DECREASES
+  // (natural "grab the picture" feel). cx is clamped to [0,1]; for object-fit:cover that keeps the
+  // 9:16 window fully inside the source width. The live crop is written imperatively (applyCrop),
+  // the override is committed on pointer-up. The trailing click is swallowed so it can't toggle play.
+  const onPanPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (!panEnabled) return;
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      panDragRef.current = { startX: e.clientX, startCx: panCx, width: rect.width || 1, moved: false };
+      panRef.current = { active: true, cx: panCx };
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // capture is best-effort; the drag still tracks via move events without it
+      }
+    },
+    [panEnabled, panCx],
+  );
+
+  const onPanPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const drag = panDragRef.current;
+      if (!drag) return;
+      const dx = e.clientX - drag.startX;
+      if (Math.abs(dx) > 3) drag.moved = true;
+      const cx = Math.max(0, Math.min(1, drag.startCx - dx / drag.width));
+      panRef.current.cx = cx;
+      applyCrop(frameRef.current); // live, imperative — no React state during the gesture
+    },
+    [applyCrop],
+  );
+
+  const onPanPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const drag = panDragRef.current;
+      if (!drag) return;
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        // release is best-effort — capture may not have been set
+      }
+      panDragRef.current = null;
+      if (drag.moved) {
+        suppressClickRef.current = true; // this pointer-up will emit a click → swallow it
+        onPanCommit?.(panRef.current.cx);
+        // keep panRef.active (latch) — released by the effect below once React `frame` catches up
+      } else {
+        panRef.current.active = false; // a tap, not a drag → let the click toggle play
+      }
+    },
+    [onPanCommit],
+  );
+
+  // Release the drag latch once the settled React `frame` reflects the committed center (or panning
+  // is no longer applicable) → hands the crop back to the normal frameAt path with no snap-back.
+  useEffect(() => {
+    if (!panRef.current.active || panDragRef.current) return; // idle or still dragging
+    if (!panEnabled || (frame?.mode ?? "fill") !== "fill") {
+      panRef.current.active = false;
+      return;
+    }
+    if (Math.abs((frame?.cx ?? 0.5) - panRef.current.cx) < 0.02) {
+      panRef.current.active = false; // React caught up; DOM already shows the right crop
+    }
+  }, [frame, panEnabled]);
 
   // Превью переключает кроп МГНОВЕННО на склейке: cx внутри лок-шота — КОНСТАНТА, на границе шота —
   // жёсткий скачок (ровно как режет рендер). НЕТ CSS-анимации object-position: раньше висел
@@ -293,6 +385,15 @@ export function PreviewPlayer({
     else video.pause();
   }, [videoRef]);
 
+  // Video click toggles play — unless it's the trailing click of a pan drag (then swallow it once).
+  const handleVideoClick = useCallback(() => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    togglePlay();
+  }, [togglePlay]);
+
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void containerRef.current?.requestFullscreen();
@@ -375,9 +476,22 @@ export function PreviewPlayer({
           src={src}
           playsInline
           preload="auto"
-          onClick={togglePlay}
-          className="absolute inset-0 size-full cursor-pointer object-cover"
+          onClick={handleVideoClick}
+          onPointerDown={onPanPointerDown}
+          onPointerMove={onPanPointerMove}
+          onPointerUp={onPanPointerUp}
+          onPointerCancel={onPanPointerUp}
+          className={`absolute inset-0 size-full object-cover ${
+            panEnabled ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-pointer"
+          }`}
         />
+
+        {/* P1: subtle "drag to pan" affordance — only while a fill shot is selected */}
+        {panEnabled && (
+          <span className="pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white/90 backdrop-blur">
+            {t("dragToPan")}
+          </span>
+        )}
 
         {/* split: два синхронных окна (верх/низ), каждое кропится вокруг своего центра */}
         <div
