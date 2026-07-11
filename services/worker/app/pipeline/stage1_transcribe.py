@@ -42,6 +42,20 @@ GROQ_LARGE_USD_PER_MIN = 0.00185  # whisper-large-v3: $0.111/hr
 DEEPGRAM_UNSUPPORTED: frozenset[str] = frozenset({"kk"})
 
 
+def resolve_transcription_provider(
+    language: str | None, *, configured_provider: str, groq_api_key_set: bool
+) -> str:
+    """PURE. Effective provider for THIS request — the same predicate `transcribe()` uses
+    to auto-route kk (Kazakh) audio to Groq. Also used by run.py to key the content-addressed
+    transcript cache: the cache MUST key on the effective provider, not the static
+    ``configured_provider`` config, or a request that resolves to a different provider than a
+    prior request (e.g. kk toggled on after a prior run without it) would hit a stale cache
+    entry from the wrong provider and never actually call the right one."""
+    if language in DEEPGRAM_UNSUPPORTED and configured_provider == "deepgram" and groq_api_key_set:
+        return "groq"
+    return configured_provider
+
+
 # ─────────────────────────── pure-нормализация (unit-тесты) ───────────────────────────
 
 
@@ -264,17 +278,20 @@ def transcribe(wav: Path, *, language: str | None = None) -> Transcript:
     if not wav.exists():
         raise JobError(_STAGE, f"no input wav: {wav}")
     s = get_settings()
-    provider = s.transcription_provider
 
     # Авто-роутинг: языки, не поддерживаемые Deepgram → Groq (если ключ задан).
-    if language in DEEPGRAM_UNSUPPORTED and provider == "deepgram":
-        if not s.groq_api_key:
-            raise JobError(
-                _STAGE,
-                f"language '{language}' is not supported by Deepgram; "
-                "set GROQ_API_KEY to enable Groq transcription for this language",
-            )
-        provider = "groq"
+    _kk_needs_groq = language in DEEPGRAM_UNSUPPORTED and s.transcription_provider == "deepgram"
+    if _kk_needs_groq and not s.groq_api_key:
+        raise JobError(
+            _STAGE,
+            f"language '{language}' is not supported by Deepgram; "
+            "set GROQ_API_KEY to enable Groq transcription for this language",
+        )
+    provider = resolve_transcription_provider(
+        language,
+        configured_provider=s.transcription_provider,
+        groq_api_key_set=bool(s.groq_api_key),
+    )
 
     if provider == "groq":
         key = s.groq_api_key

@@ -36,8 +36,8 @@ from app.pipeline.preview_moments import (
 from app.pipeline.stage0_import import SourceMeta, build_preview_proxy, import_youtube
 from app.pipeline.stage1_transcribe import (
     DEEPGRAM_NOVA_USD_PER_MIN,
-    DEEPGRAM_UNSUPPORTED,
     GROQ_TURBO_USD_PER_MIN,
+    resolve_transcription_provider,
     transcribe_to_file,
 )
 from app.pipeline.stage2_select import select_segments
@@ -62,17 +62,21 @@ def _snippet(words: list[Word], start: float, end: float, limit: int = 240) -> s
     return " ".join(w.text for w in words_in_segment(words, start, end))[:limit]
 
 
-def transcript_cache_model(settings: Any) -> str:
-    """PURE. Имя модели для ключа кэша транскрипта, ЗАВИСЯЩЕЕ от провайдера.
+def transcript_cache_model(settings: Any, provider: str) -> str:
+    """PURE. Имя модели для ключа кэша транскрипта, ЗАВИСЯЩЕЕ от ЭФФЕКТИВНОГО провайдера.
 
+    ``provider`` — эффективный провайдер ЭТОГО запроса (см. resolve_transcription_provider),
+    НЕ settings.transcription_provider напрямую: kk (казахский) авто-роутится deepgram→groq
+    за пределами статичного конфига, и до этой правки кэш-ключ игнорировал роутинг — Kazakh-
+    транскрипт (или наоборот, ложный Deepgram-результат до включения тумблера) мог залипнуть
+    под чужим provider+model на один и тот же audio sha.
     Раньше run.py клал в ключ всегда ``deepgram_model`` — для assemblyai это мусорный слот
     (транскрипт помечался deepgram-моделью, смена assemblyai-модели не инвалидировала кэш).
-    Берём модель выбранного провайдера; для assemblyai читаем ``assemblyai_model`` через
-    getattr (поле опционально в config — провайдер ещё не реализован, дефолт безопасный).
     """
-    provider = settings.transcription_provider
     if provider == "assemblyai":
         return str(getattr(settings, "assemblyai_model", None) or "assemblyai-default")
+    if provider == "groq":
+        return str(settings.groq_model)
     return str(settings.deepgram_model)
 
 
@@ -708,11 +712,21 @@ def run_pipeline(
         cached_tr: Transcript | None = None
         sha: str | None = None
         ck: str | None = None
-        tr_model = transcript_cache_model(s)
+        # ⚠️ Ключ кэша ОБЯЗАН зависеть от ЭФФЕКТИВНОГО провайдера (kk авто-роутится
+        # deepgram→groq за пределами s.transcription_provider) — иначе кэш "видит" один и тот
+        # же audio sha под чужим provider+model и отдаёт транскрипт от НЕПРАВИЛЬНОГО провайдера
+        # (напр. заезженный Deepgram-результат с автоопределением языка на kk после того как
+        # тумблер "казахский" включили ПОСЛЕ первого прогона). См. resolve_transcription_provider.
+        effective_provider = resolve_transcription_provider(
+            language,
+            configured_provider=s.transcription_provider,
+            groq_api_key_set=bool(s.groq_api_key),
+        )
+        tr_model = transcript_cache_model(s, effective_provider)
         if s.transcript_cache_enabled:
             sha = audio_sha(wav_path)
-            ck = cache_key(sha, s.transcription_provider, tr_model)
-            cloud_tr = db.get_cached_transcript(sha, s.transcription_provider, tr_model)
+            ck = cache_key(sha, effective_provider, tr_model)
+            cloud_tr = db.get_cached_transcript(sha, effective_provider, tr_model)
             cached_tr = (
                 Transcript.model_validate(cloud_tr)
                 if cloud_tr is not None
@@ -725,10 +739,9 @@ def run_pipeline(
             print(f"[1] transcribe: cached/hash ({len(transcript.words)} words, $0)")
         else:
             transcript = transcribe_to_file(wav_path, tr_path, language=language)
-            # Cost depends on effective provider (Groq for kk, Deepgram otherwise).
             rate = (
                 GROQ_TURBO_USD_PER_MIN
-                if language in DEEPGRAM_UNSUPPORTED and s.groq_api_key
+                if effective_provider == "groq"
                 else DEEPGRAM_NOVA_USD_PER_MIN
             )
             transcribe_cost = round(transcript.duration / 60 * rate, 4)
@@ -741,9 +754,7 @@ def run_pipeline(
                     max_age_days=s.transcript_cache_max_age_days,
                 )
             if s.transcript_cache_enabled and sha is not None:
-                db.put_cached_transcript(
-                    sha, s.transcription_provider, tr_model, transcript.model_dump()
-                )
+                db.put_cached_transcript(sha, effective_provider, tr_model, transcript.model_dump())
     stages["transcription"] = round(time.perf_counter() - t0, 2)
     db.set_progress_detail(job_id, transcript_words=len(transcript.words))  # live narration
     # Дополняем энергетические маркеры (с download) транскриптными (вопрос/нажим/цифра/пауза) и

@@ -63,20 +63,21 @@ def test_chapters_job_success_writes_done(monkeypatch, tmp_path):
 
 
 def test_transcript_cache_model_is_provider_aware():
-    # Ключ кэша транскрипта должен зависеть от ВЫБРАННОГО провайдера, а не всегда от
-    # deepgram_model. Иначе assemblyai-транскрипт помечается deepgram-моделью (мусорный
-    # слот) и смена assemblyai-модели не инвалидировала бы кэш.
+    # Ключ кэша транскрипта должен зависеть от ЭФФЕКТИВНОГО провайдера (аргумент), а не
+    # всегда от deepgram_model. Иначе assemblyai/groq-транскрипт помечается deepgram-моделью
+    # (мусорный слот) и смена модели того провайдера не инвалидировала бы кэш.
     from app.run import transcript_cache_model
 
     class _S:
         transcription_provider = "deepgram"
         deepgram_model = "nova-3"
         assemblyai_model = "best"
+        groq_model = "whisper-large-v3-turbo"
 
     s = _S()
-    assert transcript_cache_model(s) == "nova-3"
-    s.transcription_provider = "assemblyai"
-    assert transcript_cache_model(s) == "best"
+    assert transcript_cache_model(s, "deepgram") == "nova-3"
+    assert transcript_cache_model(s, "assemblyai") == "best"
+    assert transcript_cache_model(s, "groq") == "whisper-large-v3-turbo"
 
 
 # ─────────────────────────── BE-H: метеринг расхода (PAYG split) ───────────────────────────
