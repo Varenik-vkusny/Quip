@@ -478,6 +478,8 @@
       "splitAtPlayheadAria": "Split the shot at the playhead",
       "clearSplits": "Clear splits",
       "clearSplitsTitle": "Remove the manual split boundaries you added",
+      "mergeShotsTitle": "Merge these two shots (drop the AI cut)",
+      "mergeShotsAria": "Merge the two shots at this boundary",
       "forcedFramingMode": "Forced framing mode",
       "wide": "Wide",
       "tight": "Tight",

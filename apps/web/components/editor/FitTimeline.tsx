@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Scissors } from "lucide-react";
+import { Loader2, Scissors, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { mmss } from "@/lib/format";
@@ -69,6 +69,10 @@ export interface FitTimelineProps {
   selectedShot?: SelectedShot | null;
   /** P1: клик по одному блоку → выбрать этот шот (или null при range-драге/сбросе). */
   onSelectShot?: (shot: SelectedShot | null) => void;
+  /** P3: персист ручной правки реза на SOURCE-времени. "split" вставляет границу на плейхеде;
+   *  "merge" убирает AI-рез на границе шотов (склеивает два шота). Optional: без него «Split here»
+   *  остаётся чисто клиентским (маркер `userSplits`), а merge-контролы не рисуются. */
+  onCut?: (sourceTime: number, action: "split" | "merge") => void;
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
@@ -140,6 +144,7 @@ export function FitTimeline({
   onApplyRange,
   selectedShot,
   onSelectShot,
+  onCut,
 }: FitTimelineProps) {
   const t = useTranslations("editor.shots");
   // User-facing framing-mode label (fit→Wide, fill→Tight, split→Split; unknown → raw).
@@ -294,9 +299,14 @@ export function FitTimeline({
     if (!inside) return;
     // не дублируем почти совпадающий рез
     if (userSplits.some((s) => Math.abs(s - rounded) < 1e-3)) return;
+    // Оптимистичный клиентский маркер для МГНОВЕННОГО фидбека (истина — персистнутые manual_cuts:
+    // когда родитель перечитает /reframe, рез станет реальной границей региона, а userSplits сбросится).
     setUserSplits((prev) => [...prev, rounded].sort((a, b) => a - b));
     setSel(null); // границы блоков сдвинулись → старое выделение неактуально
-  }, [busy, blocks, nowSec, intervals, userSplits]);
+    // P3: персист реза на его SOURCE-времени (round-trip clip-время маркера → source через тот же
+    // clipTimeToSource, что и apply) — чтобы рез пережил перезагрузку и дошёл до рендера.
+    onCut?.(clipTimeToSource(rounded, intervals), "split");
+  }, [busy, blocks, nowSec, intervals, userSplits, onCut]);
 
   // можно ли резать на текущем плейхеде (для disabled-состояния кнопки)
   const canSplit = useMemo(() => {
@@ -397,7 +407,7 @@ export function FitTimeline({
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        className={`relative flex h-14 w-full gap-px overflow-hidden rounded-lg border border-line bg-surface-2 touch-none ${
+        className={`group relative flex h-14 w-full gap-px overflow-hidden rounded-lg border border-line bg-surface-2 touch-none ${
           busy ? "cursor-wait opacity-60" : "cursor-pointer"
         }`}
       >
@@ -488,6 +498,37 @@ export function FitTimeline({
             aria-hidden
           />
         )}
+
+        {/* P3: merge (✕) на КАЖДОЙ внутренней границе шотов → убрать AI-рез, склеив два соседних
+            шота. Появляется на hover полосы (чистый NLE-паттерн). stopPropagation на pointerdown,
+            чтобы клик по ✕ не стартовал драг-выделение. Только для реальных AI-шотов (variant="ai")
+            и когда родитель дал onCut. Граница на blocks[i+1].t0 = стык blocks[i]/blocks[i+1]. */}
+        {onCut &&
+          variant === "ai" &&
+          blocks.length > 1 &&
+          blocks.slice(1).map((blk, i) => {
+            const frac = clamp((blk.t0 - t0) / clipDur, 0, 1);
+            const srcTime = clipTimeToSource(blk.t0, intervals);
+            return (
+              <button
+                key={`merge-${i}`}
+                type="button"
+                disabled={busy}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSel(null);
+                  onCut(srcTime, "merge");
+                }}
+                title={t("mergeShotsTitle")}
+                aria-label={t("mergeShotsAria")}
+                style={{ left: `${frac * 100}%` }}
+                className="absolute top-1/2 z-20 flex size-4 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-line bg-surface text-muted opacity-0 transition enabled:hover:border-accent enabled:hover:text-accent group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-wait"
+              >
+                <X className="size-2.5" aria-hidden />
+              </button>
+            );
+          })}
       </div>
 
       {/* Split here: вставить клиентскую границу на плейхеде, чтобы форснуть половину

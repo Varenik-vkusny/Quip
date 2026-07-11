@@ -14,6 +14,7 @@ import {
   setDefaultTemplate,
   type StyleTemplate,
   type StylePreferencePayload,
+  editCut,
   getClipAnalysis,
   getClipAss,
   getClipEdit,
@@ -1346,6 +1347,33 @@ export default function ClipEditorScreen({
     [applyFraming],
   );
 
+  // ── P3: ручная правка сегментации шотов (split добавляет границу, merge убирает AI-рез) ──
+  // Render-required (меняет РАСКЛАДКУ шотов → пиксели): flush → версия-bump → dirty → перечитать план.
+  // RESHUFFLE-SAFETY: перечитать /reframe тут КОРРЕКТНО (в отличие от чистой перекраски кадра): рез
+  // реально меняет раскладку шотов, а воркер применяет резы ДЕТЕРМИНИРОВАННО поверх ПЕРСИСТНУТОГО плана
+  // (для locked+untrimmed клипа /reframe fast-path отдаёт запечённый план + override'ы + резы БЕЗ CV-
+  // пересчёта) → раскладка меняется ТОЛЬКО на рез юзера, без случайной ре-сегментации. Это НЕ возвращает
+  // P1-баг перетасовки — там перекраска НЕ меняла раскладку, а тут смена раскладки и есть цель.
+  const handleCut = useCallback(
+    async (sourceTime: number, action: "split" | "merge") => {
+      if (!edit) return;
+      setError(null);
+      recordSnapshot(); // pre-cut content → один undo-шаг (до любой мутации)
+      try {
+        await flushPending(); // персист накопленных правок субтитров ДО версия-bump'а
+        const v = editRef.current?.version ?? edit.version ?? 1;
+        const newEdit = await editCut(jobId, clipId, v, sourceTime, action);
+        commitEdit(newEdit); // очередь читает свежую версию + undo-шаг
+        setDirty(true);
+        setPixelDirty(true); // рез меняет раскладку шотов → mp4-пиксели → нужен ре-рендер
+        await loadReframe(); // раскладка изменилась → перечитать план (детерминированно, без перетасовки)
+      } catch (e) {
+        failOr409(e);
+      }
+    },
+    [edit, jobId, clipId, loadReframe, failOr409, flushPending, commitEdit, recordSnapshot],
+  );
+
   // ── P1: выбрать один шот в полосе → верхние Frame-контролы + драг-пан превью привязаны к нему ──
   // Сикаем превью на начало шота, чтобы юзер ВИДЕЛ, что кадрирует (и драг-пан имел смысл).
   const handleSelectShot = useCallback(
@@ -1977,6 +2005,7 @@ export default function ClipEditorScreen({
           selectedShot={selectedShot}
           selectedShotSeed={selectedShotSeed}
           onSelectShot={handleSelectShot}
+          onCut={handleCut}
         />
       )}
     </>

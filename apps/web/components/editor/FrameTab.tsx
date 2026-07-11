@@ -65,6 +65,7 @@ export function FrameTab({
   selectedShot,
   selectedShotSeed,
   onSelectShot,
+  onCut,
 }: {
   edit: ClipEdit;
   outerStart: number;
@@ -90,6 +91,8 @@ export function FrameTab({
   selectedShot?: SelectedShot | null;
   selectedShotSeed?: SelectedShotSeed | null;
   onSelectShot?: (shot: SelectedShot | null) => void;
+  // ── P3: persist a manual shot-cut edit (split at playhead / merge an AI boundary) — pass-through to FitTimeline ──
+  onCut?: (sourceTime: number, action: "split" | "merge") => void;
 }) {
   const t = useTranslations("editor.frame");
   const aspect = (edit.aspect as Aspect) ?? "9:16";
@@ -362,6 +365,7 @@ export function FrameTab({
           onApplyRange={onApplyShotRange}
           selectedShot={selectedShot}
           onSelectShot={onSelectShot}
+          onCut={onCut}
         />
       </section>
     </div>

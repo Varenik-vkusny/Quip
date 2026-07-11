@@ -1091,6 +1091,28 @@ export async function setClipInterval(
   return res.json();
 }
 
+/** P3: persist a manual shot-cut edit. `action:"split"` adds a boundary at `sourceTime` (a cut the
+ *  AI missed); `action:"merge"` drops the AI cut nearest `sourceTime`, joining the two shots.
+ *  ("unsplit"/"unmerge" undo those — the contract's four actions; the editor currently sends
+ *  split/merge.) `sourceTime` is in SOURCE seconds (frame-snapped server-side). Returns the new
+ *  ClipEdit (with updated `manual_cuts`/`suppressed_cuts`). Mirrors setCropOverride/setClipMotion. */
+export async function editCut(
+  jobId: string,
+  clipId: string,
+  version: number,
+  sourceTime: number,
+  action: "split" | "merge" | "unsplit" | "unmerge",
+): Promise<ClipEdit> {
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/cut`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ version, source_time: sourceTime, action }),
+  });
+  if (res.status === 409) throw new Error("Edit conflict — reload and retry");
+  if (!res.ok) throw new Error(`editCut failed: ${res.status}`);
+  return res.json();
+}
+
 export async function regenerateHook(
   jobId: string,
   clipId: string,
