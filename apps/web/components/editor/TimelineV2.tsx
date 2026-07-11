@@ -184,10 +184,6 @@ function TimeField({
   );
 }
 
-// scrub → a plain click/drag seeks the preview (client-only). select → click a moment/chapter
-// to jump the clip there (server re-trim). Background drag always scrubs in either mode.
-type SeekMode = "scrub" | "select";
-
 type DragMode = "move" | "resize-l" | "resize-r";
 
 interface DragState {
@@ -247,7 +243,6 @@ export function TimelineV2({
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
 
   // ── seek/scrub (client-only, no server) ──
-  const [mode, setMode] = useState<SeekMode>("scrub");
   // Local playhead override: a click/scrub drives it instantly so the head never lags the finger;
   // handed back to the real nowSec once the video seek lands (catch-up effect + safety timeout).
   const [scrubT, setScrubT] = useState<number | null>(null);
@@ -579,20 +574,6 @@ export function TimelineV2({
     [endDrag],
   );
 
-  const jumpTo = useCallback(
-    (rawStart: number, rawEnd: number) => {
-      const len = clamp(rawEnd - rawStart, CLIP_MIN_SEC, CLIP_MAX_SEC);
-      let start = rawStart;
-      let end = start + len;
-      if (end > duration) {
-        end = duration;
-        start = Math.max(0, end - len);
-      }
-      commit(start, end);
-    },
-    [duration, commit],
-  );
-
   const hoverSeg = hover ? segmentAt(data.segments, hover.t, viewLen * 0.015) : null;
   const chapterList = chapters?.status === "done" ? (chapters.chapters ?? []) : [];
   const hoverChapter = hover ? chapterAt(chapterList, hover.t) : null;
@@ -602,8 +583,8 @@ export function TimelineV2({
 
   return (
     <div className="w-full select-none" onWheel={onWheel}>
-      {/* ── control row: editable trim fields (start / end / length) + the seek-mode toggle on
-          the left; zoom on the right. Typing a field commits the SAME server trim as the grips. ── */}
+      {/* ── control row: editable trim fields (start / end / length) on the left; zoom on the
+          right. Typing a field commits the SAME server trim as the grips. ── */}
       <div className="mb-1.5 flex flex-wrap items-end justify-between gap-x-3 gap-y-2">
         <div className="flex flex-wrap items-end gap-2.5">
           <TimeField
@@ -627,35 +608,6 @@ export function TimelineV2({
             disabled={busy}
             onCommit={commitLength}
           />
-          {/* seek-mode toggle — Scrub (click/drag = seek) vs Jump clip (click a moment/chapter
-              re-trims). Background drag always scrubs; only marker/chapter clicks change. */}
-          <div
-            className="inline-flex items-center gap-0.5 self-end rounded-md border border-line p-0.5"
-            role="group"
-          >
-            <button
-              type="button"
-              onClick={() => setMode("scrub")}
-              aria-pressed={mode === "scrub"}
-              title={t("modeScrubHint")}
-              className={`rounded px-2 py-1 text-[11px] font-semibold transition duration-150 ease-snappy ${
-                mode === "scrub" ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
-              }`}
-            >
-              {t("modeScrub")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("select")}
-              aria-pressed={mode === "select"}
-              title={t("modeSelectHint")}
-              className={`rounded px-2 py-1 text-[11px] font-semibold transition duration-150 ease-snappy ${
-                mode === "select" ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
-              }`}
-            >
-              {t("modeSelect")}
-            </button>
-          </div>
         </div>
         <div className="flex shrink-0 items-center gap-2 self-end">
           <button
@@ -712,7 +664,7 @@ export function TimelineV2({
               <button
                 key={i}
                 type="button"
-                onClick={() => (mode === "select" ? jumpTo(c.start, c.end) : seekTo(c.start))}
+                onClick={() => seekTo(c.start)}
                 title={`${c.title}\n${c.summary}`}
                 className="group/ch absolute top-0 flex h-full items-center gap-1.5 truncate border-l border-line px-2 text-left text-[11px] leading-none text-muted transition hover:bg-surface-3 hover:text-ink"
                 style={{ left: pct(c.start), width: `${Math.max(widthFrac * 100, 0.5)}%` }}
@@ -733,9 +685,7 @@ export function TimelineV2({
         {/* дорожка */}
         <div
           ref={trackRef}
-          className={`relative h-20 w-full touch-none overflow-hidden rounded-lg border border-line bg-gradient-to-b from-surface-2 to-surface shadow-inner ${
-            mode === "select" ? "cursor-default" : "cursor-pointer"
-          }`}
+          className="relative h-20 w-full touch-none cursor-pointer overflow-hidden rounded-lg border border-line bg-gradient-to-b from-surface-2 to-surface shadow-inner"
           onPointerDown={onTrackPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onTrackPointerUp}
@@ -784,8 +734,7 @@ export function TimelineV2({
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (mode === "select") jumpTo(s.start, s.end);
-                  else seekTo(s.start);
+                  seekTo(s.start);
                 }}
                 title={`${typeLabel(s.type)} · ${s.score.toFixed(2)} · ${s.reason}`}
                 aria-label={t("goToMoment", { type: typeLabel(s.type) })}
@@ -940,9 +889,7 @@ export function TimelineV2({
                   <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">
                     {hoverSeg.why_works || hoverSeg.reason}
                   </p>
-                  <p className="mt-1.5 text-[10px] font-medium text-accent">
-                    {mode === "select" ? t("clickToMove") : t("clickToSeek")}
-                  </p>
+                  <p className="mt-1.5 text-[10px] font-medium text-accent">{t("clickToSeek")}</p>
                 </>
               ) : hoverText ? (
                 <>
