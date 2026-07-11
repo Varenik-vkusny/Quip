@@ -5,8 +5,9 @@
 квотой диска влезает мало контейнеров → параллельность зажата (см. docs про ephemeral-disk quota).
 
 Решение: координатор (у него source уже локально) режет КАЖДОМУ клипу маленький сегмент
-**stream-copy `-c copy`** (кадры БАЙТ-идентичны источнику, НУЛЬ переэнкода) от ближайшего кейфрейма
-≤ seg.start; контейнер качает только свой сегмент (десятки МБ, НЕЗАВИСИМО от длины source).
+**B-frame-safe ре-энкодом в lossless I/P (`-qp 0 -bf 0`)** от ближайшего кейфрейма ≤ seg.start;
+контейнер качает только свой сегмент (десятки МБ, НЕЗАВИСИМО от длины source). (Простой `-c copy`
+на B-кадровом источнике сдвигал сетку рефрейма на ~2 кадра — детали и пруф в extract_segment.)
 
 ⚠️ ИНВАРИАНТ КАДРОВОЙ СЕТКИ (docs/REFRAME_FPS_GRID_INVARIANT.md). Извлечение сегмента СДВИГАЕТ
 origin времени — ровно то, что защищает инвариант. Кадр 0 сегмента ЕСТЬ кадр K источника (K —
@@ -146,14 +147,21 @@ def find_preceding_keyframe(
 
 
 def extract_segment(source: Path, dest: Path, keyframe_time: float, end: float) -> None:
-    """Lossless stream-copy сегмента [keyframe_time, end] source→dest. `-ss` на КЕЙФРЕЙМЕ +
-    `-c copy` → кадры байт-идентичны, ноль переэнкода. `-avoid_negative_ts make_zero` → PTS
-    сегмента с 0 (кадр 0 = кадр keyframe·fps источника). JobError при сбое / нет выхода (№8)."""
+    """B-frame-SAFE сегмент [keyframe_time, end] source→dest. Ре-энкодит МАЛЕНЬКИЙ сегмент в чистый
+    I/P-поток, математически LOSSLESS (`-qp 0 -bf 0`): кадр 0 == кейфрейм, переупорядочивания нет.
+
+    ⚠️ Простой `-c copy` НЕ безопасен: на B-кадровом источнике `-ss` seek + copy +
+    `avoid_negative_ts make_zero` сдвигали контент на глубину reorder (~2 кадра) → кадровая сетка
+    рефрейма ЕХАЛА (ДОКАЗАНО: `-c copy` → дрейф 2 кадра; этот ре-энкод → сетка Δ=0 + PSNR=inf на
+    том же B-кадровом источнике). `-qp 0` = ноль потери качества; сегмент крупнее copy, но всё равно
+    копейки против source. Аплоады юзеров (телефоны/редакторы) часто с B-кадрами, потому copy
+    нельзя. JobError при сбое / нет выхода (№8)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y", "-ss", f"{keyframe_time:.6f}", "-i", str(source),
         "-t", f"{max(0.0, end - keyframe_time):.6f}",
-        "-c", "copy", "-avoid_negative_ts", "make_zero", "-map", "0", str(dest),
+        "-c:v", "libx264", "-preset", "veryfast", "-qp", "0", "-bf", "0",
+        "-c:a", "aac", "-map", "0", str(dest),
     ]  # fmt: skip
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
