@@ -10,6 +10,7 @@ import type {
   ClipOut,
   HighlightStyle,
   Job,
+  SilenceConfig,
   TimelineData,
   VideoMap,
   Word,
@@ -1043,6 +1044,24 @@ export async function setClipMotion(
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
   if (!res.ok) throw new Error(`setClipMotion failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setClipSilence(
+  jobId: string,
+  clipId: string,
+  version: number,
+  silenceConfig: SilenceConfig,
+): Promise<ClipEdit> {
+  // Pause removal (spec 2026-07-12): toggle + tightness per clip. Non-destructive (toggle = flip
+  // enabled). Render-required — changes timing AND pixels (like trim/motion) → flush + pixelDirty.
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/silence`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ version, silence_config: silenceConfig }),
+  });
+  if (res.status === 409) throw new Error("Edit conflict — reload and retry");
+  if (!res.ok) throw new Error(`setClipSilence failed: ${res.status}`);
   return res.json();
 }
 

@@ -301,6 +301,7 @@
       "subtitles": "Субтитры",
       "hook": "Хук",
       "frame": "Кадр",
+      "pauses": "Паузы",
       "agent": "Агент"
     },
     "shell": {

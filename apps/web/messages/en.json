@@ -301,6 +301,7 @@
       "subtitles": "Subtitles",
       "hook": "Hook",
       "frame": "Frame",
+      "pauses": "Pauses",
       "agent": "Agent"
     },
     "shell": {
