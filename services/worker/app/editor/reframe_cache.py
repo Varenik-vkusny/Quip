@@ -170,6 +170,88 @@ def apply_overrides_to_regions(
     return out
 
 
+def _split_region_at(r: TrackRegion, t: float) -> list[TrackRegion]:
+    """Split region r at interval-relative time t (already frame-snapped, strictly interior). PURE.
+
+    Both pieces inherit r.mode + fit_style. For a fill region the LEADING piece keeps r.points; the
+    TRAILING piece re-anchors a SINGLE static TrackPoint at cx of r's last point (so a manual cut on
+    a followed shot does not duplicate the follower trajectory across the new boundary). fit → no
+    points. t0/t1 stay on-grid (t is snapped by the caller) → Δ=0.
+    """
+    if r.mode != "fill" or not r.points:
+        left = TrackRegion(t0=r.t0, t1=t, mode=r.mode, points=r.points, points_b=r.points_b,
+                           fit_style=r.fit_style)  # fmt: skip
+        right = TrackRegion(t0=t, t1=r.t1, mode=r.mode, points=r.points, points_b=r.points_b,
+                            fit_style=r.fit_style)  # fmt: skip
+        return [left, right]
+    cx = r.points[-1].cx if r.points[-1].cx is not None else 0.5
+    left = TrackRegion(t0=r.t0, t1=t, mode="fill", points=r.points, fit_style=r.fit_style)
+    right = TrackRegion(
+        t0=t, t1=r.t1, mode="fill",
+        points=(TrackPoint(t=t, mode="fill", cx=cx),), fit_style=r.fit_style,
+    )  # fmt: skip
+    return [left, right]
+
+
+def apply_cuts_to_regions(
+    regions: list[TrackRegion],
+    manual_cuts: list[float],
+    suppressed_cuts: list[float],
+    iv: SourceInterval,
+    *,
+    fps: float,
+    merge_tol: float = 0.12,
+) -> list[TrackRegion]:
+    """Apply manual shot-boundary edits to interval-relative regions. PURE, frame-snapped (Δ=0).
+
+    P3 monteur control: the AI mis-segmented the clip → add a cut it missed, or merge an AI cut that
+    shouldn't be there. ``manual_cuts``/``suppressed_cuts`` are SOURCE seconds (survive trim, like
+    reframe_overrides); we map them to interval-relative time. Runs AFTER apply_overrides_to_regions
+    on BOTH the render path and the /reframe preview path → preview == render.
+
+    • SPLIT (manual_cuts): each cut inside [iv.source_start, iv.source_end] → interval-relative,
+      frame-snapped (_snap). If strictly interior to a region, split it at the snapped time (both
+      pieces inherit the region's mode; see _split_region_at). A cut on an existing boundary or
+      outside every region is ignored (no zero-length sliver, no silent crash).
+    • MERGE (suppressed_cuts): each time within ``merge_tol`` of a region boundary drops that
+      boundary — the two adjacent regions concatenate into one [prev.t0, next.t1] keeping the FIRST
+      region's mode+points (the user then re-picks framing on the merged shot via the P1 inspector).
+      A suppressed time near no boundary is ignored.
+
+    Every boundary stays on the native fps grid (round(t*fps)/fps) so flatten_timeline anchors it on
+    an exact source frame → no 1-frame flash on ≠25fps (REFRAME_FPS_GRID_INVARIANT).
+    """
+    out = list(regions)
+    frame_eps = 0.5 / fps  # a cut within half a native frame of an existing edge IS that edge
+
+    # ── SPLIT ── apply each manual cut (sorted so multiple cuts on one region are stable)
+    for src in sorted(manual_cuts):
+        if not (iv.source_start <= src <= iv.source_end):
+            continue  # outside the clip → ignore (no silent fallback: it simply doesn't apply)
+        t = _snap(src - iv.source_start, fps)
+        for i, r in enumerate(out):
+            # strictly interior AND ≥ half a frame from both edges → a real new boundary. A cut that
+            # snaps onto (or within a frame of) an existing boundary is the SAME cut → no-op sliver.
+            if r.t0 < t < r.t1 and (t - r.t0) >= frame_eps and (r.t1 - t) >= frame_eps:
+                out = out[:i] + _split_region_at(r, t) + out[i + 1 :]
+                break
+
+    # ── MERGE ── drop each suppressed boundary (interior only; keep the first region's frame) ──
+    for src in sorted(suppressed_cuts, reverse=True):
+        t = _snap(src - iv.source_start, fps)
+        for i in range(1, len(out)):
+            if abs(out[i].t0 - t) <= merge_tol:  # boundary between out[i-1] and out[i]
+                prev, nxt = out[i - 1], out[i]
+                merged = TrackRegion(
+                    t0=prev.t0, t1=nxt.t1, mode=prev.mode,
+                    points=prev.points, points_b=prev.points_b, fit_style=prev.fit_style,
+                )  # fmt: skip
+                out = out[: i - 1] + [merged] + out[i + 1 :]
+                break
+
+    return out
+
+
 def resolve_regions(
     intervals: list[SourceInterval],
     raw_by_interval: list[RawReframe],
@@ -277,6 +359,8 @@ def resolve_regions_accurate(
     min_scene_sec: float = 0.25,
     split_enabled: bool = False,
     wide_speak_min: float = 0.3,
+    manual_cuts: list[float] | None = None,
+    suppressed_cuts: list[float] | None = None,
 ) -> list[list[TrackRegion]]:
     """Регионы на интервалы ЕДИНЫМ frame-accurate путём (как batch): per-interval
     `reframe_segment` (PySceneDetect frame-accurate + ASD-говорящий + held-crop по шотам).
@@ -319,6 +403,10 @@ def resolve_regions_accurate(
         # Перекрашиваем покрытые шоты (per-shot force-framing); частичный overlap РЕЖЕТ регион
         # на frame-snapped границах (нативный fps) — инвариант кадровой сетки цел.
         regions = apply_overrides_to_regions(regions, overrides, iv, fps=fps)
+        # P3: ручные cut'ы (split/merge границ шотов) — frame-snapped, тот же инвариант.
+        regions = apply_cuts_to_regions(
+            regions, manual_cuts or [], suppressed_cuts or [], iv, fps=fps
+        )
         out.append(regions)
     return out
 
@@ -363,17 +451,20 @@ def regions_from_persisted(
     overrides: list[CropOverride],
     *,
     fps: float = 25.0,
+    manual_cuts: list[float] | None = None,
+    suppressed_cuts: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Персистнутый payload + текущий интервал/оверрайды → регионы в КЛИП-времени. PURE.
 
     Десериализует регионы, применяет ручные override'ы (apply_overrides_to_regions — полное
     покрытие перекрашивает с сохранением t0/t1; частичный overlap РЕЖЕТ регион на frame-snapped
-    границах в нативном fps, инвариант кадровой сетки цел), разворачивает в клип-время.
-    Тот же путь, что у on-demand resolve_regions_accurate → результат идентичен, только без CV.
-    fps — нативный fps источника (meta.fps), нужен для frame-snap границ split'а.
+    границах в нативном fps, инвариант кадровой сетки цел), затем ручные cut'ы (split/merge границ),
+    разворачивает в клип-время. Тот же путь, что у on-demand resolve_regions_accurate → результат
+    идентичен, только без CV. fps — нативный fps источника (meta.fps), для frame-snap split'ов.
     """
     regions = [_region_from_dict(d) for d in persisted.get("regions", [])]
     regions = apply_overrides_to_regions(regions, overrides, iv, fps=fps)
+    regions = apply_cuts_to_regions(regions, manual_cuts or [], suppressed_cuts or [], iv, fps=fps)
     return regions_to_clip_time([regions], [iv])
 
 
@@ -384,6 +475,8 @@ def plan_to_regions(
     *,
     fps: float,
     fps_tol: float = 1e-6,
+    manual_cuts: list[float] | None = None,
+    suppressed_cuts: list[float] | None = None,
 ) -> list[list[TrackRegion]] | None:
     """Persisted batch-план → render-ready регионы БЕЗ CV, либо None если план НЕ авторитетен. PURE.
 
@@ -405,6 +498,7 @@ def plan_to_regions(
     iv = intervals[0]
     regions = [_region_from_dict(d) for d in persisted.get("regions", [])]
     regions = apply_overrides_to_regions(regions, overrides, iv, fps=fps)
+    regions = apply_cuts_to_regions(regions, manual_cuts or [], suppressed_cuts or [], iv, fps=fps)
     return [regions]
 
 

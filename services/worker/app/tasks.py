@@ -292,8 +292,9 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
         persisted = db.get_reframe_regions(job_id, clip_id)
         if persisted:
             regions = plan_to_regions(
-                persisted, edit.source_intervals, edit.reframe_overrides, fps=src_fps
-            )
+                persisted, edit.source_intervals, edit.reframe_overrides, fps=src_fps,
+                manual_cuts=edit.manual_cuts, suppressed_cuts=edit.suppressed_cuts,
+            )  # fmt: skip
     if regions is None:
         _rlog.info(
             "render: plan-read miss -> CV recompute (follow/trim/fps/no-plan) job=%s clip=%s",
@@ -323,6 +324,8 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
             min_scene_sec=s.reframe_min_scene_sec,
             split_enabled=s.reframe_split_enabled,
             wide_speak_min=s.reframe_wide_speak_min,
+            manual_cuts=edit.manual_cuts,
+            suppressed_cuts=edit.suppressed_cuts,
         )
     else:
         _rlog.info("render: plan-read HIT (no CV) job=%s clip=%s", job_id, clip_id)

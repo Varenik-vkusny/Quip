@@ -174,6 +174,35 @@ def clear_crop_overrides(edit: ClipEdit, source_start: float, source_end: float)
     return edit.model_copy(update={"reframe_overrides": kept})
 
 
+_CUT_DEDUP_TOL = 0.05  # два cut'а ближе 50мс = один (frame-snap всё равно сведёт их к кадру)
+
+
+def add_manual_cut(edit: ClipEdit, source_time: float) -> ClipEdit:
+    """P3: добавить ручную склейку (split) на source_time. Дедуп по близости. PURE."""
+    if any(abs(c - source_time) < _CUT_DEDUP_TOL for c in edit.manual_cuts):
+        return edit
+    return edit.model_copy(update={"manual_cuts": [*edit.manual_cuts, source_time]})
+
+
+def add_suppressed_cut(edit: ClipEdit, source_time: float) -> ClipEdit:
+    """P3: погасить AI-склейку рядом с source_time (merge соседних шотов). Дедуп. PURE."""
+    if any(abs(c - source_time) < _CUT_DEDUP_TOL for c in edit.suppressed_cuts):
+        return edit
+    return edit.model_copy(update={"suppressed_cuts": [*edit.suppressed_cuts, source_time]})
+
+
+def remove_manual_cut(edit: ClipEdit, source_time: float, *, tol: float = 0.2) -> ClipEdit:
+    """P3: убрать ближайшую ручную склейку в пределах tol (отмена split). PURE."""
+    kept = [c for c in edit.manual_cuts if abs(c - source_time) > tol]
+    return edit.model_copy(update={"manual_cuts": kept})
+
+
+def remove_suppressed_cut(edit: ClipEdit, source_time: float, *, tol: float = 0.2) -> ClipEdit:
+    """P3: снять подавление ближайшей AI-склейки в пределах tol (отмена merge). PURE."""
+    kept = [c for c in edit.suppressed_cuts if abs(c - source_time) > tol]
+    return edit.model_copy(update={"suppressed_cuts": kept})
+
+
 def replace_edit_content(
     edit: ClipEdit,
     *,

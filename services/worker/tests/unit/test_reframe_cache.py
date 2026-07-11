@@ -377,3 +377,74 @@ def test_plan_to_regions_applies_override_repaint():
     assert regions is not None
     assert regions[0][0].mode == "fit"  # repainted, boundaries preserved
     assert regions[0][0].t0 == 0.0 and regions[0][0].t1 == 4.0
+
+
+# ── P3: manual cut editing (split / merge a shot boundary), frame-snapped ──
+
+
+def test_manual_cut_splits_region_frame_snapped():
+    # A manual cut strictly interior to a region splits it into two frame-snapped pieces,
+    # both inheriting the region's mode; boundaries land on the native 29.97 grid (Δ=0).
+    from app.editor.reframe_cache import apply_cuts_to_regions
+
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    region_end = 180 / FPS_2997  # on-grid, like reframe_segment emits
+    regions = [
+        TrackRegion(
+            t0=0.0, t1=region_end, mode="fill", points=(TrackPoint(t=0.0, mode="fill", cx=0.4),)
+        )
+    ]
+    # cut at source 11.4 → interval-relative 1.4 (interior, off-grid)
+    out = apply_cuts_to_regions(regions, [11.4], [], iv, fps=FPS_2997)
+    assert len(out) == 2, "a manual interior cut splits the region into 2 pieces"
+    assert [r.mode for r in out] == ["fill", "fill"]
+    assert out[0].t0 == 0.0 and out[1].t1 == region_end
+    assert out[0].t1 == out[1].t0  # contiguous, no gap
+    snapped = round(1.4 * FPS_2997) / FPS_2997
+    assert out[0].t1 == snapped
+    for r in out:
+        assert _frame_error(r.t0, FPS_2997) < _FRAME_EPS, f"unsnapped t0={r.t0}"
+        assert _frame_error(r.t1, FPS_2997) < _FRAME_EPS, f"unsnapped t1={r.t1}"
+
+
+def test_manual_cut_outside_clip_ignored():
+    from app.editor.reframe_cache import apply_cuts_to_regions
+
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    regions = _three_shots()
+    out = apply_cuts_to_regions(regions, [99.0], [], iv, fps=FPS_2997)  # far outside
+    assert out == regions  # no-op
+
+
+def test_manual_cut_on_existing_boundary_no_sliver():
+    from app.editor.reframe_cache import apply_cuts_to_regions
+
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    regions = _three_shots()  # boundaries at rel 2,4 → source 12,14
+    out = apply_cuts_to_regions(regions, [12.0], [], iv, fps=FPS_2997)  # on an existing boundary
+    assert len(out) == 3  # no new sliver
+    for r in out:
+        assert r.t1 > r.t0
+
+
+def test_suppressed_cut_merges_adjacent_regions():
+    # Suppressing the boundary between shot#1 and shot#2 merges them into one region
+    # spanning [prev.t0, next.t1], keeping the FIRST region's mode + points.
+    from app.editor.reframe_cache import apply_cuts_to_regions
+
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    regions = _three_shots()  # [0,2)fill cx0.4, [2,4)fill cx0.6, [4,6)fit
+    out = apply_cuts_to_regions(regions, [], [12.0], iv, fps=FPS_2997)  # boundary rel 2 = source 12
+    assert len(out) == 2, "merge drops one boundary (3 → 2)"
+    assert (out[0].t0, out[0].t1, out[0].mode) == (0.0, 4.0, "fill")
+    assert out[0].points == regions[0].points  # first shot's framing carries across
+    assert (out[1].t0, out[1].t1, out[1].mode) == (4.0, 6.0, "fit")
+
+
+def test_suppressed_cut_matches_nothing_ignored():
+    from app.editor.reframe_cache import apply_cuts_to_regions
+
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    regions = _three_shots()
+    out = apply_cuts_to_regions(regions, [], [13.0], iv, fps=FPS_2997)  # rel 3.0, no boundary there
+    assert out == regions  # no-op

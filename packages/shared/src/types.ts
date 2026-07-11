@@ -254,8 +254,10 @@ export interface ClipEdit {
   captions: CaptionTrack;
   id: string;
   lock_per_shot?: boolean;
+  manual_cuts?: number[];
   reframe_overrides?: CropOverride[];
   source_intervals: SourceInterval[];
+  suppressed_cuts?: number[];
   version?: number;
 }
 /**

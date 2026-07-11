@@ -457,6 +457,12 @@
           "default": true,
           "type": "boolean"
         },
+        "manual_cuts": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
         "reframe_overrides": {
           "items": {
             "$ref": "#/$defs/CropOverride"
@@ -466,6 +472,12 @@
         "source_intervals": {
           "items": {
             "$ref": "#/$defs/SourceInterval"
+          },
+          "type": "array"
+        },
+        "suppressed_cuts": {
+          "items": {
+            "type": "number"
           },
           "type": "array"
         },

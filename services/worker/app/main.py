@@ -55,10 +55,14 @@ from app.editor.interchange import (
     build_vtt,
 )
 from app.editor.ops import (
+    add_manual_cut,
     add_section,
+    add_suppressed_cut,
     apply_extend,
     apply_trim,
     clear_crop_overrides,
+    remove_manual_cut,
+    remove_suppressed_cut,
     replace_edit_content,
     set_crop_override,
     set_interval,
@@ -1938,6 +1942,36 @@ def op_crop(
     return _save_or_409(job_id, clip_id, set_crop_override(edit, ov), body.version)
 
 
+class CutBody(BaseModel):
+    version: int
+    source_time: float  # SOURCE seconds where to add/remove a shot boundary
+    action: Literal["split", "merge", "unsplit", "unmerge"]
+
+
+@app.post("/jobs/{job_id}/clips/{clip_id}/edit/cut")
+def op_cut(
+    job_id: str,
+    clip_id: str,
+    body: CutBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """P3: ручное редактирование границ шотов. split = добавить склейку, которую AI пропустил;
+    merge = погасить лишнюю AI-склейку (объединить соседние шоты); unsplit/unmerge = отмена.
+    Границы frame-snapятся в apply_cuts_to_regions (Δ=0 инвариант). Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
+    edit = _load_or_404(job_id, clip_id)
+    if body.action == "split":
+        new = add_manual_cut(edit, body.source_time)
+    elif body.action == "merge":
+        new = add_suppressed_cut(edit, body.source_time)
+    elif body.action == "unsplit":
+        new = remove_manual_cut(edit, body.source_time)
+    else:  # unmerge
+        new = remove_suppressed_cut(edit, body.source_time)
+    return _save_or_409(job_id, clip_id, new, body.version)
+
+
 class AspectBody(BaseModel):
     version: int
     aspect: Literal["9:16", "1:1", "4:5", "16:9"]
@@ -2345,7 +2379,14 @@ def get_clip_reframe(
     ):
         iv = edit.source_intervals[0]
         return {
-            "regions": regions_from_persisted(persisted, iv, edit.reframe_overrides, fps=meta.fps)
+            "regions": regions_from_persisted(
+                persisted,
+                iv,
+                edit.reframe_overrides,
+                fps=meta.fps,
+                manual_cuts=edit.manual_cuts,
+                suppressed_cuts=edit.suppressed_cuts,
+            )
         }
 
     out = artifacts.ensure_source(job_id).parent
@@ -2375,6 +2416,8 @@ def get_clip_reframe(
             # Без него превью бралось дефолтом resolve_regions_accurate (0.3) ≠ настройке → широкий
             # план в гриде показан горизонтально (fit), а в редакторе-превью — кропом (fill).
             wide_speak_min=s.reframe_wide_speak_min,
+            manual_cuts=edit.manual_cuts,
+            suppressed_cuts=edit.suppressed_cuts,
         )
     except Exception as e:  # noqa: BLE001 — тяжёлый CV мог упасть/таймаутнуть на холодном
         # Явная ошибка вместо непрозрачного 500 (правило №8): фронт отличит «не смогли посчитать»

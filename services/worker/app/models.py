@@ -337,6 +337,11 @@ class ClipEdit(BaseModel):
     # Наведение в fill-шотах: True = ЛОК (статичный кроп на шот, дефолт), False = слежение.
     # Переключатель на клип (таб «Кадр»). RENDER-REQUIRED: меняет ПИКСЕЛИ → нужен ре-рендер.
     lock_per_shot: bool = True
+    # P3 — ручное редактирование границ шотов (SOURCE-секунды, переживают трим как overrides).
+    # manual_cuts: добавить склейку, которую AI пропустил; suppressed_cuts: погасить AI-склейку
+    # (merge соседних шотов). Применяются frame-snapped в apply_cuts_to_regions (инвариант Δ=0).
+    manual_cuts: list[float] = Field(default_factory=list)
+    suppressed_cuts: list[float] = Field(default_factory=list)
 
 
 class CaptionPreset(BaseModel):
