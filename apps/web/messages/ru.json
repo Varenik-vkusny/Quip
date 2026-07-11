@@ -517,7 +517,15 @@
       "saidHere": "Здесь говорят",
       "scrollTimeline": "Прокрутить таймлайн",
       "saving": "сохр…",
-      "minSec": "мин {n}с"
+      "minSec": "мин {n}с",
+      "modeScrub": "Перемотка",
+      "modeSelect": "Клип к моменту",
+      "modeScrubHint": "Клик или перетаскивание дорожки — двигать плейхед",
+      "modeSelectHint": "Клик по моменту или главе — перенести клип туда",
+      "clickToSeek": "Нажмите, чтобы играть отсюда →",
+      "startLabel": "Начало",
+      "endLabel": "Конец",
+      "lengthLabel": "Длина"
     },
     "agent": {
       "clipAgent": "Агент клипа",

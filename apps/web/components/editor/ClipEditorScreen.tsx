@@ -1682,6 +1682,19 @@ export default function ClipEditorScreen({
     [],
   );
 
+  // ── Client-only seek for a timeline CLICK/scrub (P2): move the preview playhead instantly with
+  // ZERO server round-trip (never handleSetInterval). Clamp INTO the clip — the preview loops
+  // [outerStart, outerEnd], so a raw source-time click outside it would bounce to the start; a hair
+  // inside outerEnd keeps the loop guard (currentTime >= outerEnd) from snapping back. Reuses the
+  // same rAF-coalesced seek as the trim live-scrub.
+  const handleSeek = useCallback(
+    (sourceSec: number) => {
+      const clamped = Math.max(outerStart, Math.min(sourceSec, outerEnd - 0.05));
+      handleScrub(clamped);
+    },
+    [outerStart, outerEnd, handleScrub],
+  );
+
   // ── on-video direct-grab manipulation (CapCut-style selection box) ──
   // The visible selection box (OverlaySelectionBox) owns the pointer mechanics:
   // setPointerCapture + imperative box-style during move (NO React state per move →
@@ -2275,6 +2288,7 @@ export default function ClipEditorScreen({
             busy={phase === "saving"}
             nowSec={nowSec}
             onScrub={handleScrub}
+            onSeek={handleSeek}
             onIntervalChange={handleSetInterval}
           />
         ) : (

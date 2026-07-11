@@ -517,7 +517,15 @@
       "saidHere": "Said here",
       "scrollTimeline": "Scroll timeline",
       "saving": "saving…",
-      "minSec": "min {n}s"
+      "minSec": "min {n}s",
+      "modeScrub": "Scrub",
+      "modeSelect": "Jump clip",
+      "modeScrubHint": "Click or drag the track to move the playhead",
+      "modeSelectHint": "Click a moment or chapter to move the clip there",
+      "clickToSeek": "Click to play here →",
+      "startLabel": "Start",
+      "endLabel": "End",
+      "lengthLabel": "Length"
     },
     "agent": {
       "clipAgent": "Clip agent",

@@ -7,6 +7,7 @@ import { getChapters } from "@/lib/api";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import { mmss } from "@/lib/format";
+import { snapTime } from "@/lib/timelineSnap";
 import type {
   Chapter,
   ChaptersData,
@@ -48,8 +49,31 @@ const TYPE_LABEL_KEY: Record<ClipType, string> = {
 
 const WAVE_BUCKETS = 160;
 const CHAPTERS_POLL_MS = 4000;
+// A press only becomes a drag past this many px — below it a click still seeks (never
+// starts a scrub/trim), so click-to-seek stays crisp.
+const DRAG_THRESHOLD_PX = 4;
+// Trim-snap tolerance as a fraction of the VISIBLE window → tighter (in seconds) the more
+// you zoom, matching the on-screen feel (~2% of the track width).
+const SNAP_FRAC = 0.02;
+// A scrub/click drives the playhead off a local scrubT for instant feedback, then hands it back
+// to the real nowSec after this hold (re-armed on every move). Long enough to cover the video-seek
+// latency (nowSec catches up in ~1–2 frames via requestVideoFrameCallback), short enough that a
+// play started right after a click isn't visibly held.
+const SCRUB_HOLD_MS = 350;
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+
+// Parse a user-typed time field: "m:ss", "h:mm:ss", or plain (fractional) seconds → seconds.
+// Returns null on anything unparseable so the caller can revert to the committed value. PURE.
+function parseTimecode(raw: string): number | null {
+  const s = raw.trim();
+  if (!s) return null;
+  const parts = s.split(":").map((p) => p.trim());
+  if (parts.some((p) => !/^\d+(\.\d+)?$/.test(p))) return null;
+  let sec = 0;
+  for (const p of parts) sec = sec * 60 + Number(p);
+  return Number.isFinite(sec) ? sec : null;
+}
 
 // Начальное окно зума: клип занимает ~38% видимой области (крупный → ресайз виден и
 // удобен). На часовом видео при 1× блок был ~1% и упирался в minWidth — отсюда баг
@@ -113,13 +137,71 @@ function chapterAt(chapters: Chapter[], t: number): Chapter | null {
   return chapters.find((c) => t >= c.start && t < c.end) ?? null;
 }
 
+// Editable m:ss field (start / end / length). Uncontrolled draft synced by `key={seconds}` in
+// the parent — a commit changes the interval → remount with the fresh value; while you type the
+// interval is unchanged so your keystrokes persist. Commits the SAME server path as the grips.
+function TimeField({
+  label,
+  seconds,
+  disabled,
+  onCommit,
+}: {
+  label: string;
+  seconds: number;
+  disabled: boolean;
+  onCommit: (sec: number) => void;
+}) {
+  const [val, setVal] = useState(() => mmss(seconds));
+  return (
+    <label className="flex min-w-0 flex-col gap-0.5">
+      <span className="font-mono text-eyebrow uppercase leading-none text-faint">{label}</span>
+      <input
+        type="text"
+        inputMode="numeric"
+        value={val}
+        disabled={disabled}
+        onChange={(e) => setVal(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          else if (e.key === "Escape") {
+            setVal(mmss(seconds));
+            e.currentTarget.blur();
+          }
+        }}
+        onBlur={() => {
+          const parsed = parseTimecode(val);
+          if (parsed === null) {
+            setVal(mmss(seconds)); // unparseable → revert to committed value
+            return;
+          }
+          setVal(mmss(parsed));
+          onCommit(parsed);
+        }}
+        className="w-14 rounded-md border border-line bg-surface-2 px-1.5 py-1 text-center font-mono text-xs font-semibold tabular-nums text-ink transition duration-150 ease-snappy focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-50"
+      />
+    </label>
+  );
+}
+
+// scrub → a plain click/drag seeks the preview (client-only). select → click a moment/chapter
+// to jump the clip there (server re-trim). Background drag always scrubs in either mode.
+type SeekMode = "scrub" | "select";
+
 type DragMode = "move" | "resize-l" | "resize-r";
 
 interface DragState {
   mode: DragMode;
   pointerStart: number;
+  pointerStartX: number;
+  moved: boolean;
   intervalStart: number;
   intervalEnd: number;
+}
+
+interface ScrubState {
+  startX: number;
+  moved: boolean;
 }
 
 export interface TimelineV2Props {
@@ -135,6 +217,9 @@ export interface TimelineV2Props {
   /** Live-seek (CapCut-стиль): двигаешь/тянешь край клипа → превью сикается на границу
    *  СРАЗУ, без round-trip. Зовётся на каждый pointermove (троттл через rAF в родителе). */
   onScrub?: (sourceSec: number) => void;
+  /** Client-only seek (клик/скраб по дорожке → плейхед превью прыгает СРАЗУ, без сервера).
+   *  Родитель клампит в границы клипа и троттлит через rAF. НИКОГДА не коммитит интервал. */
+  onSeek?: (sourceSec: number) => void;
   onIntervalChange: (start: number, end: number) => void;
 }
 
@@ -145,6 +230,7 @@ export function TimelineV2({
   busy = false,
   nowSec,
   onScrub,
+  onSeek,
   onIntervalChange,
 }: TimelineV2Props) {
   const t = useTranslations("editor.timeline");
@@ -159,6 +245,16 @@ export function TimelineV2({
   const [live, setLive] = useState<{ start: number; end: number } | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [hover, setHover] = useState<{ x: number; t: number } | null>(null);
+
+  // ── seek/scrub (client-only, no server) ──
+  const [mode, setMode] = useState<SeekMode>("scrub");
+  // Local playhead override: a click/scrub drives it instantly so the head never lags the finger;
+  // handed back to the real nowSec once the video seek lands (catch-up effect + safety timeout).
+  const [scrubT, setScrubT] = useState<number | null>(null);
+  const scrubRef = useRef<ScrubState | null>(null);
+  const scrubHoldRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A snap fired on the trim edge → a bright guide line at this time (cleared on release).
+  const [snapLine, setSnapLine] = useState<number | null>(null);
 
   // ── зум/пан: видимое окно [viewStart, viewStart+viewLen] ⊆ [0, duration] ──
   // Начальное окно кадрирует клип (key=clipId в родителе → ремоунт на смену клипа,
@@ -254,15 +350,86 @@ export function TimelineV2({
     [onIntervalChange],
   );
 
+  // Seeking is only meaningful WITHIN the clip — the preview loops [source_start, source_end].
+  // Clamp there so a click anywhere reliably moves the playhead (outside → nearest clip edge)
+  // instead of the preview bouncing back to the clip start.
+  const clampToClip = useCallback(
+    (sec: number) => clamp(sec, interval.source_start, interval.source_end),
+    [interval.source_start, interval.source_end],
+  );
+
+  // Client-only seek: drive the local playhead NOW, ask the parent to seek the video (rAF-
+  // coalesced, no server), and arm a safety timeout to release the head back to nowSec.
+  const seekTo = useCallback(
+    (sec: number) => {
+      const target = clampToClip(sec);
+      setScrubT(target);
+      onSeek?.(target);
+      if (scrubHoldRef.current) clearTimeout(scrubHoldRef.current);
+      scrubHoldRef.current = setTimeout(() => setScrubT(null), SCRUB_HOLD_MS);
+    },
+    [clampToClip, onSeek],
+  );
+  useEffect(
+    () => () => {
+      if (scrubHoldRef.current) clearTimeout(scrubHoldRef.current);
+    },
+    [],
+  );
+
+  // Snap targets for the trim edge: every AI-moment tick + every chapter edge (source seconds).
+  // Shot boundaries aren't surfaced to the timeline, so those two content lines are the anchors.
+  const snapTargets = useMemo(() => {
+    const out: number[] = [];
+    for (const s of data.segments) out.push(s.start, s.end);
+    const chs = chapters?.status === "done" ? (chapters.chapters ?? []) : [];
+    for (const c of chs) out.push(c.start, c.end);
+    return out;
+  }, [data.segments, chapters]);
+
+  // ── numeric trim fields → same server commit as the grips (clamped to CLIP_MIN/MAX) ──
+  const commitStart = useCallback(
+    (raw: number) => {
+      const end = interval.source_end;
+      const s = clamp(raw, Math.max(0, end - CLIP_MAX_SEC), end - CLIP_MIN_SEC);
+      commit(s, end);
+    },
+    [interval.source_end, commit],
+  );
+  const commitEnd = useCallback(
+    (raw: number) => {
+      const start = interval.source_start;
+      const e = clamp(raw, start + CLIP_MIN_SEC, Math.min(duration, start + CLIP_MAX_SEC));
+      commit(start, e);
+    },
+    [interval.source_start, duration, commit],
+  );
+  const commitLength = useCallback(
+    (rawLen: number) => {
+      const start = interval.source_start;
+      const len = clamp(rawLen, CLIP_MIN_SEC, CLIP_MAX_SEC);
+      let end = start + len;
+      let s = start;
+      if (end > duration) {
+        end = duration;
+        s = Math.max(0, end - len);
+      }
+      commit(s, end);
+    },
+    [interval.source_start, duration, commit],
+  );
+
   const onPointerDown = useCallback(
-    (mode: DragMode) => (e: React.PointerEvent) => {
+    (dragMode: DragMode) => (e: React.PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
       if (busy) return; // предыдущий сдвиг ещё сохраняется — не плодим конфликты версий
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       dragRef.current = {
-        mode,
+        mode: dragMode,
         pointerStart: pxToTime(e.clientX),
+        pointerStartX: e.clientX,
+        moved: false,
         intervalStart: interval.source_start,
         intervalEnd: interval.source_end,
       };
@@ -271,45 +438,93 @@ export function TimelineV2({
     [interval.source_start, interval.source_end, pxToTime, busy],
   );
 
+  // Background press (empty track) → scrub/seek gesture. The clip window & markers stopPropagation
+  // on their own pointerdown, so this never hijacks a trim drag or a marker click.
+  const onTrackPointerDown = useCallback((e: React.PointerEvent) => {
+    if (dragRef.current) return;
+    scrubRef.current = { startX: e.clientX, moved: false };
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unsupported — the gesture still tracks via move coords */
+    }
+    setHover(null);
+  }, []);
+
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       const drag = dragRef.current;
-      if (!drag) {
-        if (trackRef.current) {
-          const r = trackRef.current.getBoundingClientRect();
-          setHover({ x: e.clientX - r.left, t: pxToTime(e.clientX) });
+      if (drag) {
+        // Below the threshold a press is still a click (→ seek on release), not a trim.
+        if (!drag.moved) {
+          if (Math.abs(e.clientX - drag.pointerStartX) < DRAG_THRESHOLD_PX) return;
+          drag.moved = true;
         }
+        const tCur = pxToTime(e.clientX);
+        const delta = tCur - drag.pointerStart;
+        let start = drag.intervalStart;
+        let end = drag.intervalEnd;
+        const tol = viewLen * SNAP_FRAC;
+        let snapAt: number | null = null;
+
+        // focusT = граница, которую юзер сейчас «держит» → её и показываем в превью.
+        // move → начало клипа; resize-l → новый старт; resize-r → новый конец. Каждый край
+        // липнет к ближайшему AI-моменту/границе главы (snapTime) — CapCut-фидбэк без round-trip.
+        let focusT: number;
+        if (drag.mode === "move") {
+          const len = drag.intervalEnd - drag.intervalStart;
+          start = clamp(drag.intervalStart + delta, 0, duration - len);
+          const snapped = snapTime(start, snapTargets, tol);
+          if (snapped !== start) {
+            start = clamp(snapped, 0, duration - len);
+            snapAt = start;
+          }
+          end = start + len;
+          focusT = start;
+        } else if (drag.mode === "resize-l") {
+          const minStart = Math.max(0, end - CLIP_MAX_SEC);
+          const maxStart = end - CLIP_MIN_SEC;
+          start = clamp(drag.intervalStart + delta, minStart, maxStart);
+          const snapped = snapTime(start, snapTargets, tol);
+          if (snapped !== start && snapped >= minStart && snapped <= maxStart) {
+            start = snapped;
+            snapAt = start;
+          }
+          focusT = start;
+        } else {
+          const minEnd = start + CLIP_MIN_SEC;
+          const maxEnd = Math.min(duration, start + CLIP_MAX_SEC);
+          end = clamp(drag.intervalEnd + delta, minEnd, maxEnd);
+          const snapped = snapTime(end, snapTargets, tol);
+          if (snapped !== end && snapped >= minEnd && snapped <= maxEnd) {
+            end = snapped;
+            snapAt = end;
+          }
+          focusT = end;
+        }
+        setLive({ start, end });
+        setSnapLine(snapAt);
+        onScrub?.(focusT);
         return;
       }
-      const t = pxToTime(e.clientX);
-      const delta = t - drag.pointerStart;
-      let start = drag.intervalStart;
-      let end = drag.intervalEnd;
 
-      // focusT = граница, которую юзер сейчас «держит» → её и показываем в превью.
-      // move → начало клипа (видно, с какого кадра стартует шортс); resize-l → новый
-      // старт; resize-r → новый конец (видно последний кадр). CapCut-фидбэк без round-trip.
-      let focusT: number;
-      if (drag.mode === "move") {
-        const len = drag.intervalEnd - drag.intervalStart;
-        start = clamp(drag.intervalStart + delta, 0, duration - len);
-        end = start + len;
-        focusT = start;
-      } else if (drag.mode === "resize-l") {
-        const minStart = Math.max(0, end - CLIP_MAX_SEC);
-        const maxStart = end - CLIP_MIN_SEC;
-        start = clamp(drag.intervalStart + delta, minStart, maxStart);
-        focusT = start;
-      } else {
-        const minEnd = start + CLIP_MIN_SEC;
-        const maxEnd = Math.min(duration, start + CLIP_MAX_SEC);
-        end = clamp(drag.intervalEnd + delta, minEnd, maxEnd);
-        focusT = end;
+      // Background scrub: past the threshold, drag = live seek off scrubT (instant playhead).
+      const sc = scrubRef.current;
+      if (sc) {
+        if (!sc.moved && Math.abs(e.clientX - sc.startX) < DRAG_THRESHOLD_PX) return;
+        sc.moved = true;
+        setHover(null);
+        seekTo(pxToTime(e.clientX));
+        return;
       }
-      setLive({ start, end });
-      onScrub?.(focusT);
+
+      // Idle: track the hover cursor for the tooltip.
+      if (trackRef.current) {
+        const r = trackRef.current.getBoundingClientRect();
+        setHover({ x: e.clientX - r.left, t: pxToTime(e.clientX) });
+      }
     },
-    [duration, pxToTime, onScrub],
+    [duration, pxToTime, onScrub, seekTo, viewLen, snapTargets],
   );
 
   const endDrag = useCallback(
@@ -324,11 +539,44 @@ export function TimelineV2({
       dragRef.current = null;
       const cur = live;
       setLive(null);
+      setSnapLine(null);
+      if (!drag.moved) {
+        // Never moved = a click. On the window BODY → seek to that point (a bare grip click
+        // does nothing). Client-only — never a server round-trip.
+        if (drag.mode === "move") seekTo(pxToTime(e.clientX));
+        return;
+      }
       if (cur && (cur.start !== drag.intervalStart || cur.end !== drag.intervalEnd)) {
         commit(cur.start, cur.end);
       }
     },
-    [live, commit],
+    [live, commit, seekTo, pxToTime],
+  );
+
+  // Track-level up/cancel: hand off to endDrag when trimming, else resolve the scrub gesture
+  // (click OR final scrub position → seek).
+  const onTrackPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (dragRef.current) return endDrag(e);
+      const sc = scrubRef.current;
+      scrubRef.current = null;
+      if (!sc) return;
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        /* capture may never have been set */
+      }
+      seekTo(pxToTime(e.clientX));
+    },
+    [endDrag, seekTo, pxToTime],
+  );
+
+  const onTrackPointerCancel = useCallback(
+    (e: React.PointerEvent) => {
+      if (dragRef.current) return endDrag(e);
+      scrubRef.current = null;
+    },
+    [endDrag],
   );
 
   const jumpTo = useCallback(
@@ -349,20 +597,67 @@ export function TimelineV2({
   const chapterList = chapters?.status === "done" ? (chapters.chapters ?? []) : [];
   const hoverChapter = hover ? chapterAt(chapterList, hover.t) : null;
   const hoverText = hover ? wordsAround(data.words, hover.t, 3) : "";
+  // Playhead = the local scrub override (instant, lag-free) when active, else the real video time.
+  const headT = scrubT ?? nowSec;
 
   return (
     <div className="w-full select-none" onWheel={onWheel}>
-      {/* ── control row: the selected-clip LENGTH is the anchor readout (mono), the type
-          legend is demoted to a quiet inline key, zoom sits to the right. ── */}
-      <div className="mb-1.5 flex items-center justify-between gap-3">
-        {/* the one anchor readout: the length of the clip you'll export. */}
-        <div className="flex min-w-0 items-baseline gap-2.5">
-          <span className="font-mono text-eyebrow uppercase leading-none text-faint">{t("clipLength")}</span>
-          <Numeral className="text-sm font-semibold leading-none text-accent">
-            {mmss(segEnd - segStart)}
-          </Numeral>
+      {/* ── control row: editable trim fields (start / end / length) + the seek-mode toggle on
+          the left; zoom on the right. Typing a field commits the SAME server trim as the grips. ── */}
+      <div className="mb-1.5 flex flex-wrap items-end justify-between gap-x-3 gap-y-2">
+        <div className="flex flex-wrap items-end gap-2.5">
+          <TimeField
+            key={`start-${interval.source_start.toFixed(2)}`}
+            label={t("startLabel")}
+            seconds={interval.source_start}
+            disabled={busy}
+            onCommit={commitStart}
+          />
+          <TimeField
+            key={`end-${interval.source_end.toFixed(2)}`}
+            label={t("endLabel")}
+            seconds={interval.source_end}
+            disabled={busy}
+            onCommit={commitEnd}
+          />
+          <TimeField
+            key={`len-${(interval.source_end - interval.source_start).toFixed(2)}`}
+            label={t("lengthLabel")}
+            seconds={interval.source_end - interval.source_start}
+            disabled={busy}
+            onCommit={commitLength}
+          />
+          {/* seek-mode toggle — Scrub (click/drag = seek) vs Jump clip (click a moment/chapter
+              re-trims). Background drag always scrubs; only marker/chapter clicks change. */}
+          <div
+            className="inline-flex items-center gap-0.5 self-end rounded-md border border-line p-0.5"
+            role="group"
+          >
+            <button
+              type="button"
+              onClick={() => setMode("scrub")}
+              aria-pressed={mode === "scrub"}
+              title={t("modeScrubHint")}
+              className={`rounded px-2 py-1 text-[11px] font-semibold transition duration-150 ease-snappy ${
+                mode === "scrub" ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
+              }`}
+            >
+              {t("modeScrub")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("select")}
+              aria-pressed={mode === "select"}
+              title={t("modeSelectHint")}
+              className={`rounded px-2 py-1 text-[11px] font-semibold transition duration-150 ease-snappy ${
+                mode === "select" ? "bg-accent/15 text-accent" : "text-muted hover:text-ink"
+              }`}
+            >
+              {t("modeSelect")}
+            </button>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2 self-end">
           <button
             type="button"
             aria-label={t("zoomOut")}
@@ -417,7 +712,7 @@ export function TimelineV2({
               <button
                 key={i}
                 type="button"
-                onClick={() => jumpTo(c.start, c.end)}
+                onClick={() => (mode === "select" ? jumpTo(c.start, c.end) : seekTo(c.start))}
                 title={`${c.title}\n${c.summary}`}
                 className="group/ch absolute top-0 flex h-full items-center gap-1.5 truncate border-l border-line px-2 text-left text-[11px] leading-none text-muted transition hover:bg-surface-3 hover:text-ink"
                 style={{ left: pct(c.start), width: `${Math.max(widthFrac * 100, 0.5)}%` }}
@@ -438,12 +733,15 @@ export function TimelineV2({
         {/* дорожка */}
         <div
           ref={trackRef}
-          className="relative h-20 w-full overflow-hidden rounded-lg border border-line bg-gradient-to-b from-surface-2 to-surface shadow-inner"
+          className={`relative h-20 w-full touch-none overflow-hidden rounded-lg border border-line bg-gradient-to-b from-surface-2 to-surface shadow-inner ${
+            mode === "select" ? "cursor-default" : "cursor-pointer"
+          }`}
+          onPointerDown={onTrackPointerDown}
           onPointerMove={onPointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
+          onPointerUp={onTrackPointerUp}
+          onPointerCancel={onTrackPointerCancel}
           onPointerLeave={() => {
-            if (!dragRef.current) setHover(null);
+            if (!dragRef.current && !scrubRef.current) setHover(null);
           }}
         >
           {/* вертикальные грид-линии (выровнены с линейкой времени) */}
@@ -486,7 +784,8 @@ export function TimelineV2({
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  jumpTo(s.start, s.end);
+                  if (mode === "select") jumpTo(s.start, s.end);
+                  else seekTo(s.start);
                 }}
                 title={`${typeLabel(s.type)} · ${s.score.toFixed(2)} · ${s.reason}`}
                 aria-label={t("goToMoment", { type: typeLabel(s.type) })}
@@ -562,13 +861,22 @@ export function TimelineV2({
             )}
           </div>
 
-          {/* реальный плейхед воспроизведения (по nowSec) — едет во время play и live-seek */}
-          {nowSec !== undefined &&
-            fracOf(nowSec) >= -0.001 &&
-            fracOf(nowSec) <= 1.001 && (
+          {/* snap guide — a bright line where the dragged trim edge is snapping to a moment/chapter */}
+          {snapLine !== null && fracOf(snapLine) >= -0.001 && fracOf(snapLine) <= 1.001 && (
+            <div
+              className="pointer-events-none absolute top-0 bottom-0 z-[12] w-0.5 bg-accent/90 shadow-[0_0_6px_var(--t-accent-line)]"
+              style={{ left: pct(snapLine) }}
+              aria-hidden
+            />
+          )}
+
+          {/* плейхед — по headT (scrubT во время клика/скраба → мгновенно, иначе реальный nowSec) */}
+          {headT !== undefined &&
+            fracOf(headT) >= -0.001 &&
+            fracOf(headT) <= 1.001 && (
               <div
                 className="pointer-events-none absolute top-0 bottom-0 z-[11] w-px bg-accent shadow-[0_0_8px_var(--t-accent-line)]"
-                style={{ left: pct(nowSec) }}
+                style={{ left: pct(headT) }}
               >
                 {/* треугольная головка сверху — явно отличает плейхед от hover-курсора */}
                 <span className="absolute -top-px left-1/2 size-0 -translate-x-1/2 border-x-[5px] border-x-transparent border-t-[7px] border-t-accent" />
@@ -633,7 +941,7 @@ export function TimelineV2({
                     {hoverSeg.why_works || hoverSeg.reason}
                   </p>
                   <p className="mt-1.5 text-[10px] font-medium text-accent">
-                    {t("clickToMove")}
+                    {mode === "select" ? t("clickToMove") : t("clickToSeek")}
                   </p>
                 </>
               ) : hoverText ? (
