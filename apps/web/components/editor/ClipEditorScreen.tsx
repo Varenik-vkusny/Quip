@@ -1292,27 +1292,33 @@ export default function ClipEditorScreen({
         const next = upsertShotOverride(current, range, patch);
         const merged = findShotOverride(next, range); // null ⇒ mode:auto стёр override
         const mode = patch.mode ?? merged?.mode ?? "fill";
+        // Tight БЕЗ явного пана → дефолт центра 0.5 (WYSIWYG: превью показывает ровно тот
+        // центрированный кроп, что прожжёт рендер; юзер панит для точной наводки). Явный центр =
+        // превью НЕ нужен серверный CV-пересчёт cx → см. отсутствие loadReframe ниже.
+        const center = mode === "fill" ? (merged?.center ?? 0.5) : (merged?.center ?? null);
         const newEdit = await setCropOverride(jobId, clipId, v, {
           source_start: range.source_start,
           source_end: range.source_end,
           mode: (mode === "fit" || mode === "auto" ? mode : "fill") as "auto" | "fill" | "fit",
-          center: merged?.center ?? null,
+          center,
           center_b: merged?.center_b ?? null,
           fit_style: merged?.fit_style ?? null,
         });
         commitEdit(newEdit); // см. editRef-комментарий: очередь читает свежую версию + undo-шаг
         setDirty(true);
         setPixelDirty(true); // crop/frame override changes mp4 pixels → re-render required
-        // mode:"auto" → бэкенд чистит override → план возвращается к слежению за лицом; wide/fill
-        // → план перекрашивается. Без перечитки rawRegions осталось бы «всё wide» и трекинг пропадал.
-        await loadReframe();
+        // НЕ зовём loadReframe: полоса шотов (FitTimeline.regionOverride) и превью
+        // (pickActiveOverride) УЖЕ отражают override из edit.reframe_overrides без пере-фетча.
+        // Пере-фетч /reframe гонял полный CV-ре-детект, который мог ПЕРЕСЕГМЕНТИРОВАТЬ клип
+        // (3 шота → 5 в рандомных местах) и обнулить selectedShot → баг перетасовки + потери пана.
+        // rawRegions (базовый AI-план) стабилен; override'ы накладываются поверх (per-shot изоляция).
       } catch (e) {
         failOr409(e);
       } finally {
         setRecomputingFrame(false);
       }
     },
-    [edit, jobId, clipId, failOr409, flushPending, loadReframe, commitEdit, recordSnapshot],
+    [edit, jobId, clipId, failOr409, flushPending, commitEdit, recordSnapshot],
   );
 
   // ── таб «Кадр», верхняя панель: применяет к ВЫБРАННОМУ шоту (если выбран в полосе), иначе к клипу ──
