@@ -168,6 +168,115 @@ def test_multiple_overrides_on_one_region_each_applies():
         assert _frame_error(r.t1, FPS_2997) < _FRAME_EPS, f"unsnapped t1={r.t1}"
 
 
+# ── Follow-mode manual-pan authority (bug fix 2026-07-11) ────────────────────────
+# Repro: user forces a shot to tight (fill) + a manual crop center (pan), then turns Follow ON
+# (lock_per_shot=False). reframe_segment rebuilds the shot as a MULTI-POINT follower; merge/boundary
+# drift vs the Lock layout the override was captured against leaves the fill override a few frames
+# short of the follow region → apply_overrides_to_regions SPLITS the region and a KEPT follower
+# (multi-point) fill sliver survives next to the static-center piece. The follower re-tracks the
+# face and the render clamps cx to the frame edge → the manual pan is ignored (crop jumps right).
+# DESIGN DECISION: a manual fill override OWNS the whole shot statically — Follow never re-tracks an
+# overridden shot → any follower sliver of a fill-overridden region is absorbed into the static
+# center. Only mode/points change; t0/t1 stay frame-snapped (Δ=0, REFRAME_FPS_GRID_INVARIANT).
+
+
+def _follow_region(t1: float, cxs=(0.4, 0.6, 0.8, 0.95)) -> TrackRegion:
+    """A fill region with a MULTI-POINT follower trajectory (what Follow / _track_trajectory emits).
+
+    cx rises across the shot (tracking a face drifting right) — the exact case whose tail the render
+    would clamp to the frame edge if it survived next to a manual static pin.
+    """
+    n = len(cxs)
+    pts = tuple(TrackPoint(t=(i / (n - 1)) * t1, mode="fill", cx=cx) for i, cx in enumerate(cxs))
+    return TrackRegion(t0=0.0, t1=t1, mode="fill", points=pts)
+
+
+def test_follow_fill_override_absorbs_follower_sliver():
+    # Single fill override center=0.6 that does NOT exactly span the multi-point follow region
+    # (a few frames short on each side, simulating follow-boundary drift). Expect: NO surviving
+    # multi-point follower fill piece and EVERY fill piece pinned to the static center 0.6.
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    region_end = 180 / FPS_2997  # ≈6.006s, on the native grid (cut_frame/fps), like reframe_segment
+    regions = [_follow_region(region_end)]
+    # override short of the region on BOTH sides (rel 0.2..5.8 vs region [0, ~6.006))
+    ov = [CropOverride(source_start=10.2, source_end=15.8, mode="fill", center=0.6)]
+    out = apply_overrides_to_regions(regions, ov, iv, fps=FPS_2997)
+
+    # the follower is dead: no fill piece keeps a multi-point trajectory
+    assert all(not (r.mode == "fill" and len(r.points) > 1) for r in out), (
+        "a follower (multi-point) fill sliver survived next to the manual pin"
+    )
+    # every fill portion uses the static manual center 0.6
+    fill_pieces = [r for r in out if r.mode == "fill"]
+    assert fill_pieces, "the overridden shot must stay fill"
+    for r in fill_pieces:
+        assert len(r.points) == 1 and r.points[0].cx == 0.6, f"non-static/off-center piece: {r}"
+    # boundaries untouched: contiguous tiling of the ORIGINAL region, every edge frame-snapped (Δ=0)
+    assert out[0].t0 == 0.0 and out[-1].t1 == region_end
+    for prev, nxt in zip(out, out[1:], strict=False):
+        assert prev.t1 == nxt.t0
+    for r in out:
+        assert _frame_error(r.t0, FPS_2997) < _FRAME_EPS, f"unsnapped t0={r.t0}"
+        assert _frame_error(r.t1, FPS_2997) < _FRAME_EPS, f"unsnapped t1={r.t1}"
+
+
+def test_follow_fill_override_keeps_fit_sliver_and_other_override():
+    # Same follow region, but a fit override also covers a sub-range. The fit sub-range must STAY
+    # fit (a piece covered by a DIFFERENT override keeps that override), while the follower slivers
+    # around the fill pin are still absorbed to the static center — fit is never touched.
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    region_end = 180 / FPS_2997
+    regions = [_follow_region(region_end)]
+    ov = [
+        CropOverride(source_start=10.2, source_end=15.8, mode="fill", center=0.6),  # rel 0.2..5.8
+        CropOverride(source_start=12.0, source_end=13.0, mode="fit"),  # rel 2..3, last → wins there
+    ]
+    out = apply_overrides_to_regions(regions, ov, iv, fps=FPS_2997)
+
+    # the fit sub-range survives as a fit piece
+    fit_pieces = [r for r in out if r.mode == "fit"]
+    assert len(fit_pieces) == 1 and fit_pieces[0].points == (), "fit sub-range must stay fit"
+    # no follower survives; every fill piece is the static pin
+    assert all(not (r.mode == "fill" and len(r.points) > 1) for r in out)
+    assert all(r.points[0].cx == 0.6 for r in out if r.mode == "fill")
+    # boundaries frame-snapped, contiguous, t0/t1 span preserved (Δ=0)
+    assert out[0].t0 == 0.0 and out[-1].t1 == region_end
+    for prev, nxt in zip(out, out[1:], strict=False):
+        assert prev.t1 == nxt.t0
+    for r in out:
+        assert _frame_error(r.t0, FPS_2997) < _FRAME_EPS
+        assert _frame_error(r.t1, FPS_2997) < _FRAME_EPS
+
+
+def test_follow_two_distinct_fill_overrides_keep_own_centers():
+    # Genuine multi-override "force a sub-range" split must still split AND keep each distinct
+    # center: two non-overlapping fill overrides (0.3 and 0.9) on one follow region. The overridden
+    # pieces keep their own centers; the non-overridden follower slivers are absorbed (Follow never
+    # survives on an overridden shot). Proves the fix does NOT collapse genuine sub-range edits.
+    iv = SourceInterval(source_start=10.0, source_end=16.0)
+    region_end = 180 / FPS_2997
+    regions = [_follow_region(region_end)]
+    ov = [
+        CropOverride(source_start=11.0, source_end=12.0, mode="fill", center=0.3),  # rel 1..2
+        CropOverride(source_start=14.0, source_end=15.0, mode="fill", center=0.9),  # rel 4..5
+    ]
+    out = apply_overrides_to_regions(regions, ov, iv, fps=FPS_2997)
+
+    assert len(out) > 1, "two distinct sub-range overrides must still SPLIT the region"
+    centers = {r.points[0].cx for r in out if r.mode == "fill"}
+    assert 0.3 in centers and 0.9 in centers, "each distinct manual center must survive"
+    # the specific overridden sub-ranges carry their own centers
+    mid_lo = next(r for r in out if abs(r.t0 - round(1.0 * FPS_2997) / FPS_2997) < _FRAME_EPS)
+    mid_hi = next(r for r in out if abs(r.t0 - round(4.0 * FPS_2997) / FPS_2997) < _FRAME_EPS)
+    assert mid_lo.points[0].cx == 0.3 and mid_hi.points[0].cx == 0.9
+    # no follower survives; boundaries frame-snapped + contiguous (Δ=0)
+    assert all(not (r.mode == "fill" and len(r.points) > 1) for r in out)
+    assert out[0].t0 == 0.0 and out[-1].t1 == region_end
+    for prev, nxt in zip(out, out[1:], strict=False):
+        assert prev.t1 == nxt.t0
+        assert _frame_error(nxt.t0, FPS_2997) < _FRAME_EPS
+
+
 def test_build_persist_payload_stores_fps():
     # P0: the persisted plan must carry the native fps its region boundaries were frame-snapped on,
     # so a later plan-read render can gate on fps-consistency (else -1 flash on ≠25fps, see

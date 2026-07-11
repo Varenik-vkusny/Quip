@@ -105,6 +105,10 @@ def apply_overrides_to_regions(
       • Whole-region override → one piece recolored, t0/t1 kept (UNCHANGED from the old midpoint
         path → existing clips unaffected).
       • Partial / multiple overrides → split at snapped interior edges; kept pieces retain r.points.
+      • Follow-sliver absorption → a kept MULTI-POINT (follower) fill piece of a region that carries
+        a covering fill override is repinned to that override's STATIC center: a manual pan owns the
+        WHOLE shot, Follow must not re-track an overridden shot. Static single-point kept pieces (a
+        locked layout) are left as-is, so genuine locked sub-range edits keep their own centers.
     Every introduced boundary is frame-snapped (REFRAME_FPS_GRID_INVARIANT: render trims at
     round(t0*fps) → exact native frame → Δ=0, no flash on ≠25fps). Outer edges reuse r's own
     (on-grid) boundary, so no sub-frame sliver is created against a real cut.
@@ -132,6 +136,21 @@ def apply_overrides_to_regions(
             if r.t0 < b < r.t1:
                 bounds.add(_snap(b, fps))
         edges = sorted(bounds)
+        # Whole-shot fill pin (bug fix 2026-07-11). Under Follow (lock_per_shot=False) a fill shot
+        # is a MULTI-POINT follower trajectory (_track_trajectory); merge/boundary drift vs the Lock
+        # layout the override was captured against can leave a kept fill SLIVER just OUTSIDE the
+        # override's span. A surviving follower keeps tracking the face and compute_crop_window/
+        # build_fill_crop_expr clamp cx to the frame edge → the user's manual pan is ignored (crop
+        # jumps to the right edge). DESIGN DECISION: a manual fill override OWNS the whole shot
+        # STATICALLY — Follow must never re-track an overridden shot. So any KEPT follower (multi-
+        # point) fill piece of a region that carries a covering fill override is absorbed into that
+        # override's static center. Chosen approach = absorb-slivers (surgical, NOT whole-region
+        # recolor): region count + every t0/t1 stay frame-snapped and untouched (Δ=0 grid invariant
+        # intact) — only the sliver's mode/points change. A SINGLE static point (locked layout) is
+        # NOT a follower → left alone, so genuine locked sub-range edits keep their own centers. A
+        # fit piece stays fit; a piece covered by a DIFFERENT override keeps that override.
+        # Last-wins: the pin is the LAST covering fill override.
+        fill_pin = next((ov for ov in reversed(covering) if ov.mode == "fill"), None)
         # Paint each sub-interval with the LAST override covering its midpoint (else keep r).
         for t0, t1 in zip(edges, edges[1:], strict=False):
             if t1 <= t0:
@@ -142,7 +161,12 @@ def apply_overrides_to_regions(
                 if ov.source_start <= mid_src < ov.source_end:
                     chosen = ov  # last-wins on the overlapping sub-range
             piece = TrackRegion(t0=t0, t1=t1, mode=r.mode, points=r.points, points_b=r.points_b)
-            out.append(_recolor_region(piece, chosen) if chosen is not None else piece)
+            if chosen is not None:
+                out.append(_recolor_region(piece, chosen))
+            elif fill_pin is not None and piece.mode == "fill" and len(piece.points) > 1:
+                out.append(_recolor_region(piece, fill_pin))  # absorb follower sliver → static pin
+            else:
+                out.append(piece)
     return out
 
 
