@@ -166,3 +166,105 @@ def test_multiple_overrides_on_one_region_each_applies():
     for r in out:
         assert _frame_error(r.t0, FPS_2997) < _FRAME_EPS, f"unsnapped t0={r.t0}"
         assert _frame_error(r.t1, FPS_2997) < _FRAME_EPS, f"unsnapped t1={r.t1}"
+
+
+def test_build_persist_payload_stores_fps():
+    # P0: the persisted plan must carry the native fps its region boundaries were frame-snapped on,
+    # so a later plan-read render can gate on fps-consistency (else -1 flash on ≠25fps, see
+    # REFRAME_FPS_GRID_INVARIANT / parse_fps postmortem).
+    from app.editor.reframe_cache import build_persist_payload
+
+    regions = [
+        TrackRegion(t0=0.0, t1=2.0, mode="fill", points=(TrackPoint(t=0.0, mode="fill", cx=0.4),))
+    ]
+    payload = build_persist_payload(regions, 10.0, 20.0, fps=29.97002997)
+    assert payload["fps"] == 29.97002997
+    assert payload["default_start"] == 10.0
+    assert payload["default_end"] == 20.0
+    assert payload["regions"][0]["mode"] == "fill"
+
+
+def _sample_persisted(fps=30.0):
+    return {
+        "default_start": 10.0,
+        "default_end": 20.0,
+        "fps": fps,
+        "regions": [
+            {
+                "t0": 0.0,
+                "t1": 4.0,
+                "mode": "fill",
+                "points": [{"t": 0.0, "mode": "fill", "cx": 0.4}],
+                "points_b": [],
+                "fit_style": "blur_zoom",
+            },
+            {
+                "t0": 4.0,
+                "t1": 10.0,
+                "mode": "fit",
+                "points": [],
+                "points_b": [],
+                "fit_style": "blur_zoom",
+            },
+        ],
+    }
+
+
+def test_plan_to_regions_authoritative_untrimmed():
+    from app.editor.reframe_cache import plan_to_regions
+
+    regions = plan_to_regions(
+        _sample_persisted(), [SourceInterval(source_start=10.0, source_end=20.0)], [], fps=30.0
+    )
+    assert regions is not None and len(regions) == 1
+    assert [r.mode for r in regions[0]] == ["fill", "fit"]
+    assert regions[0][0].points[0].cx == 0.4
+    assert regions[0][0].t0 == 0.0 and regions[0][1].t1 == 10.0
+
+
+def test_plan_to_regions_none_on_trim():
+    from app.editor.reframe_cache import plan_to_regions
+
+    assert (
+        plan_to_regions(
+            _sample_persisted(), [SourceInterval(source_start=12.0, source_end=20.0)], [], fps=30.0
+        )
+        is None
+    )
+
+
+def test_plan_to_regions_none_on_fps_mismatch():
+    from app.editor.reframe_cache import plan_to_regions
+
+    assert (
+        plan_to_regions(
+            _sample_persisted(fps=29.97),
+            [SourceInterval(source_start=10.0, source_end=20.0)],
+            [],
+            fps=25.0,
+        )
+        is None
+    )
+
+
+def test_plan_to_regions_none_when_legacy_no_fps():
+    from app.editor.reframe_cache import plan_to_regions
+
+    p = _sample_persisted()
+    del p["fps"]
+    assert (
+        plan_to_regions(p, [SourceInterval(source_start=10.0, source_end=20.0)], [], fps=30.0)
+        is None
+    )
+
+
+def test_plan_to_regions_applies_override_repaint():
+    from app.editor.reframe_cache import plan_to_regions
+
+    ov = CropOverride(source_start=10.0, source_end=14.0, mode="fit")  # force first shot wide
+    regions = plan_to_regions(
+        _sample_persisted(), [SourceInterval(source_start=10.0, source_end=20.0)], [ov], fps=30.0
+    )
+    assert regions is not None
+    assert regions[0][0].mode == "fit"  # repainted, boundaries preserved
+    assert regions[0][0].t0 == 0.0 and regions[0][0].t1 == 4.0

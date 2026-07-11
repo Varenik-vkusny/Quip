@@ -263,7 +263,7 @@ def test_apply_overrides_unknown_mode_unchanged():
 
 def test_build_persist_payload_shape_and_rounding():
     regions = _three_shots()
-    payload = build_persist_payload(regions, 10.0004, 16.0009)
+    payload = build_persist_payload(regions, 10.0004, 16.0009, fps=25.0)
     assert payload["default_start"] == 10.0
     assert payload["default_end"] == 16.001
     # регионы сериализованы тем же форматом, что acc_*.json
@@ -294,7 +294,7 @@ def test_intervals_match_default_shifted_or_trimmed():
 def test_regions_from_persisted_roundtrips_without_overrides():
     # persist → fast-path без override == прямой regions_to_clip_time исходных регионов
     regions = _three_shots()
-    payload = build_persist_payload(regions, 10.0, 16.0)
+    payload = build_persist_payload(regions, 10.0, 16.0, fps=25.0)
     iv = SourceInterval(source_start=10.0, source_end=16.0)
     got = regions_from_persisted(payload, iv, [])
     want = regions_to_clip_time([regions], [iv])
@@ -304,7 +304,7 @@ def test_regions_from_persisted_roundtrips_without_overrides():
 def test_regions_from_persisted_applies_override_recolor():
     # override на shot#2 (mid source 13) перекрашивает fill→fit, СОХРАНЯЯ границы (инвариант сетки)
     regions = _three_shots()
-    payload = build_persist_payload(regions, 10.0, 16.0)
+    payload = build_persist_payload(regions, 10.0, 16.0, fps=25.0)
     iv = SourceInterval(source_start=10.0, source_end=16.0)
     ov = [CropOverride(source_start=12.0, source_end=14.0, mode="fit")]
     got = regions_from_persisted(payload, iv, ov)

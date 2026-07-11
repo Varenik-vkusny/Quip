@@ -11,13 +11,16 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app import billing, db
 from app.errors import JobError
 from app.models import Job, JobStatus
 from app.pipeline.stage0_import import SourceMeta
 from app.run import run_pipeline
+
+if TYPE_CHECKING:
+    from app.pipeline.stage3_reframe import TrackRegion
 
 _log = logging.getLogger("clipflow.billing")
 _rlog = logging.getLogger("clipflow.render")
@@ -214,7 +217,7 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
     from app.config import get_settings
     from app.editor import store
     from app.editor.captions_v2 import write_caption_ass
-    from app.editor.reframe_cache import resolve_regions_accurate
+    from app.editor.reframe_cache import plan_to_regions, resolve_regions_accurate
     from app.editor.timemap import ClipTimeMap
     from app.pipeline.stage5_render import aspect_to_dims, clamp_output_dims, render_timeline
     from app.run import resolve_clip_render_policy
@@ -281,30 +284,48 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
         ass_path.parent.mkdir(parents=True, exist_ok=True)
         write_caption_ass(edit.captions, words, cmap, ass_path, play_w=out_w, play_h=out_h)
 
-    # ЕДИНЫЙ frame-accurate reframe (как batch): PySceneDetect + ASD + held-crop.
-    # Убирает рывки/флеши старого editor-пути (cuts в секундах + 5fps без ASD на ≠25fps).
-    regions = resolve_regions_accurate(
-        out / "source.mp4",
-        edit.source_intervals,
-        edit.reframe_overrides,
-        src_w=meta.width,
-        src_h=meta.height,
-        fps=src_fps,  # ТОЧНЫЙ fps из источника (не округлённый stored meta.fps) — см. выше
-        clip_id=clip_id,
-        out_dir=out,
-        cache_dir=out / "analysis",
-        mode_setting=s.reframe_mode,
-        speaker_crop_scale=s.reframe_speaker_crop_scale,
-        face_fps=s.reframe_face_fps,
-        smoothing=s.reframe_smoothing,
-        lock_per_shot=edit.lock_per_shot,
-        min_hold_sec=s.reframe_min_hold_sec,
-        speak_threshold=s.reframe_speak_threshold,
-        scene_threshold=s.reframe_scene_threshold,
-        min_scene_sec=s.reframe_min_scene_sec,
-        split_enabled=s.reframe_split_enabled,
-        wide_speak_min=s.reframe_wide_speak_min,
-    )
+    # ЕДИНЫЙ источник плана: сперва пробуем ПРОЧИТАТЬ запечённый batch-план (без CV) — детерминизм
+    # превью==рендер + быстрый ре-рендер. Авторитетен ТОЛЬКО для locked+untrimmed+fps-match
+    # (зеркало preview fast-path get_clip_reframe). Иначе — честный CV-пересчёт (правило №8).
+    regions: list[list[TrackRegion]] | None = None
+    if edit.lock_per_shot:
+        persisted = db.get_reframe_regions(job_id, clip_id)
+        if persisted:
+            regions = plan_to_regions(
+                persisted, edit.source_intervals, edit.reframe_overrides, fps=src_fps
+            )
+    if regions is None:
+        _rlog.info(
+            "render: plan-read miss -> CV recompute (follow/trim/fps/no-plan) job=%s clip=%s",
+            job_id,
+            clip_id,
+        )
+        # ЕДИНЫЙ frame-accurate reframe (как batch): PySceneDetect + ASD + held-crop.
+        # Убирает рывки/флеши старого editor-пути (cuts в секундах + 5fps без ASD на ≠25fps).
+        regions = resolve_regions_accurate(
+            out / "source.mp4",
+            edit.source_intervals,
+            edit.reframe_overrides,
+            src_w=meta.width,
+            src_h=meta.height,
+            fps=src_fps,  # ТОЧНЫЙ fps из источника (не округлённый stored meta.fps) — см. выше
+            clip_id=clip_id,
+            out_dir=out,
+            cache_dir=out / "analysis",
+            mode_setting=s.reframe_mode,
+            speaker_crop_scale=s.reframe_speaker_crop_scale,
+            face_fps=s.reframe_face_fps,
+            smoothing=s.reframe_smoothing,
+            lock_per_shot=edit.lock_per_shot,
+            min_hold_sec=s.reframe_min_hold_sec,
+            speak_threshold=s.reframe_speak_threshold,
+            scene_threshold=s.reframe_scene_threshold,
+            min_scene_sec=s.reframe_min_scene_sec,
+            split_enabled=s.reframe_split_enabled,
+            wide_speak_min=s.reframe_wide_speak_min,
+        )
+    else:
+        _rlog.info("render: plan-read HIT (no CV) job=%s clip=%s", job_id, clip_id)
     render_timeline(
         out,
         "source.mp4",

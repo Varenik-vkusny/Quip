@@ -2400,7 +2400,9 @@ def get_clip_reframe(
             db.put_reframe_regions(
                 job_id,
                 clip_id,
-                build_persist_payload(region_lists[0], iv.source_start, iv.source_end),
+                build_persist_payload(
+                    region_lists[0], iv.source_start, iv.source_end, fps=meta.fps
+                ),
             )
         except Exception as e:  # noqa: BLE001 — backfill best-effort, ответ важнее
             print(

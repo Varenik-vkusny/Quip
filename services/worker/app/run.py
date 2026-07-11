@@ -238,7 +238,7 @@ def render_one_clip(
     # Best-effort (cloud-only) — провал персиста НЕ должен валить рендер клипа (фолбэк = on-demand).
     try:
         db.put_reframe_regions(
-            out.name, clip_id, build_persist_payload(regions, seg.start, seg.end)
+            out.name, clip_id, build_persist_payload(regions, seg.start, seg.end, fps=meta.fps)
         )
     except Exception as e:  # noqa: BLE001 — персист не критичен; рендер важнее, ошибку логируем
         print(f"  {clip_id}: WARN reframe-regions persist failed: {e}")

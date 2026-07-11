@@ -300,17 +300,20 @@ def resolve_regions_accurate(
 
 
 def build_persist_payload(
-    regions: list[TrackRegion], default_start: float, default_end: float
+    regions: list[TrackRegion], default_start: float, default_end: float, *, fps: float
 ) -> dict[str, Any]:
     """Регионы дефолтного интервала клипа → durable-payload (домен 1, batch персист). PURE.
 
-    Хранит границы дефолтного интервала (для сверки с текущими интервалами edit-state) и сами
-    регионы (interval-relative, как вернул reframe_segment). Точно тот же формат регионов, что
-    у acc_*.json / reframe_<clip>.json → фронт читает один контракт.
+    Хранит границы дефолтного интервала (для сверки с текущими интервалами edit-state), НАТИВНЫЙ
+    fps, на котором границы регионов были frame-snapped (plan-read рендер обязан рендерить на ТОМ
+    ЖЕ fps, иначе −1 flash — REFRAME_FPS_GRID_INVARIANT / parse_fps-постмортем), и сами регионы
+    (interval-relative, как вернул reframe_segment). Точно тот же формат регионов, что у
+    acc_*.json / reframe_<clip>.json → фронт читает один контракт.
     """
     return {
         "default_start": round(default_start, 3),
         "default_end": round(default_end, 3),
+        "fps": fps,
         "regions": [_region_to_dict(r) for r in regions],
     }
 
@@ -348,6 +351,37 @@ def regions_from_persisted(
     regions = [_region_from_dict(d) for d in persisted.get("regions", [])]
     regions = apply_overrides_to_regions(regions, overrides, iv, fps=fps)
     return regions_to_clip_time([regions], [iv])
+
+
+def plan_to_regions(
+    persisted: dict[str, Any],
+    intervals: list[SourceInterval],
+    overrides: list[CropOverride],
+    *,
+    fps: float,
+    fps_tol: float = 1e-6,
+) -> list[list[TrackRegion]] | None:
+    """Persisted batch-план → render-ready регионы БЕЗ CV, либо None если план НЕ авторитетен. PURE.
+
+    Авторитетен ⇔ (a) план несёт fps, совпадающий с render-fps (иначе baked frame-snapped границы
+    построены на ДРУГОЙ сетке → −1 flash, REFRAME_FPS_GRID_INVARIANT / parse_fps-постмортем), И
+    (b) edit — ОДИН интервал, равный дефолтному span'у плана (нетронутый трим). Иначе None →
+    вызыватель честно пересчитывает CV (правило №8, без тихого фолбэка). Тот же путь
+    deserialize+overrides, как regions_from_persisted → идентично resolve_regions_accurate без CV.
+    Форма — как у render_timeline: list[list[TrackRegion]] (per-interval, 0-based).
+    """
+    plan_fps = persisted.get("fps")
+    if plan_fps is None or abs(plan_fps - fps) > fps_tol:
+        return None
+    ds, de = persisted.get("default_start"), persisted.get("default_end")
+    if ds is None or de is None:
+        return None
+    if not intervals_match_default(intervals, ds, de):
+        return None
+    iv = intervals[0]
+    regions = [_region_from_dict(d) for d in persisted.get("regions", [])]
+    regions = apply_overrides_to_regions(regions, overrides, iv, fps=fps)
+    return [regions]
 
 
 def regions_to_clip_time(
