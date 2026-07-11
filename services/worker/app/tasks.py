@@ -242,8 +242,12 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
     # ── FAST PATH: composite-ASS поверх baked-клипа (caption/hook-only, геометрия нетронута) ──
     if with_subtitles:
         seg = _segment_bounds(job_id, clip_id)
-        if seg is not None and fast_export.edit_matches_baked(
-            edit, seg_start=seg[0], seg_end=seg[1]
+        # Пауза-рез меняет тайминг → composite-fast-path (субтитры поверх baked С ПАУЗАМИ) неверен.
+        silence_on = bool(edit.silence_config and edit.silence_config.enabled)
+        if (
+            not silence_on
+            and seg is not None
+            and fast_export.edit_matches_baked(edit, seg_start=seg[0], seg_end=seg[1])
         ):
             baked = _ensure_baked_clip(job_id, clip_id, out)
             if baked is not None:
@@ -271,6 +275,26 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
     from app.pipeline.stage0_import import _video_stream, parse_fps, probe_video  # noqa: PLC0415
 
     src_fps = parse_fps(str(_video_stream(probe_video(out / "source.mp4")).get("r_frame_rate", "")))
+    # ── Удаление пауз (спека 2026-07-12): вычесть тихие гэпы между словами как ДОП. дырки в
+    # source_intervals. Всё ниже (captions/reframe/render_timeline) читает edit.source_intervals →
+    # авто-сжатие таймлайна. Мульти-интервал → reframe уходит в честный CV-пересчёт (plan fast-path
+    # не авторитетен на дырках) — корректно, просто медленнее. Границы дырок frame-snapped (Δ=0).
+    if edit.silence_config and edit.silence_config.enabled:
+        from app.editor.silence import apply_silence  # noqa: PLC0415
+
+        _sil_words = store.load_transcript_words(job_id)
+        _orig_n = len(edit.source_intervals)
+        edit = edit.model_copy(
+            update={
+                "source_intervals": apply_silence(
+                    edit.source_intervals, _sil_words, edit.silence_config, fps=src_fps
+                )
+            }
+        )
+        _rlog.info(
+            "render: pause-removal ON job=%s clip=%s intervals %d->%d",
+            job_id, clip_id, _orig_n, len(edit.source_intervals),
+        )  # fmt: skip
     ass_rel: str | None = None
     if with_subtitles:
         # Субтитры выбранного пресета (edit.captions.style/highlight) → ASS-прожиг.

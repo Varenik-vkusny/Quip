@@ -81,6 +81,7 @@ from app.models import (
     CropOverride,
     HighlightStyle,
     RefreshClipBody,
+    SilenceConfig,
     SourceInterval,
 )
 from app.pipeline.stage5_render import aspect_to_dims
@@ -2052,6 +2053,32 @@ def op_set_motion(
     edit = _load_or_404(job_id, clip_id)
     return _save_or_409(
         job_id, clip_id, edit.model_copy(update={"lock_per_shot": body.lock_per_shot}), body.version
+    )
+
+
+class SilenceBody(BaseModel):
+    version: int
+    silence_config: SilenceConfig
+
+
+@app.post("/jobs/{job_id}/clips/{clip_id}/edit/silence")
+def op_set_silence(
+    job_id: str,
+    clip_id: str,
+    body: SilenceBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Удаление пауз (спека 2026-07-12): вкл/выкл + плотность (min_pause) на клип. Недеструктивно
+    (toggle = флип enabled). RENDER-REQUIRED — меняет тайминг/пиксели → фронт ставит pixelDirty +
+    предлагает Render. Границы дырок frame-snapятся в рендере (Δ=0). Owner-only (IDOR)."""
+    _require_owned_job(job_id, authorization, x_user_id)
+    edit = _load_or_404(job_id, clip_id)
+    return _save_or_409(
+        job_id,
+        clip_id,
+        edit.model_copy(update={"silence_config": body.silence_config}),
+        body.version,
     )
 
 
