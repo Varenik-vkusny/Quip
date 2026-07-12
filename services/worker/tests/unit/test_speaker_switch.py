@@ -136,6 +136,39 @@ class TestBindLanes:
         lane1 = _track(0, 90, 0.65, speak_hi=(60, 90))  # говорит в turn2 → 1 голос
         assert bind_lanes(turns, [lane0, lane1], 30.0)[0] == 0
 
+    def test_baseline_normalization_beats_pose_bias(self) -> None:
+        # RIGHT-лицо ВСЕГДА выше по абсолюту (поза-биас: фронтальнее к камере), но каждое лицо
+        # ПОДНИМАЕТСЯ над своим базлайном в свои реплики → нормализация даёт верную привязку.
+        turns = [SpeakerTurn(0, 0.0, 3.0, 10), SpeakerTurn(1, 3.0, 6.0, 10)]  # 0..90 s0, 90..180 s1
+        left = SpeakerTrack(
+            f0=0, f1=180, cx=(0.2,) * 180, width=0.12, speak=0.0,
+            speak_frames=tuple(-0.5 if i < 90 else -1.5 for i in range(180)),  # поднят в turn0
+        )  # fmt: skip
+        right = SpeakerTrack(
+            f0=0, f1=180, cx=(0.65,) * 180, width=0.12, speak=0.0,
+            speak_frames=tuple(0.0 if i < 90 else 0.5 for i in range(180)),  # всегда > LEFT абс.
+        )  # fmt: skip
+        # absolute argmax → RIGHT оба турна (неверно); baseline LEFT=-1.0/RIGHT=+0.25 → верно:
+        assert bind_lanes(turns, [left, right], 30.0) == {0: 0, 1: 1}
+
+    def test_long_turn_outweighs_short_noisy_turns(self) -> None:
+        # s0 в 3 турна: 2 КОРОТКИХ (2w,3w) шумно голосуют за RIGHT, 1 ДЛИННЫЙ (50w) за LEFT.
+        # Без веса: 2 турна RIGHT > 1 LEFT → неверно. С весом n_words: LEFT 50 vs RIGHT 5 → верно.
+        turns = [
+            SpeakerTurn(0, 0.0, 1.0, 2),
+            SpeakerTurn(0, 1.0, 5.0, 50),
+            SpeakerTurn(0, 5.0, 6.0, 3),
+        ]
+        lane0 = SpeakerTrack(
+            f0=0, f1=180, cx=(0.2,) * 180, width=0.12, speak=0.0,
+            speak_frames=tuple(1.0 if 30 <= i < 150 else -1.0 for i in range(180)),  # поднят в t1
+        )  # fmt: skip
+        lane1 = SpeakerTrack(
+            f0=0, f1=180, cx=(0.65,) * 180, width=0.12, speak=0.0,
+            speak_frames=tuple(1.0 if (i < 30 or i >= 150) else -1.0 for i in range(180)),  # t0,t2
+        )  # fmt: skip
+        assert bind_lanes(turns, [lane0, lane1], 30.0)[0] == 0
+
     def test_offscreen_cluster_is_none(self) -> None:
         turns = [SpeakerTurn(0, 0.0, 3.0, 10), SpeakerTurn(5, 3.0, 6.0, 10)]
         lane0 = _track(0, 180, 0.2, speak_hi=(0, 90))

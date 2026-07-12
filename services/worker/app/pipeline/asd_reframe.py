@@ -71,6 +71,7 @@ def score_tracks_in_segment(
     *,
     crop_scale: float = 0.55,
     cuts: Sequence[int] = (),
+    det_conf: float = 0.5,
 ) -> list[SpeakerTrack]:
     """Сегмент → дорожки лиц с ASD speak-score (вход plan_regions). [] если лиц нет.
 
@@ -150,7 +151,7 @@ def score_tracks_in_segment(
         t0 = time.monotonic()
         opts = mp_vision.FaceDetectorOptions(
             base_options=mp_python.BaseOptions(model_asset_path=str(model)),
-            min_detection_confidence=0.5,
+            min_detection_confidence=det_conf,
         )
         frame_faces: list[list[dict[str, Any]]] = []
         with mp_vision.FaceDetector.create_from_options(opts) as det:

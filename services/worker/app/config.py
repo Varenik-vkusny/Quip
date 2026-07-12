@@ -248,6 +248,12 @@ class Settings(BaseSettings):
     switch_iou_beta: float = 0.30
     switch_establish_sec: float = 0.0
     switch_bind_conf_min: float = 0.6
+    # MediaPipe face-detection confidence. Дефолт 0.5 (normal 2-shot→fit путь, обкатан). Speaker
+    # mode использует switch_det_conf=0.25: спикеры в интервью смотрят ДРУГ НА ДРУГА (профиль/наклон
+    # головы вниз) — на 0.5 фронтально-смещённый BlazeFace теряет их (репро: мужчина детектился 12%
+    # кадров; на 0.25 → 98%). Seat-агрегация + coverage-гейт гасят лишние детекты. (2026-07-13)
+    reframe_face_det_conf: float = 0.5
+    switch_det_conf: float = 0.25
 
     # billing / payments (P1). Все опциональны — гейт квоты и вебхук Lemon активны
     # ТОЛЬКО при заполнении (нужны Supabase + Lemon у фаундера). По умолчанию инертны →

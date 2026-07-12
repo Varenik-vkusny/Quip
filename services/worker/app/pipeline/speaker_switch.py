@@ -98,7 +98,18 @@ def bind_lanes(
     меньший индекс); confidence = голоса_winner / всего; < conf_min → None (ambiguous). Кластер
     без единого голоса (все реплики без говорящего on-screen лица) → None (off-screen). tracks
     несут speak_frames @native fps (выровнены по cx). Робастно: один шумный турн не переворачивает
-    majority по всему клипу."""
+    majority по всему клипу.
+
+    ⚠️ БАЗЛАЙН-НОРМАЛИЗАЦИЯ (важно для интервью лицом-к-лицу): вычитаем средний ASD дорожки за весь
+    шот. На профиль/tilt-съёмке (спикеры смотрят друг на друга) ASD отражает ПОЗУ (насколько лицо
+    фронтально к камере), а не речь → одно лицо всегда выше по АБСОЛЮТУ (репро: правое лицо
+    выигрывало все 7 реплик независимо от говорящего). Сигнал речи = ОТКЛОНЕНИЕ ASD дорожки ВВЕРХ от
+    ЕЁ базлайна (её поза — константа, сокращается). С нормализацией per-turn winner стал 6/7 верным.
+    """
+    baseline: list[float] = []
+    for tr in tracks:
+        real = [v for v in tr.speak_frames if v > NO_ASD]
+        baseline.append(sum(real) / len(real) if real else 0.0)
     votes: dict[int, dict[int, int]] = {}
     for turn in turns:
         tf0 = round(turn.t_start * fps)
@@ -117,12 +128,16 @@ def bind_lanes(
             ]
             if not vals:
                 continue
-            score = sum(vals) / len(vals)
+            score = sum(vals) / len(vals) - baseline[lane]  # отклонение от собственного базлайна
             if best_score is None or score > best_score:
                 best_score, best_lane = score, lane
         if best_lane is not None and best_score is not None and best_score > _VOTE_MIN:
+            # Голос взвешен ДЛИНОЙ реплики (n_words): длинный турн = больше надёжного ASD-сигнала,
+            # короткие обрезки («да», 2 слова) не перевешивают 50-словный ответ. Репро: без веса s0
+            # давал ничью 2:2 из-за коротких шумных турнов (conf 0.5 → None); с весом → conf 0.74.
+            w = max(1, turn.n_words)
             votes.setdefault(turn.speaker, {})
-            votes[turn.speaker][best_lane] = votes[turn.speaker].get(best_lane, 0) + 1
+            votes[turn.speaker][best_lane] = votes[turn.speaker].get(best_lane, 0) + w
 
     binding: dict[int, int | None] = {}
     for spk, lane_votes in votes.items():

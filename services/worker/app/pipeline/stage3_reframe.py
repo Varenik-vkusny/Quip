@@ -1457,6 +1457,7 @@ def reframe_segment(
     words: Sequence[Word] | None = None,
     reframe_mode: str = "auto",
     switch_cfg: SwitchConfig | None = None,
+    det_conf: float = 0.5,
 ) -> tuple[list[TrackRegion], bool]:
     """Сегмент → (cut-aligned регионы, face_found). Единый путь (ASD по дефолту).
 
@@ -1503,6 +1504,7 @@ def reframe_segment(
         face_fps,
         crop_scale=speaker_crop_scale,
         cuts=cuts_face,
+        det_conf=det_conf,
     )
     face_found = bool(tracks_native)
     tracks = [resample_track(t, face_fps, fps) for t in tracks_native]
