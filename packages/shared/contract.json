@@ -1104,28 +1104,28 @@
     "SilenceConfig": {
       "description": "Удаление пауз (спека 2026-07-12 §5): вырезать тихие гэпы между словами, сжав клип.\n\nПрименяется в рендере как ДОП. дырки в source_intervals (недеструктивно, toggle = флип enabled).",
       "properties": {
-        "boundary_keep_ms": {
-          "default": 220,
-          "type": "integer"
-        },
         "enabled": {
           "default": false,
           "type": "boolean"
+        },
+        "lead_in_ms": {
+          "default": 50,
+          "type": "integer"
+        },
+        "lead_out_boundary_ms": {
+          "default": 300,
+          "type": "integer"
+        },
+        "lead_out_ms": {
+          "default": 150,
+          "type": "integer"
         },
         "max_pause_ms": {
           "default": 2000,
           "type": "integer"
         },
         "min_pause_ms": {
-          "default": 400,
-          "type": "integer"
-        },
-        "padding_ms": {
-          "default": 50,
-          "type": "integer"
-        },
-        "within_keep_ms": {
-          "default": 80,
+          "default": 350,
           "type": "integer"
         }
       },

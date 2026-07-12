@@ -9,10 +9,12 @@ import { useMemo, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { SilenceConfig, SourceInterval, Word } from "@/lib/types";
 
-// codegen'd SilenceConfig has all fields optional (pydantic defaults) → normalize with these.
-const DEF_MIN = 400;
+// codegen'd SilenceConfig has all fields optional (pydantic defaults) → normalize with these (v3).
+const DEF_MIN = 350;
 const DEF_MAX = 2000;
-const DEF_PAD = 50;
+const DEF_LEAD_IN = 50;
+const DEF_LEAD_OUT = 150;
+const DEF_LEAD_OUT_BND = 300;
 
 // tightness slider 0 (Natural, 800ms) .. 100 (Tight, 200ms)
 function sliderToMs(v: number): number {
@@ -22,24 +24,24 @@ function msToSlider(ms: number): number {
   return Math.round((800 - ms) / 6);
 }
 
-// Rough client estimate of seconds removed (ignores frame-snap; server is authoritative).
+// Rough client estimate of seconds removed (ignores frame-snap / speaker-skip; server authoritative).
 function estimateSaved(
   words: Word[],
   intervals: SourceInterval[],
   minMs: number,
   maxMs: number,
-  padMs: number,
+  leadTotalMs: number,
 ): number {
   const minP = minMs / 1000;
   const maxP = maxMs / 1000;
-  const pad = padMs / 1000;
+  const lead = leadTotalMs / 1000; // lead_in + lead_out kept around the cut
   const inClip = (a: number, b: number) =>
     intervals.some((iv) => iv.source_start <= a && b <= iv.source_end);
   let saved = 0;
   for (let i = 0; i < words.length - 1; i++) {
     const gap = words[i + 1].start - words[i].end;
     if (gap >= minP && gap <= maxP && inClip(words[i].end, words[i + 1].start)) {
-      saved += Math.max(0, gap - 2 * pad);
+      saved += Math.max(0, gap - lead);
     }
   }
   return saved;
@@ -61,17 +63,27 @@ export function PausesTab({
   const enabled = config?.enabled ?? false;
   const minMs = config?.min_pause_ms ?? DEF_MIN;
   const maxMs = config?.max_pause_ms ?? DEF_MAX;
-  const padMs = config?.padding_ms ?? DEF_PAD;
+  const leadIn = config?.lead_in_ms ?? DEF_LEAD_IN;
+  const leadOut = config?.lead_out_ms ?? DEF_LEAD_OUT;
+  const leadOutBnd = config?.lead_out_boundary_ms ?? DEF_LEAD_OUT_BND;
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const saved = useMemo(
-    () => (enabled ? estimateSaved(words, intervals, minMs, maxMs, padMs) : 0),
-    [enabled, minMs, maxMs, padMs, words, intervals],
+    () => (enabled ? estimateSaved(words, intervals, minMs, maxMs, leadIn + leadOut) : 0),
+    [enabled, minMs, maxMs, leadIn, leadOut, words, intervals],
   );
 
-  // Always emit a full config (all fields present) so a toggle/slick never drops sibling fields.
+  // Always emit a full config (all fields present) so a toggle/slider never drops sibling fields.
   const emit = (partial: Partial<SilenceConfig>) =>
-    onChange({ enabled, min_pause_ms: minMs, max_pause_ms: maxMs, padding_ms: padMs, ...partial });
+    onChange({
+      enabled,
+      min_pause_ms: minMs,
+      max_pause_ms: maxMs,
+      lead_in_ms: leadIn,
+      lead_out_ms: leadOut,
+      lead_out_boundary_ms: leadOutBnd,
+      ...partial,
+    });
 
   return (
     <div className="space-y-5 p-4">
@@ -160,23 +172,6 @@ export function PausesTab({
                   disabled={busy}
                   onChange={(e) => emit({ max_pause_ms: Number(e.target.value) })}
                   aria-label="Max pause to cut"
-                  className="h-1 w-full cursor-pointer appearance-none rounded-full bg-line accent-accent disabled:opacity-50"
-                />
-              </label>
-              <label className="block space-y-1">
-                <div className="flex justify-between text-xs">
-                  <span className="text-muted">Padding around speech</span>
-                  <span className="font-mono text-ink">{padMs}ms</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={150}
-                  step={10}
-                  value={padMs}
-                  disabled={busy}
-                  onChange={(e) => emit({ padding_ms: Number(e.target.value) })}
-                  aria-label="Padding around speech"
                   className="h-1 w-full cursor-pointer appearance-none rounded-full bg-line accent-accent disabled:opacity-50"
                 />
               </label>
