@@ -21,6 +21,40 @@ from app.pipeline.stage3_reframe import (
 )
 
 
+class TestResampleTrackSpeakFrames:
+    """resample_track тянет per-frame ASD (speak_frames) в нативную сетку вместе с cx (Δ=0)."""
+
+    def test_speak_frames_resampled_with_cx(self) -> None:
+        from app.pipeline.stage3_reframe import SpeakerTrack, resample_track
+
+        t = SpeakerTrack(
+            f0=0,
+            f1=10,
+            cx=tuple(i / 10 for i in range(10)),
+            width=0.1,
+            speak=4.5,
+            speak_frames=tuple(float(i) for i in range(10)),
+        )
+        r = resample_track(t, 25.0, 30.0)
+        assert len(r.speak_frames) == len(r.cx) == r.f1 - r.f0
+        assert r.speak_frames[0] == 0.0 and r.speak_frames[-1] == 9.0
+
+    def test_empty_speak_frames_stays_empty(self) -> None:
+        from app.pipeline.stage3_reframe import SpeakerTrack, resample_track
+
+        t = SpeakerTrack(f0=0, f1=10, cx=tuple([0.5] * 10), width=0.1, speak=-9.0)
+        assert resample_track(t, 25.0, 30.0).speak_frames == ()
+
+    def test_no_resample_is_identity(self) -> None:
+        from app.pipeline.stage3_reframe import SpeakerTrack, resample_track
+
+        t = SpeakerTrack(
+            f0=0, f1=5, cx=(0.1, 0.2, 0.3, 0.4, 0.5), width=0.1, speak=0.0,
+            speak_frames=(1.0, 2.0, 3.0, 4.0, 5.0),
+        )  # fmt: skip
+        assert resample_track(t, 25.0, 25.0) is t
+
+
 class TestComputeCropWindow:
     def test_1080p_center(self) -> None:
         c = compute_crop_window(1920, 1080, 0.5, t=0.0)

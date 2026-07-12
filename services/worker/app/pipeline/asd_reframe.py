@@ -204,6 +204,7 @@ def score_tracks_in_segment(
 
         out: list[SpeakerTrack] = []
         for tr in tracks:
+            speak_frames: tuple[float, ...] = ()
             if score_asd:
                 assert audio is not None  # score_asd → wav прочитан выше
                 faces224 = _crop_faces(tr, get_frame, crop_scale)
@@ -211,6 +212,9 @@ def score_tracks_in_segment(
                 a1 = int((tr["frame"][-1] + 1) / fps * sr)
                 sc = score_track(faces224, audio[a0:a1])
                 speak = float(np.mean(sc)) if sc.size else _SILENT
+                # per-frame скоры сохраняем для turn-level binding (speaker_switch): какое лицо
+                # говорит в КАЖДОЙ реплике диаризации (скаляр speak за весь шот тут бесполезен).
+                speak_frames = tuple(float(x) for x in sc)
             else:
                 speak = _SILENT
             cx_series = ((tr["bbox"][:, 0] + tr["bbox"][:, 2]) / 2 / src_w).tolist()
@@ -222,6 +226,7 @@ def score_tracks_in_segment(
                     cx=tuple(min(1.0, max(0.0, c)) for c in cx_series),
                     width=width,
                     speak=speak,
+                    speak_frames=speak_frames,
                 )
             )
         _phase_add("asd", time.monotonic() - t0)

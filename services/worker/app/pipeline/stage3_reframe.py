@@ -152,6 +152,11 @@ class SpeakerTrack:
     cx: tuple[float, ...]
     width: float
     speak: float
+    # Per-frame ASD speak-score @track fps (turn-level binding спикер↔лицо, speaker_switch).
+    # Выровнен по ПЕРВЫМ len(speak_frames) кадрам дорожки (score_track усекает хвост до length*fps).
+    # () = ASD не считался (single-track skip) ИЛИ back-compat конструкция без per-frame. Скаляр
+    # `speak` = mean этого массива (совместимость). Ресемплится в resample_track вместе с cx.
+    speak_frames: tuple[float, ...] = ()
 
 
 # MediaPipe Tasks FaceDetector
@@ -436,11 +441,24 @@ def resample_track(track: SpeakerTrack, src_fps: float, dst_fps: float) -> Speak
     nf0 = round(track.f0 / src_fps * dst_fps)
     nf1 = max(nf0 + 1, round(track.f1 / src_fps * dst_fps))
     n_src = len(track.cx)
+    n_sf = len(track.speak_frames)
     cx_new: list[float] = []
+    sf_new: list[float] = []
     for nf in range(nf0, nf1):
         idx = round(nf / dst_fps * src_fps) - track.f0  # время кадра dst → индекс в src-сетке
         cx_new.append(track.cx[max(0, min(n_src - 1, idx))])
-    return SpeakerTrack(f0=nf0, f1=nf1, cx=tuple(cx_new), width=track.width, speak=track.speak)
+        if (
+            n_sf
+        ):  # speak_frames выровнен по тем же кадрам (короче cx на хвост — клипуем в свою длину)
+            sf_new.append(track.speak_frames[max(0, min(n_sf - 1, idx))])
+    return SpeakerTrack(
+        f0=nf0,
+        f1=nf1,
+        cx=tuple(cx_new),
+        width=track.width,
+        speak=track.speak,
+        speak_frames=tuple(sf_new),
+    )
 
 
 def _track_cx_in_shot(t: SpeakerTrack, f0: int, f1: int) -> list[float]:
