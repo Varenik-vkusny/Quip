@@ -520,7 +520,10 @@ def render_frame_by_frame(
     # -vf: субтитры ПЕРВЫМИ (контент), вотермарка ПОСЛЕДНЕЙ (поверх). Оба — на готовом кадре.
     vf_filters: list[str] = []
     if ass_name:
-        vf_filters.append(f"subtitles={ass_name}")
+        # ⚠️ fontsdir ОБЯЗАТЕЛЕН (bugfix 2026-07-12): без него libass не находит шрифты проекта на
+        # минимальном контейнере (нет системных, /root/fonts не в fontconfig) → ПУСТЫЕ глифы, ffmpeg
+        # успешен, ошибки нет → «скачал с субтитрами, а их нет». Engine A передавал; Engine B — нет.
+        vf_filters.append(_subtitles_filter(ass_name, _fontsdir_rel(data_dir)))
     if watermark:
         vf_filters.append(
             build_watermark_drawtext(out_w, out_h, _watermark_fontfile(_fontsdir_rel(data_dir)))
