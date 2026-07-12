@@ -520,3 +520,32 @@ class TestFitStyles:
         fc = build_timeline_filter([seg_black], 1920, 1080, 24.0, None)
         assert "color=black" in fc
         assert "force_original_aspect_ratio=decrease" in fc
+
+
+class TestFontsdirResolution:
+    """_fontsdir_rel: Linux → ABSOLUTE (bugfix 2026-07-12); Windows → relative."""
+
+    def test_linux_returns_absolute_path(self, monkeypatch):
+        # Container (posix) needs an ABSOLUTE fontsdir: after Part C the ffmpeg cwd (data_dir) is on
+        # /root/data/tmp while fonts are under /app; a relative path across roots didn't resolve, so
+        # libass burned blank glyphs (no error). Absolute is clean (no colon) and resolves anywhere.
+        from pathlib import Path
+
+        from app.pipeline.stage5_render import _FONTS_DIR, _fontsdir_rel
+
+        monkeypatch.setattr("app.pipeline.stage5_render.os.name", "posix")
+        got = _fontsdir_rel(Path("/root/data/tmp/jobs/abc"))
+        # ABSOLUTE (the fix), not a relpath from the far cwd (== the absolute fonts dir).
+        assert got == str(_FONTS_DIR)
+        assert not got.startswith("..")  # never a relative "../.." across roots on the container
+
+    def test_windows_returns_relative_path(self, monkeypatch):
+        from pathlib import Path
+
+        from app.pipeline.stage5_render import _fontsdir_rel
+
+        monkeypatch.setattr("app.pipeline.stage5_render.os.name", "nt")
+        got = _fontsdir_rel(Path(__file__).resolve().parent)
+        # relative → not an absolute path, no Windows drive colon that would break filter_complex
+        assert not got.startswith("/")
+        assert ":" not in got

@@ -159,11 +159,23 @@ _FONTS_DIR = Path(__file__).resolve().parents[2] / "fonts"
 
 
 def _fontsdir_rel(data_dir: Path) -> str | None:
-    """Относительный (от cwd ffmpeg) путь к шрифтам проекта; None если папки нет."""
+    """Путь к шрифтам проекта для ffmpeg-фильтра subtitles (fontsdir); None если папки нет.
+
+    ⚠️ БАГ 2026-07-12 (fix): на Linux возвращаем АБСОЛЮТНЫЙ путь, НЕ относительный. Раньше был
+    relpath от cwd ffmpeg (=data_dir). После Part C (ephemeral-disk, 2026-07-07) data_dir переехал
+    на ``/root/data/tmp/...``, а код (шрифты) = ``/app/...`` — относительный путь ЧЕРЕЗ РАЗНЫЕ КОРНИ
+    libass не резолвил, а системного fallback-шрифта на минимальном контейнере НЕТ → libass прожигал
+    ПУСТЫЕ глифы (БЕЗ ffmpeg-ошибки, render_status=done) → «скачал клип с субтитрами, а их нет».
+    Локально это маскировалось системным шрифтом-fallback (Windows). Абсолютный POSIX-путь чист (без
+    ':') → парсится в filter_complex и резолвится независимо от cwd.
+    Windows (локальная разработка): оставляем ОТНОСИТЕЛЬНЫЙ — абсолютный там несёт диск-':' ('C:'),
+    который ломает разбор filtergraph (а системный fallback и так есть). ``data_dir`` нужен только
+    для Windows-relpath."""
     if not _FONTS_DIR.is_dir():
         return None
-    rel: str = os.path.relpath(_FONTS_DIR, data_dir)
-    return rel.replace("\\", "/")
+    if os.name == "nt":  # Windows: relative (abs 'C:' colon breaks filter_complex; sys fallback ok)
+        return os.path.relpath(_FONTS_DIR, data_dir).replace("\\", "/")
+    return str(_FONTS_DIR)  # Linux/container: absolute — clean (no colon), resolves any cwd
 
 
 _WATERMARK_TEXT = "Made with Quip"
