@@ -14,7 +14,7 @@ from typing import Any
 from app import artifacts, db
 from app.editor import style_prefs
 from app.editor.defaults import default_clip_edit
-from app.models import ClipEdit, Segment, Word
+from app.models import ClipEdit, Segment, SilenceConfig, Word
 from app.run import DATA_ROOT as DATA_ROOT  # monkeypatch-able; explicit re-export для artifacts
 
 
@@ -96,6 +96,14 @@ def ensure_edit(job_id: str, clip_id: str) -> ClipEdit:
                 pref_style, pref_highlight, pref_hook_look = parsed
     except Exception as e:  # noqa: BLE001 — сидирование стиля не должно валить создание клипа
         print(f"[ensure_edit] WARN style-pref seed skipped for {job_id}/{clip_id}: {e}")
+    # Global «убирать паузы» с загрузки (per-job) → сидим silence_config на КАЖДЫЙ клип. Флаг с
+    # jobs.remove_pauses; ошибка чтения не валит создание клипа (явный лог + OFF, правило №8).
+    pref_silence = None
+    try:
+        if db.get_job_remove_pauses(job_id):
+            pref_silence = SilenceConfig(enabled=True)
+    except Exception as e:  # noqa: BLE001 — сидирование паузреза не должно валить создание клипа
+        print(f"[ensure_edit] WARN silence seed skipped for {job_id}/{clip_id}: {e}")
     edit = default_clip_edit(
         clip_id,
         seg,
@@ -103,5 +111,6 @@ def ensure_edit(job_id: str, clip_id: str) -> ClipEdit:
         pref_style=pref_style,
         pref_highlight=pref_highlight,
         pref_hook_look=pref_hook_look,
+        pref_silence=pref_silence,
     )
     return save_edit(job_id, clip_id, edit, expected_version=None)

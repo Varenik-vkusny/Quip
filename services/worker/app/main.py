@@ -128,6 +128,7 @@ class CreateJobBody(BaseModel):
     language: str | None = None  # ISO-код языка (kk=казахский→Groq; None=авто-детект Deepgram)
     clip_min_sec: int | None = Field(default=None, ge=3, le=180)
     clip_max_sec: int | None = Field(default=None, ge=10, le=180)
+    remove_pauses: bool = False  # global «убирать паузы» (opt-in) → сидит silence на каждый клип
 
 
 @app.get("/healthz")
@@ -341,7 +342,10 @@ def create_job(
     _enforce_free_identity(authorization, user_id)
     _enforce_quota(user_id)
     job_id = f"job_{uuid.uuid4().hex[:12]}"
-    db.insert_job(job_id, body.source_type, body.source_ref, user_id=user_id)
+    db.insert_job(
+        job_id, body.source_type, body.source_ref,
+        user_id=user_id, remove_pauses=body.remove_pauses,
+    )  # fmt: skip
     # На Modal: spawn отдельной долгоживущей CPU-функции (web scale-to-zero убил бы фон-таск).
     # Локально: BackgroundTask, как в Phase 0.
     if dispatch.spawn_enabled():
@@ -386,6 +390,7 @@ async def create_upload_job(
     language: str | None = Form(default=None),
     clip_min_sec: int | None = Form(default=None, ge=3, le=180),
     clip_max_sec: int | None = Form(default=None, ge=10, le=180),
+    remove_pauses: bool = Form(default=False),
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -407,7 +412,7 @@ async def create_upload_job(
     with upload_path.open("wb") as fh:
         while chunk := await file.read(_UPLOAD_CHUNK):
             fh.write(chunk)
-    db.insert_job(job_id, "upload", filename, user_id=user_id)
+    db.insert_job(job_id, "upload", filename, user_id=user_id, remove_pauses=remove_pauses)
     if dispatch.spawn_enabled():
         try:
             storage.upload_source(upload_path, job_id)
@@ -526,6 +531,7 @@ class UploadCompleteBody(BaseModel):
     language: str | None = None
     clip_min_sec: int | None = Field(default=None, ge=3, le=180)
     clip_max_sec: int | None = Field(default=None, ge=10, le=180)
+    remove_pauses: bool = False  # global «убирать паузы» (opt-in с загрузки)
     # Multipart-сборка (если грузили частями): upload_id + ETag'и частей. None → single-PUT
     # (объект уже в R2, собирать нечего).
     upload_id: str | None = None
@@ -600,7 +606,9 @@ def complete_upload(
     user_id = _resolve_user(authorization, x_user_id)
     _enforce_free_identity(authorization, user_id)
     _enforce_quota(user_id)
-    db.insert_job(job_id, "upload", body.filename, user_id=user_id)
+    db.insert_job(
+        job_id, "upload", body.filename, user_id=user_id, remove_pauses=body.remove_pauses
+    )
     # Отпечаток source (для будущего per-user дедупа) — ОПЦИОНАЛЬНЫЙ сайд-канал. Малформед здесь
     # НЕ фатален: логируем и пропускаем (загрузка не должна падать из-за дедуп-метаданных).
     if body.source_fingerprint is not None:
@@ -641,6 +649,7 @@ class CheckDuplicateBody(BaseModel):
     language: str | None = None
     clip_min_sec: int | None = Field(default=None, ge=3, le=180)
     clip_max_sec: int | None = Field(default=None, ge=10, le=180)
+    remove_pauses: bool = False  # global «убирать паузы» (opt-in с загрузки)
     source_fingerprint: str
 
 
@@ -678,7 +687,9 @@ def check_duplicate(
         # R2-source найденной джобы уже вымело ретеншном → не дубликат: клиент грузит обычным путём.
         print(f"[check-duplicate] source for match {match} gone from R2 — treating as no duplicate")
         return {"duplicate": False}
-    db.insert_job(new_job_id, "upload", body.filename, user_id=user_id)
+    db.insert_job(
+        new_job_id, "upload", body.filename, user_id=user_id, remove_pauses=body.remove_pauses
+    )
     db.set_source_fingerprint(new_job_id, body.source_fingerprint)
     result = _spawn_upload_job(
         bg,

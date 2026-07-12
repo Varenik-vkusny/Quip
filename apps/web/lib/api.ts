@@ -636,6 +636,7 @@ async function completeMultipart(
   signal?: AbortSignal,
   clipMinSec?: number,
   clipMaxSec?: number,
+  removePauses?: boolean,
 ): Promise<void> {
   const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
     method: "POST",
@@ -649,6 +650,7 @@ async function completeMultipart(
       language: language ?? null,
       clip_min_sec: clipMinSec ?? null,
       clip_max_sec: clipMaxSec ?? null,
+      remove_pauses: removePauses ?? false,
       upload_id: uploadId,
       parts,
     }),
@@ -674,6 +676,7 @@ async function resumeMultipart(
   clipMinSec?: number,
   clipMaxSec?: number,
   rand?: () => number,
+  removePauses?: boolean,
 ): Promise<{ id: string }> {
   const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
     method: "POST",
@@ -718,7 +721,7 @@ async function resumeMultipart(
     rand,
   });
   const all = [...preCompleted, ...newly].sort((a, b) => a.part_number - b.part_number);
-  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec);
+  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses);
   await clearCheckpoint(fingerprint);
   return { id: cp.job_id };
 }
@@ -744,6 +747,7 @@ export async function createUploadJob(
   clipMinSec?: number,
   clipMaxSec?: number,
   rand?: () => number,
+  removePauses?: boolean,
 ): Promise<{ id: string }> {
   const headers = await authHeaders();
   const fingerprint = fileFingerprint({
@@ -771,6 +775,7 @@ export async function createUploadJob(
         clipMinSec,
         clipMaxSec,
         rand,
+        removePauses,
       );
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") throw e;
@@ -821,7 +826,7 @@ export async function createUploadJob(
         signal,
         rand,
       });
-      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec);
+      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses);
       await clearCheckpoint(fingerprint); // fully uploaded → no resume state to keep
       return { id };
     } catch (e) {
@@ -857,7 +862,7 @@ export async function createUploadJob(
     const done = await fetch(`${BASE}/jobs/${init.id}/upload-complete`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null }),
+      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null, remove_pauses: removePauses ?? false }),
       signal,
     });
     if (!done.ok) throw new Error(`Couldn’t start processing: ${done.status}`);
@@ -871,6 +876,7 @@ export async function createUploadJob(
   if (language != null) form.append("language", language);
   if (clipMinSec != null) form.append("clip_min_sec", String(clipMinSec));
   if (clipMaxSec != null) form.append("clip_max_sec", String(clipMaxSec));
+  if (removePauses) form.append("remove_pauses", "true");
   const res = await xhrRequest("POST", `${BASE}/jobs/upload`, form, { headers, onProgress, signal });
   if (res.status === 401) throw new Error("Sign in to create clips.");
   if (res.status === 402) {

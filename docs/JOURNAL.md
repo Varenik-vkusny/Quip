@@ -4,6 +4,24 @@
 > «как и почему так сделано». Актуальное состояние проекта = docs/README.md. Правила = CLAUDE.md.
 > Новые заметные решения дописывай СЮДА (не в CLAUDE.md).
 
+### 2026-07-12 — Удаление пауз, алгоритм v3 + Phase 1b (global тумблер) [ветка feat/pause-removal]
+Основатель прогнал прототипы на реальном подкасте (Юлия): чинил (1) «рубит конец клипа + чужую реплику»
+на смене говорящего, (2) «слова неразборчивы» (клип онсетов), (3) эээ/ммм не убираются. Ресёрч
+production-инструментов (Descript/TimeBolt/CrisperWhisper) → **алгоритм v3** в `editor/silence.py`:
+смена говорящего → НЕ режем (турн-тейкинг); АСИММЕТРИЧНЫЙ отступ (`lead_out` 150мс после слова >
+`lead_in` 50мс перед след.; конец предложения 300мс); защита краёв клипа + abort при коллизии; весь
+гэп режется целиком (голосовые эээ/ммм = не-слово → под нож; убрал silencedetect-рефайн, что берёг их).
+`SilenceConfig`: within/boundary_keep/padding → lead_in/lead_out/lead_out_boundary; min_pause 400→350.
+**Верифицировано:** боевой `apply_silence` == прототип, что зашёл основателю (85.04 vs 85.00с = 1 кадр).
+**Phase 1b (global на загрузке, дефолт OFF/opt-in):** флаг `jobs.remove_pauses` (миграция 0016 +
+sqlite `_ensure_column`) ставится на создании джобы (эндпоинты create_job/upload-complete/
+check-duplicate + Form /jobs/upload), воркер в `ensure_edit` читает его у владельца джобы и сидит
+`silence_config(enabled)` на КАЖДЫЙ клип (`default_clip_edit(pref_silence=…)`) — БЕЗ прокидывания через
+cross-process spawn (choke-point = ensure_edit). Фронт: тумблер «Убирать паузы» в `SourceForm` +
+проброс `removePauses` через `createUploadJob`-цепочку + i18n en/ru. Рефрейм: рез ДО reframe (tasks.py),
+CV-пересчёт на сжатых интервалах, Δ=0 — проверено по коду, флеша нет. Quality-фаза (CrisperWhisper для
+вросших эээ, energy-snap) — ПОСЛЕ деплоя. `just check` зелёный.
+
 ### 2026-07-12 — Удаление пауз, Phase 1a (per-clip) [ветка feat/pause-removal, НЕ задеплоено]
 Фича: вырезать тихие гэпы между словами, сжав клип (виральная компрессия + меньше воды). Спека
 `docs/superpowers/specs/2026-07-12-pause-removal-design.md`. **Ключевая находка ресёрча:** NLE-редактор

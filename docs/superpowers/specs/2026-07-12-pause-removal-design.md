@@ -1,8 +1,9 @@
 # Удаление пауз (Pause Removal) — Design Spec
 
-**Дата:** 2026-07-12 · **Ветка:** `feat/pause-removal` · **Статус:** ✅ **Phase 1a РЕАЛИЗОВАНА**
-(per-clip, backend+frontend, гейт зелёный, доказано локально); Phase 1b (глобально на загрузке) и
-Phase 2 (клиентский preview) — НЕ сделаны. На утреннее ревью основателя.
+**Дата:** 2026-07-12 · **Ветка:** `feat/pause-removal` · **Статус:** ✅ **Phase 1a + алгоритм v3 +
+Phase 1b (global тумблер) РЕАЛИЗОВАНЫ** (per-clip + global-на-загрузке, backend+frontend, гейт зелёный,
+v3 верифицирован против прототипа основателя). Phase 2 (клиентский preview) и quality-фаза
+(CrisperWhisper для вросших эээ/ммм, energy-snap) — НЕ сделаны. Детали v3/1b — `docs/JOURNAL.md`.
 
 > **Что сделано (ветка `feat/pause-removal`):**
 > - `be7058d` — ядро `editor/silence.py` (`compute_silence_cuts`/`apply_silence`, TDD 12 тестов) +
