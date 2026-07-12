@@ -11,9 +11,22 @@ from __future__ import annotations
 from app.editor.ops import _subtract_range
 from app.editor.reframe_cache import _snap
 from app.models import SilenceConfig, SourceInterval, Word
+from app.pipeline.cut_boundary import _is_sentence_end
 
 # после реза интервалы короче 1 кадра выкидываем (артефакт padding-нахлёста на очень коротком слове)
 _MIN_SEG_FRAMES = 1
+_MIN_SIDE = 0.035  # абсолютный минимум оставляемой тишины по краю (не режем впритык к согласной)
+_BOUNDARY_GAP_SEC = 0.7  # гэп длиннее — сам по себе граница мысли (пауза «на подумать»/смена темы)
+
+
+def _is_boundary(words: list[Word], i: int, gap: float) -> bool:
+    """Гэп на ГРАНИЦЕ мысли: конец предложения / длинный гэп / смена спикера. PURE."""
+    if _is_sentence_end(words[i].text):
+        return True
+    if gap > _BOUNDARY_GAP_SEC:
+        return True
+    a, b = words[i].speaker, words[i + 1].speaker
+    return a is not None and b is not None and a != b
 
 
 def _gap_within_interval(gs: float, ge: float, intervals: list[SourceInterval]) -> bool:
@@ -55,7 +68,8 @@ def compute_silence_cuts(
     """
     min_p = cfg.min_pause_ms / 1000.0
     max_p = cfg.max_pause_ms / 1000.0
-    pad = cfg.padding_ms / 1000.0
+    within_side = max(_MIN_SIDE, cfg.within_keep_ms / 2000.0)
+    bound_side = max(_MIN_SIDE, cfg.boundary_keep_ms / 2000.0)
     cuts: list[tuple[float, float]] = []
     for i in range(len(words) - 1):
         gs = words[i].end
@@ -65,13 +79,15 @@ def compute_silence_cuts(
             continue
         if not _gap_within_interval(gs, ge, intervals):
             continue
+        # Слой A: на ГРАНИЦЕ мысли оставляем больший вдох (естественно), ВНУТРИ — минимум (плотно).
+        side = bound_side if _is_boundary(words, i, gap) else within_side
         if silence_regions is not None:
             conf = _confirmed_silence(gs, ge, silence_regions)
             if conf is None:
                 continue  # аудио НЕ подтверждает тишину → ложный word-gap, пропускаем
             gs, ge = conf  # режем ровно подтверждённо-тихий суб-span
-        cs = _snap(gs + pad, fps)
-        ce = _snap(ge - pad, fps)
+        cs = _snap(gs + side, fps)
+        ce = _snap(ge - side, fps)
         if ce > cs:
             cuts.append((cs, ce))
     return cuts

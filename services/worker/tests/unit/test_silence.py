@@ -60,11 +60,38 @@ class TestComputeSilenceCuts:
         words = [W("a", 0.0, 1.0), W("b", 1.6, 2.6)]  # gap 0.6, но интервал только [0,1.0]
         assert compute_silence_cuts(words, [IV(0.0, 1.0)], CFG, fps=FPS) == []
 
-    def test_padding_consumes_gap_no_inverted_cut(self) -> None:
-        # padding 250мс × 2 = 0.5 > gap 0.45 → дырка схлопнулась → не добавляем
-        cfg = SilenceConfig(enabled=True, min_pause_ms=400, max_pause_ms=2000, padding_ms=250)
-        words = [W("a", 0.0, 1.0), W("b", 1.45, 2.45)]  # gap 0.45 ∈ [0.4, 2.0]
+    def test_keep_consumes_gap_no_inverted_cut(self) -> None:
+        # within_keep 1000мс (500 на край) > gap 0.45 → остаток съедает гэп → не режем
+        cfg = SilenceConfig(enabled=True, min_pause_ms=400, within_keep_ms=1000)
+        words = [W("a", 0.0, 1.0), W("b", 1.45, 2.45)]  # gap 0.45 ∈ [0.4, 2.0], within
         assert compute_silence_cuts(words, [IV(0.0, 5.0)], cfg, fps=FPS) == []
+
+
+class TestBoundaryAware:
+    """Слой A: на ГРАНИЦЕ мысли (конец предложения / длинный гэп / смена спикера) остаётся больший
+    вдох, чем ВНУТРИ мысли (наука: граничная пауза = сигнал парсинга, убирать нельзя)."""
+
+    def test_sentence_end_keeps_more_than_within(self) -> None:
+        wb = [W("a", 0.0, 1.0), W("end.", 1.0, 2.0), W("x", 2.6, 3.6)]  # gap [2.0,2.6] граница
+        ww = [W("a", 0.0, 1.0), W("mid", 1.0, 2.0), W("x", 2.6, 3.6)]  # gap [2.0,2.6] внутри
+        cb = compute_silence_cuts(wb, [IV(0.0, 10.0)], CFG, fps=FPS)[0]
+        cw = compute_silence_cuts(ww, [IV(0.0, 10.0)], CFG, fps=FPS)[0]
+        assert (cb[1] - cb[0]) < (cw[1] - cw[0])  # граница режет МЕНЬШЕ → оставляет больше вдоха
+
+    def test_long_gap_is_boundary(self) -> None:
+        # длинный гэп (1.5с) сам граница даже без пунктуации → остаток ~boundary_keep (220мс)
+        ww = [W("a", 0.0, 1.0), W("mid", 1.0, 2.0), W("x", 3.5, 4.5)]  # gap [2.0,3.5]=1.5s >0.7
+        c = compute_silence_cuts(ww, [IV(0.0, 10.0)], CFG, fps=FPS)[0]
+        assert 1.5 - (c[1] - c[0]) == pytest.approx(0.22, abs=0.06)
+
+    def test_speaker_change_is_boundary(self) -> None:
+        w = [
+            Word(text="a", start=0.0, end=1.0, speaker=0),
+            Word(text="b", start=1.0, end=2.0, speaker=0),
+            Word(text="c", start=2.6, end=3.6, speaker=1),  # gap b→c: смена спикера = граница
+        ]
+        c = compute_silence_cuts(w, [IV(0.0, 10.0)], CFG, fps=FPS)[0]
+        assert (2.6 - 2.0) - (c[1] - c[0]) > 0.15  # оставлен большой вдох (>within)
 
 
 class TestApplySilence:

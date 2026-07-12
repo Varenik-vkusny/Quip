@@ -279,10 +279,12 @@ export interface CropOverride {
  * Применяется в рендере как ДОП. дырки в source_intervals (недеструктивно, toggle = флип enabled).
  */
 export interface SilenceConfig {
+  boundary_keep_ms?: number;
   enabled?: boolean;
   max_pause_ms?: number;
   min_pause_ms?: number;
   padding_ms?: number;
+  within_keep_ms?: number;
 }
 /**
  * Один оставленный кусок исходника. Интервалы упорядочены по CLIP-порядку.
