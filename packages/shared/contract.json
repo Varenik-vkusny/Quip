@@ -469,6 +469,17 @@
           },
           "type": "array"
         },
+        "silence_config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SilenceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "source_intervals": {
           "items": {
             "$ref": "#/$defs/SourceInterval"
@@ -1090,6 +1101,36 @@
       ],
       "type": "object"
     },
+    "SilenceConfig": {
+      "description": "Удаление пауз (спека 2026-07-12 §5): вырезать тихие гэпы между словами, сжав клип.\n\nПрименяется в рендере как ДОП. дырки в source_intervals (недеструктивно, toggle = флип enabled).",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "lead_in_ms": {
+          "default": 50,
+          "type": "integer"
+        },
+        "lead_out_boundary_ms": {
+          "default": 300,
+          "type": "integer"
+        },
+        "lead_out_ms": {
+          "default": 150,
+          "type": "integer"
+        },
+        "max_pause_ms": {
+          "default": 2000,
+          "type": "integer"
+        },
+        "min_pause_ms": {
+          "default": 350,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "SourceInterval": {
       "description": "Один оставленный кусок исходника. Интервалы упорядочены по CLIP-порядку.",
       "properties": {
@@ -1433,6 +1474,9 @@
     },
     "Segment": {
       "$ref": "#/$defs/Segment"
+    },
+    "SilenceConfig": {
+      "$ref": "#/$defs/SilenceConfig"
     },
     "SourceInterval": {
       "$ref": "#/$defs/SourceInterval"

@@ -4,6 +4,42 @@
 > «как и почему так сделано». Актуальное состояние проекта = docs/README.md. Правила = CLAUDE.md.
 > Новые заметные решения дописывай СЮДА (не в CLAUDE.md).
 
+### 2026-07-12 — Удаление пауз, алгоритм v3 + Phase 1b (global тумблер) [ветка feat/pause-removal]
+Основатель прогнал прототипы на реальном подкасте (Юлия): чинил (1) «рубит конец клипа + чужую реплику»
+на смене говорящего, (2) «слова неразборчивы» (клип онсетов), (3) эээ/ммм не убираются. Ресёрч
+production-инструментов (Descript/TimeBolt/CrisperWhisper) → **алгоритм v3** в `editor/silence.py`:
+смена говорящего → НЕ режем (турн-тейкинг); АСИММЕТРИЧНЫЙ отступ (`lead_out` 150мс после слова >
+`lead_in` 50мс перед след.; конец предложения 300мс); защита краёв клипа + abort при коллизии; весь
+гэп режется целиком (голосовые эээ/ммм = не-слово → под нож; убрал silencedetect-рефайн, что берёг их).
+`SilenceConfig`: within/boundary_keep/padding → lead_in/lead_out/lead_out_boundary; min_pause 400→350.
+**Верифицировано:** боевой `apply_silence` == прототип, что зашёл основателю (85.04 vs 85.00с = 1 кадр).
+**Phase 1b (global на загрузке, дефолт OFF/opt-in):** флаг `jobs.remove_pauses` (миграция 0016 +
+sqlite `_ensure_column`) ставится на создании джобы (эндпоинты create_job/upload-complete/
+check-duplicate + Form /jobs/upload), воркер в `ensure_edit` читает его у владельца джобы и сидит
+`silence_config(enabled)` на КАЖДЫЙ клип (`default_clip_edit(pref_silence=…)`) — БЕЗ прокидывания через
+cross-process spawn (choke-point = ensure_edit). Фронт: тумблер «Убирать паузы» в `SourceForm` +
+проброс `removePauses` через `createUploadJob`-цепочку + i18n en/ru. Рефрейм: рез ДО reframe (tasks.py),
+CV-пересчёт на сжатых интервалах, Δ=0 — проверено по коду, флеша нет. Quality-фаза (CrisperWhisper для
+вросших эээ, energy-snap) — ПОСЛЕ деплоя. `just check` зелёный.
+
+### 2026-07-12 — Удаление пауз, Phase 1a (per-clip) [ветка feat/pause-removal, НЕ задеплоено]
+Фича: вырезать тихие гэпы между словами, сжав клип (виральная компрессия + меньше воды). Спека
+`docs/superpowers/specs/2026-07-12-pause-removal-design.md`. **Ключевая находка ресёрча:** NLE-редактор
+(влит в main) УЖЕ хранит таймлайн клипа как `list[SourceInterval]` и рендерит мульти-интервальный
+jump-cut (`render_timeline`), с авто-ремапом субтитров (`ClipTimeMap`) и reframe (band_starts). Значит
+удаление пауз = вычислить тишина-дырки → вычесть из `source_intervals` → рендер сам всё запечёт. Нового
+движка НЕ надо (прошлая спека 2026-06-28 боялась reframe-ремаппинга — она предшествовала NLE).
+**Сделано (`be7058d`+`f00e569`, гейт зелёный):** pure `editor/silence.py` (двусторонний порог [min,max],
+padding, границы frame-snapped через `reframe_cache._snap` — Δ=0; reuse `ops._subtract_range`; TDD 12
+тестов) + `ClipEdit.silence_config` (codegen) + подмена `source_intervals` в `render_edit_to_file` (gated,
+composite-fast-path off при silence) + эндпоинт `POST /clips/{id}/edit/silence` + вкладка «Паузы»
+(тумблер+слайдер+advanced) в редакторе + `setClipSilence` + i18n. **Доказано локально:** 60.0с→57.7с,
+reframe отработал 7 frame-snapped интервалов, стыки чистые (нет ±1-кадрового флеша), субтитры выровнены.
+Недеструктивно (toggle=флип enabled), композится с ручными правками. **Watch-out:** мульти-интервал
+обходит reframe plan fast-path → CV-пересчёт (корректно, медленнее). **НЕ сделано:** Phase 1b
+(глобальный тумблер на загрузке — нужен `apply_silence` в `run.py:render_one_clip`, клип-эдит создаётся
+ЛЕНИВО → первичный рендер мимо него), Phase 2 (клиентский live-skip превью). Scope = ТОЛЬКО тишина.
+
 ### 2026-07-11 — Посегментный фан-аут рендера (за флагом `SEGMENT_FANOUT`, ВЫКЛ) — большие видео + параллельность
 Проблема: каждый рендер-контейнер качает ВЕСЬ source (до 10 ГБ) на диск=RAM Cloud Run → большие видео
 не влезают + контейнер 32Gi зажимает параллельность под квотой. Решение: координатор (source локально)

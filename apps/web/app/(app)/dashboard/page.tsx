@@ -196,6 +196,7 @@ function DashboardInner() {
     language: string | null;
     clipMinSec?: number;
     clipMaxSec?: number;
+    removePauses?: boolean;
   } | null>(null);
   // Requested clip count (from the form) → drives the reserved skeleton count while processing.
   const [requestedClips, setRequestedClips] = useState(3);
@@ -259,7 +260,7 @@ function DashboardInner() {
     }
   }
 
-  async function handleSubmitFile(file: File, maxClips: number, language: string | null = null, clipMinSec?: number, clipMaxSec?: number) {
+  async function handleSubmitFile(file: File, maxClips: number, language: string | null = null, clipMinSec?: number, clipMaxSec?: number, removePauses?: boolean) {
     if (submitting) return; // guard двойного сабмита (форма и так дизейблится — belt+braces)
     uploadCtrl.current?.abort(); // отменить прежнюю незавершённую загрузку перед новой
     const ctrl = new AbortController();
@@ -271,9 +272,9 @@ function DashboardInner() {
     // (measured at event time in lib/api) overwrite this on the first progress event.
     setUpload({ pct: 0, loadedBytes: 0, totalBytes: file.size, elapsedSec: 0 });
     // Remember this attempt so the error screen can offer "Resume" (checkpoint-backed).
-    setPendingUpload({ file, maxClips, language, clipMinSec, clipMaxSec });
+    setPendingUpload({ file, maxClips, language, clipMinSec, clipMaxSec, removePauses });
     try {
-      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language, clipMinSec, clipMaxSec);
+      const { id } = await createUploadJob(file, maxClips, setUpload, ctrl.signal, language, clipMinSec, clipMaxSec, undefined, removePauses);
       if (ctrl.signal.aborted) return; // отменена/вытеснена — не трогаем стейт
       setUpload(null);
       setPendingUpload(null); // fully uploaded → nothing to resume
@@ -298,7 +299,7 @@ function DashboardInner() {
   function handleResume() {
     const p = pendingUpload;
     if (!p) return;
-    void handleSubmitFile(p.file, p.maxClips, p.language, p.clipMinSec, p.clipMaxSec);
+    void handleSubmitFile(p.file, p.maxClips, p.language, p.clipMinSec, p.clipMaxSec, p.removePauses);
   }
 
   async function handleStop() {

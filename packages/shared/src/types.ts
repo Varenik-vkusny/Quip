@@ -52,6 +52,7 @@ export interface ClipFlowContract {
   JobStatus?: JobStatus;
   Metrics?: Metrics;
   Segment?: Segment;
+  SilenceConfig?: SilenceConfig;
   SourceInterval?: SourceInterval;
   SourceKind?: SourceKind;
   TimelineData?: TimelineData;
@@ -256,6 +257,7 @@ export interface ClipEdit {
   lock_per_shot?: boolean;
   manual_cuts?: number[];
   reframe_overrides?: CropOverride[];
+  silence_config?: SilenceConfig | null;
   source_intervals: SourceInterval[];
   suppressed_cuts?: number[];
   version?: number;
@@ -270,6 +272,19 @@ export interface CropOverride {
   mode: string;
   source_end: number;
   source_start: number;
+}
+/**
+ * Удаление пауз (спека 2026-07-12 §5): вырезать тихие гэпы между словами, сжав клип.
+ *
+ * Применяется в рендере как ДОП. дырки в source_intervals (недеструктивно, toggle = флип enabled).
+ */
+export interface SilenceConfig {
+  enabled?: boolean;
+  lead_in_ms?: number;
+  lead_out_boundary_ms?: number;
+  lead_out_ms?: number;
+  max_pause_ms?: number;
+  min_pause_ms?: number;
 }
 /**
  * Один оставленный кусок исходника. Интервалы упорядочены по CLIP-порядку.

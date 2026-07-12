@@ -54,7 +54,7 @@ export function SourceForm({
   // onSubmit = YouTube-link path (best-effort import). Optional for back-compat: callers that
   // don't pass it simply don't offer the link field. Upload is the primary affordance.
   onSubmit?: (url: string, maxClips: number, clipMinSec?: number, clipMaxSec?: number) => void;
-  onSubmitFile: (file: File, maxClips: number, language: string | null, clipMinSec?: number, clipMaxSec?: number) => void;
+  onSubmitFile: (file: File, maxClips: number, language: string | null, clipMinSec?: number, clipMaxSec?: number, removePauses?: boolean) => void;
   busy: boolean;
 }) {
   const t = useTranslations("sourceForm");
@@ -67,6 +67,7 @@ export function SourceForm({
   const [count, setCount] = useState(DEFAULT_CLIPS);
   const [dragging, setDragging] = useState(false);
   const [kazakh, setKazakh] = useState(false);
+  const [removePauses, setRemovePauses] = useState(false);
   const [clipMinSec, setClipMinSec] = useState(INIT_MIN_SEC);
   const [clipMaxSec, setClipMaxSec] = useState(INIT_MAX_SEC);
   // The length fields keep a free-text draft so you can clear the box / delete the
@@ -159,7 +160,7 @@ export function SourceForm({
     window.localStorage.setItem(LS_KEY_MIN, String(safeMin));
     window.localStorage.setItem(LS_KEY_MAX, String(safeMax));
     if (file) {
-      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax);
+      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax, removePauses);
     } else if (onSubmit && urlValid) {
       onSubmit(url.trim(), clipsRequested, safeMin, safeMax);
     }
@@ -394,6 +395,36 @@ export function SourceForm({
             <span className="text-sm text-ink">{t("kazakh")}</span>
             <span className="font-mono text-eyebrow uppercase tabular-nums text-faint">
               {kazakh ? t("kazakhOn") : t("kazakhOff")}
+            </span>
+          </div>
+        </div>
+
+        <div>
+          <Eyebrow tone="faint">{t("pauses")}</Eyebrow>
+          <div className="mt-2 flex items-center gap-3">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={removePauses}
+              onClick={() => setRemovePauses((r) => !r)}
+              disabled={busy}
+              aria-label={t("pausesAria")}
+              className={cn(
+                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors duration-200 ease-snappy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+                removePauses ? "bg-accent" : "bg-surface-3",
+                busy && "opacity-50",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block size-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-snappy",
+                  removePauses ? "translate-x-4" : "translate-x-0",
+                )}
+              />
+            </button>
+            <span className="text-sm text-ink">{t("pausesLabel")}</span>
+            <span className="font-mono text-eyebrow uppercase tabular-nums text-faint">
+              {removePauses ? t("pausesOn") : t("pausesOff")}
             </span>
           </div>
         </div>

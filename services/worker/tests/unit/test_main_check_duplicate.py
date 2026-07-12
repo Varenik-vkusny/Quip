@@ -53,7 +53,9 @@ def test_check_duplicate_match_copies_source_and_spawns(monkeypatch) -> None:
     monkeypatch.setattr(
         main.db,
         "insert_job",
-        lambda jid, st, fn, user_id=None: inserted.update(jid=jid, st=st, fn=fn, user_id=user_id),
+        lambda jid, st, fn, user_id=None, remove_pauses=False: inserted.update(
+            jid=jid, st=st, fn=fn, user_id=user_id, remove_pauses=remove_pauses
+        ),
     )
     fp_set: dict = {}
     monkeypatch.setattr(

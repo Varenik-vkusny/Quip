@@ -194,6 +194,24 @@ class SourceInterval(BaseModel):
     source_end: float  # сек; source_end > source_start
 
 
+class SilenceConfig(BaseModel):
+    """Удаление пауз (спека 2026-07-12 §5): вырезать тихие гэпы между словами, сжав клип.
+
+    Применяется в рендере как ДОП. дырки в source_intervals (недеструктивно, toggle = флип enabled).
+    """
+
+    enabled: bool = False
+    min_pause_ms: int = 350  # гэп КОРОЧЕ — естеств. ритм речи, НЕ режем
+    max_pause_ms: int = 2000  # гэп ДЛИННЕЕ — драматич. пауза, НЕ режем
+    # v3 «tighten for flow» (ресёрч 2026-07-12 §§1,5-6 — Descript/TimeBolt/CrisperWhisper):
+    # отступ АСИММЕТРИЧЕН — хвост слова «течёт» (С/П-звуки звенят после конца → больше),
+    # онсет след. слова резкий (→ мало). На ГРАНИЦЕ мысли (конец предложения / длинный гэп)
+    # оставляем больший вдох (сигнал парсинга — убрать = робот). Смена говорящего = НЕ режем.
+    lead_in_ms: int = 50  # оставить ПЕРЕД след. словом (онсет резкий)
+    lead_out_ms: int = 150  # оставить ПОСЛЕ слова внутри мысли (хвост звенит)
+    lead_out_boundary_ms: int = 300  # оставить после конца предложения (вдох/ритм)
+
+
 class CropOverride(BaseModel):
     """Ручной кроп на диапазон source — поверх авто-reframe (MVP: применяется per-интервал)."""
 
@@ -342,6 +360,10 @@ class ClipEdit(BaseModel):
     # (merge соседних шотов). Применяются frame-snapped в apply_cuts_to_regions (инвариант Δ=0).
     manual_cuts: list[float] = Field(default_factory=list)
     suppressed_cuts: list[float] = Field(default_factory=list)
+    # Удаление пауз (спека 2026-07-12): недеструктивный слой — в рендере вычитает тихие гэпы между
+    # словами как ДОП. дырки в source_intervals (frame-snapped, Δ=0). None/enabled=False → нет реза.
+    # RENDER-REQUIRED: меняет тайминг/пиксели → нужен ре-рендер (как trim). Toggle = флип enabled.
+    silence_config: SilenceConfig | None = None
 
 
 class CaptionPreset(BaseModel):

@@ -5,7 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 from app.editor.replies import default_caption_track
-from app.models import CaptionStyle, ClipEdit, HighlightStyle, Segment, SourceInterval, Word
+from app.models import (
+    CaptionStyle,
+    ClipEdit,
+    HighlightStyle,
+    Segment,
+    SilenceConfig,
+    SourceInterval,
+    Word,
+)
 
 
 def default_clip_edit(
@@ -16,11 +24,14 @@ def default_clip_edit(
     pref_style: CaptionStyle | None = None,
     pref_highlight: HighlightStyle | None = None,
     pref_hook_look: dict[str, Any] | None = None,
+    pref_silence: SilenceConfig | None = None,
 ) -> ClipEdit:
     """Сегмент ИИ → дефолтный рецепт: один интервал [start,end], авто-субтитры, без overrides.
 
     pref_* (domain 5): сохранённый дефолт-стиль владельца джобы → новые клипы стартуют с него
     вместо preset A. None = нет сохранённого стиля.
+    pref_silence: global «убирать паузы» с загрузки (per-job) → сидим silence_config на клип; None =
+    паузы не трогаем (юзер включит per-clip в редакторе).
     """
     intervals = [SourceInterval(source_start=segment.start, source_end=segment.end)]
     return ClipEdit(
@@ -37,4 +48,5 @@ def default_clip_edit(
         ),
         reframe_overrides=[],
         aspect="9:16",
+        silence_config=pref_silence,
     )

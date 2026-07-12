@@ -48,6 +48,7 @@ def init_db() -> None:
                 source_type TEXT, source_ref TEXT, error TEXT, user_id TEXT,
                 clips_json TEXT, cost_usd REAL, duration_sec REAL, elapsed_sec REAL,
                 function_call_id TEXT, cancellable INTEGER NOT NULL DEFAULT 1,
+                remove_pauses INTEGER NOT NULL DEFAULT 0,
                 created_at REAL, updated_at REAL
             )"""
         )
@@ -116,6 +117,9 @@ def init_db() -> None:
         # source ``<size>:<sha256>`` + индекс (user_id, source_fingerprint) для быстрого поиска
         # «я это уже грузил?». Дедуп СТРОГО per-user (IDOR-оракул закрыт фильтром по user_id).
         _ensure_column(c, "jobs", "source_fingerprint", "TEXT")
+        # Global «убирать паузы» тумблер с загрузки (зеркало 0016_job_remove_pauses.sql). Сидит
+        # silence_config на КАЖДЫЙ клип в ensure_edit; дефолт OFF (opt-in).
+        _ensure_column(c, "jobs", "remove_pauses", "INTEGER NOT NULL DEFAULT 0")
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_user_fingerprint"
             " ON jobs (user_id, source_fingerprint)"
@@ -123,19 +127,36 @@ def init_db() -> None:
 
 
 def insert_job(
-    job_id: str, source_type: str, source_ref: str, *, user_id: str | None = None
+    job_id: str,
+    source_type: str,
+    source_ref: str,
+    *,
+    user_id: str | None = None,
+    remove_pauses: bool = False,
 ) -> None:
     if cs.cloud_enabled():
-        cs.insert_job(job_id, source_type, source_ref, user_id=user_id)
+        cs.insert_job(job_id, source_type, source_ref, user_id=user_id, remove_pauses=remove_pauses)
         return
     now = time.time()
     with _conn() as c:
         c.execute(
             "INSERT INTO jobs"
             " (id,status,stage,progress,source_type,source_ref,user_id,cancellable,"
-            "created_at,updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (job_id, "queued", "queued", 0, source_type, source_ref, user_id, 1, now, now),
+            "remove_pauses,created_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                job_id,
+                "queued",
+                "queued",
+                0,
+                source_type,
+                source_ref,
+                user_id,
+                1,
+                1 if remove_pauses else 0,
+                now,
+                now,
+            ),  # fmt: skip
         )
 
 
@@ -871,6 +892,13 @@ def get_job_owner(job_id: str) -> str | None:
     """user_id владельца джобы (для проверки прав + сидирования дефолт-стиля). None если нет."""
     row = get_job_row(job_id)
     return (row.get("user_id") or None) if row else None
+
+
+def get_job_remove_pauses(job_id: str) -> bool:
+    """Флаг «убирать паузы» джобы (global opt-in с загрузки). Сидит silence_config в ensure_edit.
+    Нет строки / колонки (старые джобы) → False. Dual-mode (значение из get_job_row)."""
+    row = get_job_row(job_id)
+    return bool(row.get("remove_pauses")) if row else False
 
 
 def get_style_preference(user_id: str) -> dict[str, Any] | None:

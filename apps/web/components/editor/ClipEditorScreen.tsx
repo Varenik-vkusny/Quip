@@ -29,6 +29,7 @@ import {
   restoreEdit,
   setClipAspect,
   setClipMotion,
+  setClipSilence,
   setClipInterval,
   setCropOverride,
   startRenderClip,
@@ -46,6 +47,7 @@ import type {
   ClipOut,
   HighlightStyle,
   HookOverlay,
+  SilenceConfig,
   TimelineData,
   Word,
 } from "@/lib/types";
@@ -100,6 +102,10 @@ const HookTab = dynamic(() => import("./HookTab").then((m) => m.HookTab), {
   loading: () => <PanelFallback />,
 });
 const FrameTab = dynamic(() => import("./FrameTab").then((m) => m.FrameTab), {
+  ssr: false,
+  loading: () => <PanelFallback />,
+});
+const PausesTab = dynamic(() => import("./PausesTab").then((m) => m.PausesTab), {
   ssr: false,
   loading: () => <PanelFallback />,
 });
@@ -1436,6 +1442,28 @@ export default function ClipEditorScreen({
     [edit, jobId, clipId, loadReframe, failOr409, flushPending, commitEdit, recordSnapshot],
   );
 
+  // Pause removal (spec 2026-07-12): toggle/tightness per clip → server bakes the cut at render.
+  // Render-required like motion/trim (changes timing + pixels) → pixelDirty + refresh reframe.
+  const handleSilenceChange = useCallback(
+    async (cfg: SilenceConfig) => {
+      if (!edit) return;
+      setError(null);
+      recordSnapshot(); // pre-change content → one undo step
+      try {
+        await flushPending();
+        const v = editRef.current?.version ?? edit.version ?? 1;
+        const newEdit = await setClipSilence(jobId, clipId, v, cfg);
+        commitEdit(newEdit);
+        setDirty(true);
+        setPixelDirty(true); // pause removal changes timing + mp4 pixels → re-render required
+        void loadReframe(); // multi-interval changes the reframe plan → refresh strip + preview
+      } catch (e) {
+        failOr409(e);
+      }
+    },
+    [edit, jobId, clipId, loadReframe, failOr409, flushPending, commitEdit, recordSnapshot],
+  );
+
   // ── Undo / Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, header buttons) ──
   // OPTIMISTIC restore for perceived speed: the historical snapshot is applied to LOCAL state
   // IMMEDIATELY (instant UI revert), then persisted + reconciled in the BACKGROUND. Caption/style/
@@ -2006,6 +2034,15 @@ export default function ClipEditorScreen({
           selectedShotSeed={selectedShotSeed}
           onSelectShot={handleSelectShot}
           onCut={handleCut}
+        />
+      )}
+      {tab === "pauses" && (
+        <PausesTab
+          config={edit.silence_config ?? null}
+          words={words}
+          intervals={edit.source_intervals}
+          busy={busy}
+          onChange={handleSilenceChange}
         />
       )}
     </>

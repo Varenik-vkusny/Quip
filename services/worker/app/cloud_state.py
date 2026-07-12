@@ -65,7 +65,12 @@ def lock_applied(rows: list[dict[str, Any]]) -> bool:
 
 
 def insert_job(
-    job_id: str, source_type: str, source_ref: str, *, user_id: str | None = None
+    job_id: str,
+    source_type: str,
+    source_ref: str,
+    *,
+    user_id: str | None = None,
+    remove_pauses: bool = False,
 ) -> None:
     r = httpx.post(
         f"{_base()}/jobs",
@@ -79,6 +84,7 @@ def insert_job(
             "source_ref": source_ref,
             "user_id": user_id,
             "cancellable": True,  # Stop-кнопка: новый джоб стартует во FREE-фазе
+            "remove_pauses": remove_pauses,  # global «убирать паузы» (opt-in с загрузки)
         },
         timeout=_TIMEOUT,
     )

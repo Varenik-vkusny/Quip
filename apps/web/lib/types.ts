@@ -15,6 +15,7 @@ export type {
   CropOverride,
   HighlightStyle,
   HookOverlay,
+  SilenceConfig,
   SourceInterval,
   TimelineData,
   TimelineSegment,

@@ -10,6 +10,7 @@ import type {
   ClipOut,
   HighlightStyle,
   Job,
+  SilenceConfig,
   TimelineData,
   VideoMap,
   Word,
@@ -635,6 +636,7 @@ async function completeMultipart(
   signal?: AbortSignal,
   clipMinSec?: number,
   clipMaxSec?: number,
+  removePauses?: boolean,
 ): Promise<void> {
   const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
     method: "POST",
@@ -648,6 +650,7 @@ async function completeMultipart(
       language: language ?? null,
       clip_min_sec: clipMinSec ?? null,
       clip_max_sec: clipMaxSec ?? null,
+      remove_pauses: removePauses ?? false,
       upload_id: uploadId,
       parts,
     }),
@@ -673,6 +676,7 @@ async function resumeMultipart(
   clipMinSec?: number,
   clipMaxSec?: number,
   rand?: () => number,
+  removePauses?: boolean,
 ): Promise<{ id: string }> {
   const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
     method: "POST",
@@ -717,7 +721,7 @@ async function resumeMultipart(
     rand,
   });
   const all = [...preCompleted, ...newly].sort((a, b) => a.part_number - b.part_number);
-  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec);
+  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses);
   await clearCheckpoint(fingerprint);
   return { id: cp.job_id };
 }
@@ -743,6 +747,7 @@ export async function createUploadJob(
   clipMinSec?: number,
   clipMaxSec?: number,
   rand?: () => number,
+  removePauses?: boolean,
 ): Promise<{ id: string }> {
   const headers = await authHeaders();
   const fingerprint = fileFingerprint({
@@ -770,6 +775,7 @@ export async function createUploadJob(
         clipMinSec,
         clipMaxSec,
         rand,
+        removePauses,
       );
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") throw e;
@@ -820,7 +826,7 @@ export async function createUploadJob(
         signal,
         rand,
       });
-      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec);
+      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses);
       await clearCheckpoint(fingerprint); // fully uploaded → no resume state to keep
       return { id };
     } catch (e) {
@@ -856,7 +862,7 @@ export async function createUploadJob(
     const done = await fetch(`${BASE}/jobs/${init.id}/upload-complete`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null }),
+      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null, remove_pauses: removePauses ?? false }),
       signal,
     });
     if (!done.ok) throw new Error(`Couldn’t start processing: ${done.status}`);
@@ -870,6 +876,7 @@ export async function createUploadJob(
   if (language != null) form.append("language", language);
   if (clipMinSec != null) form.append("clip_min_sec", String(clipMinSec));
   if (clipMaxSec != null) form.append("clip_max_sec", String(clipMaxSec));
+  if (removePauses) form.append("remove_pauses", "true");
   const res = await xhrRequest("POST", `${BASE}/jobs/upload`, form, { headers, onProgress, signal });
   if (res.status === 401) throw new Error("Sign in to create clips.");
   if (res.status === 402) {
@@ -1043,6 +1050,24 @@ export async function setClipMotion(
   });
   if (res.status === 409) throw new Error("Edit conflict — reload and retry");
   if (!res.ok) throw new Error(`setClipMotion failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setClipSilence(
+  jobId: string,
+  clipId: string,
+  version: number,
+  silenceConfig: SilenceConfig,
+): Promise<ClipEdit> {
+  // Pause removal (spec 2026-07-12): toggle + tightness per clip. Non-destructive (toggle = flip
+  // enabled). Render-required — changes timing AND pixels (like trim/motion) → flush + pixelDirty.
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/edit/silence`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ version, silence_config: silenceConfig }),
+  });
+  if (res.status === 409) throw new Error("Edit conflict — reload and retry");
+  if (!res.ok) throw new Error(`setClipSilence failed: ${res.status}`);
   return res.json();
 }
 

@@ -2,7 +2,7 @@
 
 import { Fragment, memo } from "react";
 import { useTranslations } from "next-intl";
-import { Captions, Crop, Type, Wand2 } from "lucide-react";
+import { Captions, Crop, Scissors, Type, Wand2 } from "lucide-react";
 
 // ────────────────────────────────────────────────────────────────────────────
 // EditorRail — left icon-rail (Fixed-Studio shell). Single source of truth for
@@ -19,7 +19,7 @@ import { Captions, Crop, Type, Wand2 } from "lucide-react";
 //     so it sits last, below a divider. Keyboard 1-4 map to this order.
 // ────────────────────────────────────────────────────────────────────────────
 
-export type Tab = "subtitles" | "hook" | "frame" | "agent";
+export type Tab = "subtitles" | "hook" | "frame" | "pauses" | "agent";
 
 // Labels are NOT stored here — they resolve from the `editor.tabs` catalog (single source,
 // shared with Inspector's panel title) via useTranslations in the component below.
@@ -27,6 +27,7 @@ export const TABS: { id: Tab; icon: typeof Captions }[] = [
   { id: "subtitles", icon: Captions },
   { id: "hook", icon: Type },
   { id: "frame", icon: Crop },
+  { id: "pauses", icon: Scissors },
   { id: "agent", icon: Wand2 },
 ];
 
