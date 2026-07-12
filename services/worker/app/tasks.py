@@ -281,19 +281,30 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
     # не авторитетен на дырках) — корректно, просто медленнее. Границы дырок frame-snapped (Δ=0).
     if edit.silence_config and edit.silence_config.enabled:
         from app.editor.silence import apply_silence  # noqa: PLC0415
+        from app.editor.silence_detect import detect_silence_regions  # noqa: PLC0415
 
         _sil_words = store.load_transcript_words(job_id)
+        # ГИБРИД (ресёрч 2026-07-12): word-gap решает ЧТО резать, аудио-тишина (silencedetect на
+        # спане клипа) уточняет ГДЕ — чистый стык без подрезки вздохов/слов + отсев ложных гэпов.
+        # Сбой ffmpeg → [] → чистый word-gap (не тихий фолбэк — залогировано числом регионов).
+        _span_a = edit.source_intervals[0].source_start
+        _span_b = edit.source_intervals[-1].source_end
+        _sil_regions = detect_silence_regions(str(out / "source.mp4"), _span_a, _span_b)
         _orig_n = len(edit.source_intervals)
         edit = edit.model_copy(
             update={
                 "source_intervals": apply_silence(
-                    edit.source_intervals, _sil_words, edit.silence_config, fps=src_fps
+                    edit.source_intervals,
+                    _sil_words,
+                    edit.silence_config,
+                    fps=src_fps,
+                    silence_regions=_sil_regions,
                 )
             }
         )
         _rlog.info(
-            "render: pause-removal ON job=%s clip=%s intervals %d->%d",
-            job_id, clip_id, _orig_n, len(edit.source_intervals),
+            "render: pause-removal ON job=%s clip=%s intervals %d->%d silence_regions=%d",
+            job_id, clip_id, _orig_n, len(edit.source_intervals), len(_sil_regions),
         )  # fmt: skip
     ass_rel: str | None = None
     if with_subtitles:

@@ -87,6 +87,37 @@ class TestApplySilence:
         total = sum(iv.source_end - iv.source_start for iv in out)
         assert total < 10.0
 
+
+class TestAudioRefinement:
+    """Гибрид (ресёрч 2026-07-12): word-gap решает ЧТО резать, `silence_regions` (ffmpeg
+    silencedetect) уточняет ГДЕ — режем только аудио-подтверждённую тишину, точные границы."""
+
+    def test_refines_cut_to_confirmed_silence(self) -> None:
+        # гэп [2.0, 2.6], аудио-тишина только [2.10, 2.50] → рез ВНУТРИ неё, не по гэпу
+        words = [W("a", 0.0, 1.0), W("b", 1.0, 2.0), W("c", 2.6, 3.6)]
+        cuts = compute_silence_cuts(
+            words, [IV(0.0, 10.0)], CFG, fps=FPS, silence_regions=[(2.10, 2.50)]
+        )
+        assert len(cuts) == 1
+        cs, ce = cuts[0]
+        assert 2.10 <= cs < ce <= 2.50  # рез строго внутри подтверждённой тишины
+        assert _on_grid(cs) and _on_grid(ce)
+
+    def test_skips_gap_with_no_confirmed_silence(self) -> None:
+        # word-gap ∈ [min,max], но аудио НЕ тихое (тихая речь/вздох) → ложное срабатывание, не режем
+        words = [W("a", 0.0, 1.0), W("b", 1.0, 2.0), W("c", 2.6, 3.6)]
+        cuts = compute_silence_cuts(words, [IV(0.0, 10.0)], CFG, fps=FPS, silence_regions=[])
+        assert cuts == []
+
+    def test_none_regions_falls_back_to_wordgap(self) -> None:
+        # silence_regions=None → прежнее word-gap поведение (обратная совместимость)
+        words = [W("a", 0.0, 1.0), W("b", 1.0, 2.0), W("c", 2.6, 3.6)]
+        cuts = compute_silence_cuts(words, [IV(0.0, 10.0)], CFG, fps=FPS, silence_regions=None)
+        assert len(cuts) == 1
+        assert 2.0 <= cuts[0][0] < cuts[0][1] <= 2.6
+
+
+class TestComposeMultiInterval:
     def test_composes_with_prior_trim_multi_interval(self) -> None:
         # вход уже мульти-интервальный (после ручного трима [3.0,5.0]); тишина режет ВНУТРИ первого
         words = [W("a", 0.0, 1.0), W("b", 1.0, 2.0), W("c", 2.6, 3.0)]  # gap b→c = 0.6
