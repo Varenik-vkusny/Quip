@@ -237,6 +237,17 @@ class Settings(BaseSettings):
     # REFRAME_SKIP_ASD_SINGLE_TRACK=false → всегда считать ASD (прежнее поведение, мгновенный
     # откат без передеплоя кода — Modal подхватит env при следующем контейнере).
     reframe_skip_asd_single_track: bool = True
+    # ── Speaker Focus (tight-follow с cut-переключением между спикерами; спека 2026-07-13). ──
+    # reframe_mode='speaker' (дефолт клипа) кропит tight на говорящем и переключается синтетическим
+    # cut'ом на смене реплики («вторая камера»); 'wide' = прежний широкий вид. switch_min_hold_sec
+    # — главный анти-пинг-понг рычаг (реплика короче → линжер на текущем). switch_iou_beta — порог
+    # «кропы слишком похожи → wide вместо cut» (анти «фотку подвинули»). switch_bind_conf_min —
+    # уверенность привязки кластер↔лицо. Строятся в SwitchConfig на месте вызова reframe_segment.
+    switch_min_hold_sec: float = 1.7
+    switch_iou_alpha: float = 0.15
+    switch_iou_beta: float = 0.30
+    switch_establish_sec: float = 0.0
+    switch_bind_conf_min: float = 0.6
 
     # billing / payments (P1). Все опциональны — гейт квоты и вебхук Lemon активны
     # ТОЛЬКО при заполнении (нужны Supabase + Lemon у фаундера). По умолчанию инертны →

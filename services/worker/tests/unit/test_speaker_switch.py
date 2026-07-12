@@ -188,6 +188,14 @@ class TestPlanSwitches:
         regs = plan_switches(turns, {0: 0, 1: None}, tracks, 0.316, 0.0, 6.0, 30.0, self._cfg())
         assert regs[0].target == 0 and regs[-1].target == WIDE
 
+    def test_late_switch_lingers_to_end(self) -> None:
+        # Смена спикера в последние < min_hold секунды шота → не режем (короткий хвост не нужен).
+        # Длинная реплика (проходит lookahead), но старт в последние <min_hold с → tail-guard.
+        turns = [SpeakerTurn(0, 0.0, 6.5, 20), SpeakerTurn(1, 6.5, 8.5, 8)]
+        tracks = [_track(0, 240, 0.2), _track(0, 240, 0.65)]
+        regs = plan_switches(turns, {0: 0, 1: 1}, tracks, 0.316, 0.0, 8.0, 30.0, self._cfg())
+        assert len(regs) == 1 and regs[0].target == 0
+
     def test_boundaries_frame_snapped_dropframe_fps(self) -> None:
         turns = [SpeakerTurn(0, 0.0, 3.0, 10), SpeakerTurn(1, 3.0, 6.0, 10)]
         tracks = [_track(0, 180, 0.2), _track(0, 180, 0.65)]

@@ -53,7 +53,8 @@ class SwitchConfig:
     min_hold_sec: float = 1.7
     iou_alpha: float = 0.15
     iou_beta: float = 0.30
-    establish_sec: float = 0.0
+    establish_sec: float = 0.0  # зарезервировано под establishing-wide (P2); v1 = 0
+    bind_conf_min: float = 0.6
 
 
 def build_turns(words: Sequence[Word], clip_start: float, clip_end: float) -> list[SpeakerTurn]:
@@ -194,6 +195,10 @@ def plan_switches(
             continue
         sw = _snap(turn.t_start, fps)
         if (sw - cur_start) < cfg.min_hold_sec:  # hysteresis: текущий шот ещё молод
+            continue
+        if (
+            shot_t1 - sw
+        ) < cfg.min_hold_sec:  # switch слишком поздно → короткий хвост, линжер до конца
             continue
         if cur_target != WIDE and desired != WIDE:  # IoU-гейт только на fill→fill
             iou = crop_iou_x(

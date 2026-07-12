@@ -55,6 +55,54 @@ class TestResampleTrackSpeakFrames:
         assert resample_track(t, 25.0, 25.0) is t
 
 
+class TestPlanRegionsSpeakerSwitch:
+    """plan_regions: reframe_mode='speaker' → суб-деление шота на cut-переключения по репликам."""
+
+    def _track(self, cx: float, hi: tuple[int, int]) -> object:
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        sf = tuple(1.0 if hi[0] <= i < hi[1] else -1.0 for i in range(180))
+        return SpeakerTrack(
+            f0=0, f1=180, cx=tuple([cx] * 180), width=0.12, speak=0.0, speak_frames=sf
+        )
+
+    def test_two_speakers_sub_divided_into_cuts(self) -> None:
+        from app.pipeline.speaker_switch import SpeakerTurn
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0.2, (0, 90)), self._track(0.65, (90, 180))]
+        turns = [SpeakerTurn(0, 0.0, 3.0, 10), SpeakerTurn(1, 3.0, 6.0, 10)]
+        regs = plan_regions(
+            [(0, 180)], tracks, fps=30.0, crop_w_frac=0.316, turns=turns, reframe_mode="speaker"
+        )
+        assert [r.mode for r in regs] == ["fill", "fill"]
+        assert abs(regs[0].t1 - 3.0) < 1e-6
+        assert regs[0].points[0].cx < 0.4 and regs[1].points[0].cx > 0.5  # разные лица
+
+    def test_backcompat_turns_none_identical_to_default(self) -> None:
+        from app.pipeline.stage3_reframe import plan_regions
+
+        tracks = [self._track(0.2, (0, 90)), self._track(0.65, (90, 180))]
+        r_default = plan_regions([(0, 180)], tracks, fps=30.0, crop_w_frac=0.316)
+        r_none = plan_regions(
+            [(0, 180)], tracks, fps=30.0, crop_w_frac=0.316, turns=None, reframe_mode="auto"
+        )
+        assert r_default == r_none  # новые параметры без speaker-режима → байт-в-байт
+
+    def test_single_speaker_falls_through_to_default(self) -> None:
+        from app.pipeline.speaker_switch import SpeakerTurn
+        from app.pipeline.stage3_reframe import plan_regions
+
+        # один привязанный спикер (второй лейн не говорит) → None → обычная логика (fit на 2 лица)
+        tracks = [self._track(0.2, (0, 180)), self._track(0.65, (0, 0))]
+        turns = [SpeakerTurn(0, 0.0, 6.0, 20)]
+        regs_sp = plan_regions(
+            [(0, 180)], tracks, fps=30.0, crop_w_frac=0.316, turns=turns, reframe_mode="speaker"
+        )
+        regs_def = plan_regions([(0, 180)], tracks, fps=30.0, crop_w_frac=0.316)
+        assert regs_sp == regs_def
+
+
 class TestComputeCropWindow:
     def test_1080p_center(self) -> None:
         c = compute_crop_window(1920, 1080, 0.5, t=0.0)

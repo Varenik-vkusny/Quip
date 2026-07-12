@@ -27,8 +27,17 @@ from typing import TYPE_CHECKING, Any
 
 from app.errors import JobError
 from app.models import CropWindow
+from app.pipeline.speaker_switch import (
+    WIDE,
+    SpeakerTurn,
+    SwitchConfig,
+    bind_lanes,
+    build_turns,
+    plan_switches,
+)
 
 if TYPE_CHECKING:
+    from app.models import Word
     from app.pipeline.stage2b_vision_review import VisionShot
 
 _STAGE = "reframe"
@@ -712,6 +721,50 @@ def _fill_points_for_target(
     return (TrackPoint(t=t0, mode="fill", cx=0.5 if init is None else init),)
 
 
+def _speaker_switch_regions(
+    active: list[SpeakerTrack],
+    turns: Sequence[SpeakerTurn],
+    f0: int,
+    f1: int,
+    fps: float,
+    *,
+    crop_w_frac: float,
+    smoothing: float,
+    lock_per_shot: bool,
+    cfg: SwitchConfig,
+) -> list[TrackRegion] | None:
+    """Speaker-Focus: суб-деление шота [f0,f1) на fill(лейн)/fit регионы по сменам говорящего.
+
+    Реплики шота (turns) → binding кластер↔лейн (bind_lanes, per-turn ASD) → plan_switches (greedy
+    min-hold/hysteresis/IoU-гейт) → TrackRegion'ы (fill на лейне через _fill_points_for_target, WIDE
+    → fit). Возвращает None → вызыватель падает в ОБЫЧНУЮ single-region логику, если в шоте нет 2+
+    привязанных спикеров (не диалог) — так одиночный talking-head/wide-план не трогается. Каждая
+    суб-граница frame-snapped (round(t*fps)/fps) → Δ=0 (docs/REFRAME_FPS_GRID_INVARIANT.md). PURE.
+    """
+    t0, t1 = f0 / fps, f1 / fps
+    shot_turns = [tn for tn in turns if tn.t_end > t0 and tn.t_start < t1]
+    if len(shot_turns) < 2:
+        return None
+    binding = bind_lanes(shot_turns, active, fps, conf_min=cfg.bind_conf_min)
+    if len({ln for ln in binding.values() if ln is not None}) < 2:
+        return None  # не 2-speaker диалог (off-screen/ambiguous/один лейн) → обычная логика
+    regions: list[TrackRegion] = []
+    for sub in plan_switches(shot_turns, binding, active, crop_w_frac, t0, t1, fps, cfg):
+        sf0, sf1 = round(sub.t0 * fps), round(sub.t1 * fps)
+        if sf1 <= sf0:
+            continue
+        if sub.target == WIDE:
+            regions.append(TrackRegion(t0=sf0 / fps, t1=sf1 / fps, mode="fit", points=()))
+        else:
+            pts = _fill_points_for_target(
+                active[sub.target], sf0, sf1, fps,
+                crop_w_frac=crop_w_frac, smoothing=smoothing,
+                lock_per_shot=lock_per_shot, prev_fill_end_cx=None,
+            )  # fmt: skip
+            regions.append(TrackRegion(t0=sf0 / fps, t1=sf1 / fps, mode="fill", points=pts))
+    return regions or None
+
+
 def plan_regions(
     shots: list[tuple[int, int]],
     tracks: list[SpeakerTrack],
@@ -727,6 +780,9 @@ def plan_regions(
     wide_speak_min: float = 0.3,
     subject_cx: float | None = None,
     vision_shots: Sequence[VisionShot] | None = None,
+    turns: Sequence[SpeakerTurn] | None = None,
+    reframe_mode: str = "auto",
+    switch_cfg: SwitchConfig | None = None,
 ) -> list[TrackRegion]:
     """Cut-aligned планировщик: на КАЖДЫЙ шот один режим + траектория. Сердце Pass-1. PURE.
 
@@ -760,6 +816,22 @@ def plan_regions(
             regions.append(TrackRegion(t0=t0, t1=t1, mode="fit", points=()))
             prev_fill_end_cx = None
             continue
+
+        # ── Speaker Focus (reframe_mode="speaker"): tight-follow с cut-переключением между ──
+        # спикерами. Если в шоте 2+ привязанных спикера — суб-делим шот на fill(говорящий)/fit-wide
+        # регионы по сменам реплик (синтетические cut'ы = «вторая камера»). Иначе (одиночный/wide)
+        # → None → падаем в обычную эвристику ниже (байт-в-байт). Только в auto (явный mode_setting
+        # юзера приоритетнее). Границы суб-регионов на реальных кадрах (Δ=0). Спека 2026-07-13.
+        if reframe_mode == "speaker" and turns is not None and mode_setting == "auto":
+            sub = _speaker_switch_regions(
+                active, turns, f0, f1, fps,
+                crop_w_frac=crop_w_frac, smoothing=smoothing,
+                lock_per_shot=lock_per_shot, cfg=switch_cfg or SwitchConfig(),
+            )  # fmt: skip
+            if sub is not None:
+                regions.extend(sub)
+                prev_fill_end_cx = None
+                continue
 
         # ── Layer A: vision-driven per-shot fill/fit override (флаг REFRAME_VISION_LAYOUT). ──
         # Уверенный vision-шот, попавший на ЭТОТ scene-шот, РЕШАЕТ режим (семантика картинки),
@@ -1306,6 +1378,9 @@ def reframe_segment(
     subject_cx: float | None = None,
     vision_shots: Sequence[VisionShot] | None = None,
     keep_distant_cutaways: bool = True,
+    words: Sequence[Word] | None = None,
+    reframe_mode: str = "auto",
+    switch_cfg: SwitchConfig | None = None,
 ) -> tuple[list[TrackRegion], bool]:
     """Сегмент → (cut-aligned регионы, face_found). Единый путь (ASD по дефолту).
 
@@ -1356,6 +1431,11 @@ def reframe_segment(
     face_found = bool(tracks_native)
     tracks = [resample_track(t, face_fps, fps) for t in tracks_native]
 
+    # Speaker Focus: диар-реплики (clip-относительные) для cut-переключения. None → прежний путь.
+    turns = (
+        build_turns(words, aligned_start, end) if (words and reframe_mode == "speaker") else None
+    )
+
     # crop_w_frac в merge: короткую перебивку (реальный отдельный шот, напр. 0.9с интервьюера) НЕ
     # проглатываем в предыдущий fill, если его кроп промахнётся мимо нового субъекта → иначе плечо
     # (баг Cardi B clip_04 @40.5с: шот 40.0–40.9с cx 0.64 держал кроп Карди 0.42). Флаг
@@ -1374,6 +1454,9 @@ def reframe_segment(
             wide_speak_min=wide_speak_min,
             subject_cx=subject_cx,
             vision_shots=vision_shots,
+            turns=turns,
+            reframe_mode=reframe_mode,
+            switch_cfg=switch_cfg,
         ),
         min_hold_sec,
         crop_w_frac=crop_w_frac if keep_distant_cutaways else None,
