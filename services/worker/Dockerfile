@@ -11,9 +11,15 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/root
 
-# 1) Рантайм-либы MediaPipe/opencv (GLES/EGL) + утилиты установки (wget/xz/unzip/git/ca-certs).
+# 1) Рантайм-либы MediaPipe/opencv (GLES/EGL) + утилиты установки (wget/xz/unzip/git/ca-certs)
+#    + fontconfig. ⚠️ fontconfig ОБЯЗАТЕЛЕН (bugfix 2026-07-12): базовый slim-образ его НЕ несёт, и
+#    libass (прожиг субтитров) через него ищет шрифты. Без него ffmpeg-лог «No usable fontconfig
+#    configuration file found, using fallback» → libass не находит НИ Unbounded (хук), НИ Montserrat
+#    (реплики) даже с fontsdir=/root/fonts → прожигает ПУСТЫЕ глифы (ffmpeg успешен, ошибки нет) →
+#    «скачал клип с субтитрами, а их нет». Пакет даёт /etc/fonts/fonts.conf → libass снова видит шрифты.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1 libglib2.0-0 libegl1 libgles2 libglvnd0 libsm6 libxext6 \
+      fontconfig \
       wget xz-utils unzip ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -80,6 +86,16 @@ RUN pip install \
 #    не инвалидировали тяжёлые слои зависимостей выше. (Совпадает с layout Modal: /root/app, /root/fonts.)
 COPY app /root/app
 COPY fonts /root/fonts
+
+# 7b) Регистрируем шрифты проекта в СТАНДАРТНОЙ fontconfig-директории + строим кэш (belt-and-
+#     suspenders к fontconfig из шага 1): libass находит Unbounded/Montserrat/Rubik по имени
+#     семейства из ЛЮБОГО пути рендера. ⛔ BUILD-TIME ГАРД: сборка ПАДАЕТ, если fc-list не видит
+#     Unbounded — баг «прожиг без субтитров» больше НЕ уедет молча в прод.
+RUN mkdir -p /usr/local/share/fonts/quip \
+    && cp /root/fonts/*.ttf /usr/local/share/fonts/quip/ \
+    && fc-cache -f \
+    && fc-list | grep -qi "Unbounded" \
+    && fc-list | grep -qi "Montserrat"
 
 # Рантайм-env (НЕ секреты — совпадает с .env() образа Modal). Секреты/ключи задаются в Railway env
 # (Supabase / R2 / Deepgram / Gemini / Polar) — см. чек-лист в PR/сообщении. R2_PUBLIC_URL можно
