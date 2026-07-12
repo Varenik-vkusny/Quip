@@ -22,6 +22,7 @@ import {
   type UploadCheckpoint,
   updatePart,
 } from "./uploadCheckpoint";
+import { computeSourceFingerprint } from "./sourceFingerprint";
 import { backoffDelay, classifyPartError, fileFingerprint } from "./uploadResilience";
 
 // База воркера: реальный worker через env, иначе встроенный мок (/api/mock).
@@ -258,7 +259,8 @@ export type UploadProgressInfo = {
   // try; `stalled` = a part stopped sending bytes and the watchdog aborted it (also retried). During
   // retry/stall, `part`/`attempt` identify what's being re-tried (1-indexed attempt). Optional so the
   // single-PUT / local paths and the pre-flight `{pct:0}` seed stay valid without a phase.
-  phase?: "uploading" | "retrying" | "stalled";
+  // `checking` = hashing the file for the pre-upload dedup probe (no bytes sent to R2 yet).
+  phase?: "checking" | "uploading" | "retrying" | "stalled";
   part?: number;
   attempt?: number;
 };
@@ -637,6 +639,7 @@ async function completeMultipart(
   clipMinSec?: number,
   clipMaxSec?: number,
   removePauses?: boolean,
+  sourceFingerprint?: string | null,
 ): Promise<void> {
   const done = await fetch(`${BASE}/jobs/${id}/upload-complete`, {
     method: "POST",
@@ -651,6 +654,9 @@ async function completeMultipart(
       clip_min_sec: clipMinSec ?? null,
       clip_max_sec: clipMaxSec ?? null,
       remove_pauses: removePauses ?? false,
+      // Persist the content fingerprint so a FUTURE upload of this same file dedups against it
+      // (server stores it on the job row; null when hashing was skipped/failed — just not dedup-able).
+      source_fingerprint: sourceFingerprint ?? null,
       upload_id: uploadId,
       parts,
     }),
@@ -677,6 +683,7 @@ async function resumeMultipart(
   clipMaxSec?: number,
   rand?: () => number,
   removePauses?: boolean,
+  sourceFingerprint?: string | null,
 ): Promise<{ id: string }> {
   const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
     method: "POST",
@@ -721,7 +728,7 @@ async function resumeMultipart(
     rand,
   });
   const all = [...preCompleted, ...newly].sort((a, b) => a.part_number - b.part_number);
-  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses);
+  await completeMultipart(cp.job_id, cp.upload_id, all, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses, sourceFingerprint);
   await clearCheckpoint(fingerprint);
   return { id: cp.job_id };
 }
@@ -736,6 +743,42 @@ export function clearUploadCheckpoint(file: {
   return clearCheckpoint(
     fileFingerprint({ name: file.name, size: file.size, lastModified: file.lastModified }),
   );
+}
+
+/** POST /jobs/check-duplicate — "have I (this user) uploaded this exact file before?" On a per-user
+ *  match the server has ALREADY server-side-copied the prior R2 source into a fresh job and spawned
+ *  it, so we return that job id and the caller skips the upload entirely. Best-effort: any non-OK
+ *  response → {duplicate:false} so the normal upload path (with its own auth/quota gates) runs — dedup
+ *  is an optimization that must never block or fail an upload. */
+export async function checkDuplicateUpload(
+  file: File,
+  sourceFingerprint: string,
+  opts: {
+    maxClips?: number;
+    language?: string | null;
+    clipMinSec?: number;
+    clipMaxSec?: number;
+    removePauses?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<{ duplicate: boolean; id?: string }> {
+  const res = await fetch(`${BASE}/jobs/check-duplicate`, {
+    method: "POST",
+    headers: { ...(await authHeaders()), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      max_clips: opts.maxClips ?? null,
+      language: opts.language ?? null,
+      clip_min_sec: opts.clipMinSec ?? null,
+      clip_max_sec: opts.clipMaxSec ?? null,
+      remove_pauses: opts.removePauses ?? false,
+      source_fingerprint: sourceFingerprint,
+    }),
+    signal,
+  });
+  if (!res.ok) return { duplicate: false };
+  const data = (await res.json()) as { duplicate?: boolean; id?: string };
+  return { duplicate: !!data.duplicate, id: data.id };
 }
 
 export async function createUploadJob(
@@ -755,6 +798,41 @@ export async function createUploadJob(
     size: file.size,
     lastModified: file.lastModified,
   });
+
+  // ── DEDUP: "already uploaded this exact file?" Hash the CONTENT and ask the server BEFORE sending
+  // any bytes. On a per-user match the server reuses the R2 source (server-side copy) + spawns the job
+  // → we skip the whole transfer. Best-effort: a hashing/probe hiccup falls through to a normal upload
+  // (sourceFp stays null → this upload just won't be dedup-able later), so dedup never blocks an
+  // upload (rule #8: honest fallback, never a silently-wrong dedup). ──
+  let sourceFp: string | null = null;
+  try {
+    onProgress?.({ pct: 0, loadedBytes: 0, totalBytes: file.size, elapsedSec: 0, phase: "checking" });
+    sourceFp = await computeSourceFingerprint(
+      file,
+      (f) =>
+        onProgress?.({
+          pct: Math.round(f * 100),
+          loadedBytes: Math.round(f * file.size),
+          totalBytes: file.size,
+          elapsedSec: 0,
+          phase: "checking",
+        }),
+      signal,
+    );
+    const dup = await checkDuplicateUpload(
+      file,
+      sourceFp,
+      { maxClips, language, clipMinSec, clipMaxSec, removePauses },
+      signal,
+    );
+    if (dup.duplicate && dup.id) {
+      await clearCheckpoint(fingerprint).catch(() => {}); // any stale resume state for this file is moot
+      return { id: dup.id };
+    }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    sourceFp = null; // hashing/probe hiccup → normal upload path (never a silently-wrong dedup)
+  }
 
   // ── RESUME: a checkpoint from a previous interrupted multipart upload of THIS exact file. The
   // parts already sit in R2 under the checkpoint's upload_id, so resume that — DON'T mint a new one.
@@ -776,6 +854,7 @@ export async function createUploadJob(
         clipMaxSec,
         rand,
         removePauses,
+        sourceFp,
       );
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") throw e;
@@ -826,7 +905,7 @@ export async function createUploadJob(
         signal,
         rand,
       });
-      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses);
+      await completeMultipart(id, upload_id, completed, file, maxClips, language, headers, signal, clipMinSec, clipMaxSec, removePauses, sourceFp);
       await clearCheckpoint(fingerprint); // fully uploaded → no resume state to keep
       return { id };
     } catch (e) {
@@ -862,7 +941,7 @@ export async function createUploadJob(
     const done = await fetch(`${BASE}/jobs/${init.id}/upload-complete`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null, remove_pauses: removePauses ?? false }),
+      body: JSON.stringify({ filename: file.name, max_clips: maxClips ?? null, language: language ?? null, clip_min_sec: clipMinSec ?? null, clip_max_sec: clipMaxSec ?? null, remove_pauses: removePauses ?? false, source_fingerprint: sourceFp }),
       signal,
     });
     if (!done.ok) throw new Error(`Couldn’t start processing: ${done.status}`);

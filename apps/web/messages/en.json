@@ -53,6 +53,8 @@
     "intro": "Drop a video. Quip finds the strongest moments, cuts vertical clips, and reports a confidence score and why each one works.",
     "uploading": "Uploading",
     "preparing": "Preparing",
+    "checking": "Checking",
+    "checkingVideo": "Checking if you’ve uploaded this before…",
     "sendingVideo": "Sending your video",
     "preparingVideo": "Preparing your video…",
     "percent": "percent",

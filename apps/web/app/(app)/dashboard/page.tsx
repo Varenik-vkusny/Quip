@@ -124,13 +124,19 @@ function UploadProgress({ info }: { info: UploadProgressInfo }) {
     ? null
     : t(info.phase === "stalled" ? "uploadStalled" : "uploadRetrying");
 
+  // `checking` = hashing the file for the pre-upload dedup probe (no bytes sent yet). Distinct label
+  // so a large-file hash doesn't read as a stuck "uploading 0%".
+  const checking = info.phase === "checking";
+
   return (
     <div className="mx-auto w-full max-w-2xl">
       <div className="flex items-end justify-between gap-4 border-b border-line pb-4">
         <div>
-          <Eyebrow tone="accent">{preparing ? t("preparing") : t("uploading")}</Eyebrow>
+          <Eyebrow tone="accent">
+            {checking ? t("checking") : preparing ? t("preparing") : t("uploading")}
+          </Eyebrow>
           <h2 className="mt-1.5 font-display text-h3 text-ink">
-            {preparing ? t("preparingVideo") : t("sendingVideo")}
+            {checking ? t("checkingVideo") : preparing ? t("preparingVideo") : t("sendingVideo")}
           </h2>
         </div>
         <div className="flex items-center justify-end text-right" aria-live="polite">
