@@ -25,6 +25,9 @@ WIDE = -1  # SubRegion.target: wide/fit фолбэк (не индекс лейн
 # Порог «этот лейн реально говорит в реплике» для голоса при binding. Light-ASD: >0 ≈ говорит.
 # Ниже → голос не отдаём (off-screen спикер: ни одно лицо не говорит → кластер не привязан → None).
 _VOTE_MIN = 0.0
+# Сентинель «на этом кадре лица нет / ASD не считался» в speak_frames места (seat). Кадры-гэпы
+# при склейке фрагментов в seat (build_seats) НЕ считаются в binding (иначе занижают средний ASD).
+NO_ASD = -99.0
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,11 @@ def bind_lanes(
                 continue
             a, b = max(tf0, tr.f0), min(tf1, tr.f1)
             n_sf = len(tr.speak_frames)
-            vals = [tr.speak_frames[i - tr.f0] for i in range(a, b) if 0 <= i - tr.f0 < n_sf]
+            vals = [
+                tr.speak_frames[i - tr.f0]
+                for i in range(a, b)
+                if 0 <= i - tr.f0 < n_sf and tr.speak_frames[i - tr.f0] > NO_ASD
+            ]
             if not vals:
                 continue
             score = sum(vals) / len(vals)

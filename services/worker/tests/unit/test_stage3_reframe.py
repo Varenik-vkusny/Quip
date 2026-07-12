@@ -55,6 +55,35 @@ class TestResampleTrackSpeakFrames:
         assert resample_track(t, 25.0, 25.0) is t
 
 
+class TestBuildSeats:
+    """build_seats: осколки IOU-трекера → позиционные места (locked-камера)."""
+
+    def test_fragments_merge_into_seats(self) -> None:
+        from app.pipeline.speaker_switch import NO_ASD
+        from app.pipeline.stage3_reframe import SpeakerTrack, build_seats
+
+        left1 = SpeakerTrack(
+            f0=0, f1=30, cx=(0.2,) * 30, width=0.15, speak=0.0, speak_frames=(1.0,) * 30
+        )
+        left2 = SpeakerTrack(
+            f0=40, f1=70, cx=(0.21,) * 30, width=0.15, speak=0.0, speak_frames=(0.5,) * 30
+        )
+        right = SpeakerTrack(
+            f0=10, f1=80, cx=(0.65,) * 70, width=0.16, speak=0.0, speak_frames=(-1.0,) * 70
+        )
+        seats = build_seats([right, left1, left2])  # неупорядоченный вход
+        assert len(seats) == 2
+        assert seats[0].cx[0] < 0.4 and seats[1].cx[0] > 0.5  # sorted лево→право
+        assert seats[0].f0 == 0 and seats[0].f1 == 70  # union LEFT-фрагментов
+        assert seats[0].speak_frames[35] == NO_ASD  # gap [30,40) → сентинель
+        assert seats[0].speak_frames[5] == 1.0 and seats[0].speak_frames[50] == 0.5
+
+    def test_empty(self) -> None:
+        from app.pipeline.stage3_reframe import build_seats
+
+        assert build_seats([]) == []
+
+
 class TestPlanRegionsSpeakerSwitch:
     """plan_regions: reframe_mode='speaker' → суб-деление шота на cut-переключения по репликам."""
 

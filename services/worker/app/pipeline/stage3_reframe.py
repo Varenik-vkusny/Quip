@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from app.errors import JobError
 from app.models import CropWindow
 from app.pipeline.speaker_switch import (
+    NO_ASD,
     WIDE,
     SpeakerTurn,
     SwitchConfig,
@@ -721,6 +722,69 @@ def _fill_points_for_target(
     return (TrackPoint(t=t0, mode="fill", cx=0.5 if init is None else init),)
 
 
+_SEAT_MERGE_CX = 0.12  # треки с mean cx ближе этого → одно «место» (seat) на локированной камере
+
+
+def _seat_mean_cx(t: SpeakerTrack) -> float:
+    return sum(t.cx) / len(t.cx) if t.cx else 0.5
+
+
+def build_seats(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
+    """Слить фрагментированные IOU-треки в позиционные «места» (seats) по cx. PURE.
+
+    На локированной камере люди сидят на стабильных X-позициях, но IOU-трекер рвёт КАЖДОГО на
+    много коротких треков (репро: 2 человека → 15 треков за 60с, ни один не покрывает 25% шота →
+    coverage-гейт и per-track binding ломаются). Кластеризуем треки по mean cx (порог
+    _SEAT_MERGE_CX) и сливаем в ОДНУ дорожку на место: на каждый кадр cx/speak берём у члена с МАКС
+    ASD; кадр без члена → NO_ASD-гэп (в coverage/binding не считается). Так bind_lanes/plan_switches
+    работают на СТАБИЛЬНЫХ лейнах, а не на осколках. Seats отсортированы по cx (лево→право).
+    """
+    if not tracks:
+        return []
+    ordered = sorted(tracks, key=_seat_mean_cx)
+    clusters: list[list[SpeakerTrack]] = [[ordered[0]]]
+    for t in ordered[1:]:
+        if _seat_mean_cx(t) - _seat_mean_cx(clusters[-1][-1]) <= _SEAT_MERGE_CX:
+            clusters[-1].append(t)
+        else:
+            clusters.append([t])
+    seats: list[SpeakerTrack] = []
+    for cl in clusters:
+        f0 = min(t.f0 for t in cl)
+        f1 = max(t.f1 for t in cl)
+        cxs: list[float] = []
+        sfs: list[float] = []
+        last_cx = _seat_mean_cx(cl[0])
+        for f in range(f0, f1):
+            best_sp: float | None = None
+            best_cx: float | None = None
+            for t in cl:
+                if t.f0 <= f < t.f1:
+                    i = f - t.f0
+                    cx = t.cx[i] if i < len(t.cx) else None
+                    sp = t.speak_frames[i] if i < len(t.speak_frames) else None
+                    if sp is not None and (best_sp is None or sp > best_sp):
+                        best_sp, best_cx = sp, cx
+                    elif best_cx is None and cx is not None:
+                        best_cx = cx  # детект есть, но ASD-скор отсутствует (хвост score_track)
+            if best_cx is not None:
+                last_cx = best_cx
+            cxs.append(last_cx)
+            sfs.append(best_sp if best_sp is not None else NO_ASD)
+        real = [v for v in sfs if v > NO_ASD]
+        seats.append(
+            SpeakerTrack(
+                f0=f0,
+                f1=f1,
+                cx=tuple(cxs),
+                width=sum(t.width for t in cl) / len(cl),
+                speak=(sum(real) / len(real)) if real else NO_ASD,
+                speak_frames=tuple(sfs),
+            )
+        )
+    return seats
+
+
 def _speaker_switch_regions(
     active: list[SpeakerTrack],
     turns: Sequence[SpeakerTurn],
@@ -745,14 +809,15 @@ def _speaker_switch_regions(
     shot_turns = [tn for tn in turns if tn.t_end > t0 and tn.t_start < t1]
     if len(shot_turns) < 2:
         return None
-    # Только СТАБИЛЬНЫЕ лейны (покрытие ≥ _FILL_MIN_COVERAGE + реальная ширина) — тот же гейт, что
-    # _is_wide_shot: IOU-трекер на реале плодит спурьез-треки (отражения/фон/разрывы IOU) с
-    # покрытием 0–6%, они НЕ должны получать голос в binding (иначе привяжем спикера к мусору).
+    # Склеиваем осколки IOU-трекера в позиционные «места» (seats), затем берём только СТАБИЛЬНЫЕ:
+    # РЕАЛЬНОЕ покрытие (не-gap кадры, где лицо реально детектилось) ≥ _FILL_MIN_COVERAGE + ширина.
+    # Спурьез-место (краткое отражение/фон) → низкое real-покрытие → отсекается (как _is_wide_shot).
+    shot_len = f1 - f0
     real = [
-        t
-        for t in active
-        if len(_track_cx_in_shot(t, f0, f1)) >= _FILL_MIN_COVERAGE * (f1 - f0)
-        and t.width >= _MIN_FACE_FRAC
+        s
+        for s in build_seats(active)
+        if sum(1 for v in s.speak_frames if v > NO_ASD) >= _FILL_MIN_COVERAGE * shot_len
+        and s.width >= _MIN_FACE_FRAC
     ]
     if len(real) < 2:
         return None
