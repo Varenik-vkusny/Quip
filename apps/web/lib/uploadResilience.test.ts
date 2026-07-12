@@ -3,6 +3,7 @@ import {
   BACKOFF_CAP_MS,
   backoffDelay,
   classifyPartError,
+  classifyResumeError,
   fileFingerprint,
   remainingParts,
 } from "./uploadResilience";
@@ -89,5 +90,41 @@ describe("classifyPartError", () => {
   it("treats other 4xx as fatal (a real client error, not worth retrying)", () => {
     expect(classifyPartError(400, "http")).toBe("fatal");
     expect(classifyPartError(404, "http")).toBe("fatal");
+  });
+});
+
+describe("classifyResumeError", () => {
+  // The multipart parts already sit in R2, so a resume-probe failure must NOT nuke the checkpoint
+  // (→ silent restart from 0%) unless the multipart is DEFINITIVELY gone. This is the core of the
+  // "login drops mid-long-upload → upload restarts from scratch" fix.
+  it("treats an expired/absent token (401/403) as an auth blip — refresh & retry, keep the checkpoint", () => {
+    expect(classifyResumeError(401)).toBe("auth");
+    expect(classifyResumeError(403)).toBe("auth");
+  });
+
+  it("discards the checkpoint ONLY on an explicit 404 (the multipart is genuinely gone)", () => {
+    expect(classifyResumeError(404)).toBe("gone");
+  });
+
+  it("treats server hiccups (5xx) as transient — retry, keep the checkpoint", () => {
+    expect(classifyResumeError(500)).toBe("transient");
+    expect(classifyResumeError(502)).toBe("transient");
+    expect(classifyResumeError(503)).toBe("transient");
+  });
+
+  it("treats rate-limit / request-timeout as transient", () => {
+    expect(classifyResumeError(429)).toBe("transient");
+    expect(classifyResumeError(408)).toBe("transient");
+  });
+
+  it("treats a transport-level failure (null status / network) as transient", () => {
+    expect(classifyResumeError(null)).toBe("transient");
+  });
+
+  it("keeps the checkpoint on any OTHER 4xx (never auto-restart from 0% on an ambiguous error)", () => {
+    // 400/413/422 etc. — retrying is harmless and, crucially, we must not lose the uploaded parts.
+    expect(classifyResumeError(400)).toBe("transient");
+    expect(classifyResumeError(413)).toBe("transient");
+    expect(classifyResumeError(422)).toBe("transient");
   });
 });

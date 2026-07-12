@@ -23,7 +23,13 @@ import {
   updatePart,
 } from "./uploadCheckpoint";
 import { computeSourceFingerprint } from "./sourceFingerprint";
-import { backoffDelay, classifyPartError, fileFingerprint } from "./uploadResilience";
+import {
+  backoffDelay,
+  classifyPartError,
+  classifyResumeError,
+  fileFingerprint,
+  ResumeError,
+} from "./uploadResilience";
 
 // База воркера: реальный worker через env, иначе встроенный мок (/api/mock).
 const BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "/api/mock";
@@ -321,6 +327,11 @@ const PART_TIMEOUT_MS = 120_000;
 const STALL_MS = 30_000;
 const STALL_TICK_MS = 2_000; // how often the watchdog checks for silence
 const PART_MAX_ATTEMPTS = 6; // total tries per part before a hard failure (then resume takes over)
+// Resume-probe retries: an auth blip (expired JWT) or a server/network hiccup on the resume
+// `/upload-parts` call is transient — retry a few times with a FRESH token + backoff before giving up.
+// Only a definitive 404 (multipart gone) short-circuits to a fresh restart; everything else keeps the
+// checkpoint so the transfer is never silently thrown away.
+const RESUME_PROBE_MAX_ATTEMPTS = 4;
 
 /** A part transfer that failed at the transport layer (no HTTP status). `kind` feeds
  *  classifyPartError so the retry loop can decide retry vs refresh vs fatal. */
@@ -521,7 +532,16 @@ async function uploadPartsResilient(
       body: JSON.stringify({ upload_id: opts.uploadId, part_numbers: [n] }),
       signal: internal.signal,
     });
-    if (!r.ok) throw new Error(`Couldn’t refresh upload URL for part ${n}: ${r.status}`);
+    if (!r.ok) {
+      // A URL refresh mid-transfer can hit an expired token (401) or a server hiccup (5xx) on a long
+      // upload. Those are transient → surface as a retryable UploadPartError so the part's backoff loop
+      // retries with a FRESH token, instead of killing the whole transfer. Only a definitive 404
+      // (multipart gone) is fatal — retrying can't bring it back.
+      if (classifyResumeError(r.status) === "gone") {
+        throw new Error(`Couldn’t refresh upload URL for part ${n}: ${r.status}`);
+      }
+      throw new UploadPartError("network");
+    }
     const d = (await r.json()) as { parts?: { part_number: number; url: string }[] };
     const url = d.parts?.find((p) => p.part_number === n)?.url;
     if (!url) throw new Error(`Upload URL refresh for part ${n} returned no URL`);
@@ -685,19 +705,49 @@ async function resumeMultipart(
   removePauses?: boolean,
   sourceFingerprint?: string | null,
 ): Promise<{ id: string }> {
-  const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
-    method: "POST",
-    headers: { ...headers, ...(await authHeaders()), "Content-Type": "application/json" },
-    // No part_numbers ⇒ server returns fresh URLs for every not-yet-completed part (the resume case).
-    body: JSON.stringify({ upload_id: cp.upload_id, size: file.size }),
-    signal,
-  });
-  if (!res.ok) throw new Error(`resume upload-parts failed: ${res.status}`);
-  const data = (await res.json()) as {
+  // Probe the server for what's already in R2 + fresh URLs for the remainder. This is where the
+  // "login drops mid-long-upload → restart from 0%" bug lived: a single non-OK response (a 401 from an
+  // expired token, or a 5xx/network hiccup) used to throw → the caller nuked the checkpoint. Now we
+  // classify: retry auth/transient failures with a FRESH token + backoff, and only a definitive 404
+  // (multipart truly gone) is escalated as `gone` (the sole case the caller may restart fresh). Any
+  // other exhaustion throws a ResumeError the caller surfaces WITHOUT discarding the parts.
+  type ResumeProbeResponse = {
     part_size?: number;
     completed?: { part_number: number; etag: string }[];
     parts?: { part_number: number; url: string }[];
   };
+  let data: ResumeProbeResponse | null = null;
+  for (let attempt = 0; ; attempt++) {
+    let status: number | null = null;
+    try {
+      const res = await fetch(`${BASE}/jobs/${cp.job_id}/upload-parts`, {
+        method: "POST",
+        // Fresh auth every attempt: a retry after a 401 must carry a newly-refreshed token, not the
+        // stale one that just got rejected.
+        headers: { ...headers, ...(await authHeaders()), "Content-Type": "application/json" },
+        // No part_numbers ⇒ server returns fresh URLs for every not-yet-completed part (resume case).
+        body: JSON.stringify({ upload_id: cp.upload_id, size: file.size }),
+        signal,
+      });
+      if (res.ok) {
+        data = (await res.json()) as ResumeProbeResponse;
+        break;
+      }
+      status = res.status;
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
+      status = null; // network/transport failure — classified as transient below
+    }
+    const kind = classifyResumeError(status);
+    // Multipart genuinely gone → let the caller clear the checkpoint and restart fresh (the ONLY case).
+    if (kind === "gone") throw new ResumeError("gone", status, `resume: multipart gone (${status})`);
+    if (attempt + 1 >= RESUME_PROBE_MAX_ATTEMPTS) {
+      // Auth/transient exhausted → KEEP the checkpoint; caller surfaces "resume" instead of restarting.
+      throw new ResumeError(kind, status, `resume upload-parts failed (${kind}): ${status ?? "network"}`);
+    }
+    await sleep(backoffDelay(attempt, rand ?? Math.random), signal);
+  }
+  if (!data) throw new ResumeError("transient", null, "resume upload-parts: no data");
   const partSize = data.part_size || cp.part_size;
   // Reconcile: server ListParts is authoritative; union with the local checkpoint (belt + braces).
   const completedMap = new Map<number, string>();
@@ -836,8 +886,10 @@ export async function createUploadJob(
 
   // ── RESUME: a checkpoint from a previous interrupted multipart upload of THIS exact file. The
   // parts already sit in R2 under the checkpoint's upload_id, so resume that — DON'T mint a new one.
-  // If the checkpoint is unusable (R2 multipart expired / aborted → upload-parts errors), clear it
-  // and fall through to a fresh upload: an honest restart, not a swallowed error (rule #8). ──
+  // We discard the checkpoint + restart fresh ONLY when the multipart is DEFINITIVELY gone (a 404 →
+  // ResumeError kind "gone"). An auth blip (expired token) or a server/network hiccup must NOT throw
+  // the transfer away — that silent restart-from-0% is the "login drops on a long upload → re-uploads
+  // everything" bug. Those surface as an error that keeps the checkpoint so the user can resume. ──
   const checkpoint = await loadCheckpoint(fingerprint);
   if (checkpoint?.job_id && checkpoint.upload_id && checkpoint.part_size > 0) {
     try {
@@ -858,7 +910,15 @@ export async function createUploadJob(
       );
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") throw e;
-      await clearCheckpoint(fingerprint); // stale/unusable checkpoint → start clean below
+      // Only a genuinely-gone multipart is safe to abandon → clear the checkpoint and fall through to
+      // a fresh upload (an honest restart, rule #8). Everything else (auth/transient exhaustion, or a
+      // transfer error mid-resume) KEEPS the parts: rethrow so the caller offers "Resume", not a
+      // silent re-upload from scratch.
+      if (e instanceof ResumeError && e.kind === "gone") {
+        await clearCheckpoint(fingerprint);
+      } else {
+        throw e;
+      }
     }
   }
 

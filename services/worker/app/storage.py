@@ -23,6 +23,23 @@ from typing import Any
 from app.config import get_settings
 from app.errors import JobError
 
+
+class MultipartGoneError(Exception):
+    """The multipart upload no longer exists in R2 (unknown / expired / already-aborted upload_id).
+
+    Distinct from a transient R2 failure (which stays a ``JobError`` -> 500): this is an EXPECTED
+    resume outcome, so the ``/upload-parts`` endpoint maps it to **404**. That lets the browser tell
+    "the multipart is genuinely gone -> discard the checkpoint and restart fresh" apart from an auth
+    blip / server hiccup (which it must retry WITHOUT throwing the uploaded parts away). Rule 8: a
+    known-empty multipart is an explicit 404, never an opaque 500."""
+
+
+def _is_no_such_multipart_code(code: str) -> bool:
+    """PURE. R2/S3-код ошибки означает «этого multipart-аплоада нет»? ListParts на неизвестном/
+    протухшем ``upload_id`` даёт ``NoSuchUpload`` (а пропавший объект — ``NoSuchKey``)."""
+    return code in {"NoSuchUpload", "NoSuchKey"}
+
+
 # D6: долговечный маркер ссылки на объект R2. Вместо протухающего presigned URL
 # (TTL ≤ 7 дней → клип отдаёт 403, когда юзер вернётся) храним в БД r2://<key> и
 # заново подписываем на КАЖДОМ чтении (как уже делает /jobs/{job}/source.mp4).
@@ -342,6 +359,8 @@ def list_parts(job_id: str, upload_id: str) -> list[dict[str, Any]]:
     Size) в наш wire-регистр. Любой сбой R2 → JobError (правило №8): resume НЕ должен молча «терять»
     залитые части и грузить их заново (или, хуже, собрать объект без них).
     """
+    from botocore.exceptions import ClientError
+
     s = get_settings()
     key = source_object_key(job_id)
     client = _r2_client()
@@ -363,7 +382,15 @@ def list_parts(job_id: str, upload_id: str) -> list[dict[str, Any]]:
             if not resp.get("IsTruncated"):
                 break
             marker = int(resp.get("NextPartNumberMarker") or 0)
-    except Exception as e:  # noqa: BLE001 — оборачиваем в JobError, не глотаем
+    except ClientError as e:
+        # Unknown/expired upload_id → the multipart is genuinely gone. That's an EXPECTED resume
+        # outcome (→ 404 at the endpoint), NOT an R2 failure: distinguishing it lets the client
+        # restart fresh ONLY when truly gone, and keep its parts on any other (transient) error.
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if _is_no_such_multipart_code(code):
+            raise MultipartGoneError(f"multipart {upload_id} gone for {job_id}") from e
+        raise JobError("storage", f"R2 list parts {job_id} failed: {e}") from e
+    except Exception as e:  # noqa: BLE001 — любой другой сбой R2 → JobError, не глотаем
         raise JobError("storage", f"R2 list parts {job_id} failed: {e}") from e
     parts.sort(key=lambda p: p["part_number"])
     return parts

@@ -186,6 +186,50 @@ def test_is_not_found_error_code_matches_r2_missing_codes() -> None:
     assert not _is_not_found_error_code("")
 
 
+def test_is_no_such_multipart_code_matches_missing_upload_codes() -> None:
+    from app.storage import _is_no_such_multipart_code
+
+    # ListParts на неизвестном/протухшем upload_id → NoSuchUpload; пропавший объект → NoSuchKey.
+    assert _is_no_such_multipart_code("NoSuchUpload")
+    assert _is_no_such_multipart_code("NoSuchKey")
+    # НЕ «gone» — транзиентные/иные сбои остаются JobError → 500 (клиент ретраит, НЕ теряет части).
+    assert not _is_no_such_multipart_code("AccessDenied")
+    assert not _is_no_such_multipart_code("InternalError")
+    assert not _is_no_such_multipart_code("")
+
+
+def test_list_parts_missing_multipart_raises_gone_not_joberror(monkeypatch) -> None:
+    # Мёртвый upload_id (NoSuchUpload) — ОЖИДАЕМЫЙ resume-исход → MultipartGoneError (эндпоинт даёт
+    # 404), НЕ непрозрачный JobError/500. Иначе клиент трактует 500 как транзиент и не отличит
+    # «реально пропал» от «сервер моргнул» → корень бага «долгая заливка рестартует с 0%».
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(storage, "get_settings", _r2_settings)
+
+    class FakeClient:
+        def list_parts(self, **_kw):  # noqa: ANN003
+            raise ClientError({"Error": {"Code": "NoSuchUpload"}}, "ListParts")
+
+    monkeypatch.setattr(storage, "_r2_client", lambda: FakeClient())
+    with pytest.raises(storage.MultipartGoneError):
+        storage.list_parts("job_x", "dead-upload-id")
+
+
+def test_list_parts_wraps_generic_r2_error_as_joberror(monkeypatch) -> None:
+    # Любой ДРУГОЙ сбой R2 (не «gone») остаётся JobError → 500 → клиент ретраит, части живы.
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(storage, "get_settings", _r2_settings)
+
+    class FakeClient:
+        def list_parts(self, **_kw):  # noqa: ANN003
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "ListParts")
+
+    monkeypatch.setattr(storage, "_r2_client", lambda: FakeClient())
+    with pytest.raises(JobError):
+        storage.list_parts("job_x", "some-upload-id")
+
+
 def _r2_settings() -> types.SimpleNamespace:
     return types.SimpleNamespace(storage_backend="r2", r2_bucket="bkt")
 

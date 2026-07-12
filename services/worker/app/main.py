@@ -767,7 +767,13 @@ def upload_parts(
     upload-url, залить в ``job_id/source.mp4`` можно лишь по per-job presigned PUT оттуда же.
     """
     _resolve_user(authorization, x_user_id)  # 401 при включённом auth без валидного токена
-    completed = storage.list_parts(job_id, body.upload_id)
+    try:
+        completed = storage.list_parts(job_id, body.upload_id)
+    except storage.MultipartGoneError as e:
+        # Multipart genuinely gone (unknown/expired upload_id) -> 404, NOT an opaque 500. The client
+        # reads 404 as "discard the checkpoint, restart fresh"; every other error it retries while
+        # keeping the uploaded parts (no silent restart-from-0% on an auth/server blip).
+        raise HTTPException(status_code=404, detail="multipart upload not found") from e
     done = {p["part_number"] for p in completed}
     size = body.size or 0
     part_size = storage.plan_part_size(size)

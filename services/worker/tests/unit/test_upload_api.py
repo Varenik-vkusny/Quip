@@ -217,6 +217,24 @@ def test_upload_parts_resume_derives_remaining_from_size(monkeypatch) -> None:
     ]
 
 
+def test_upload_parts_gone_multipart_returns_404(monkeypatch) -> None:
+    # Мёртвый upload_id → storage.MultipartGoneError → эндпоинт отдаёт 404 (НЕ 500). Клиент читает
+    # 404 как «multipart реально пропал → сбрось checkpoint, начни заново»; всё прочее (500/сеть) он
+    # ретраит, сохраняя залитые части. Это то, что чинит «долгая заливка молча рестартует с 0%».
+    monkeypatch.delenv("SUPABASE_URL", raising=False)  # auth off (dev)
+    import app.main as main
+    from app import storage
+
+    def _gone(job_id, upload_id):  # noqa: ANN001
+        raise storage.MultipartGoneError(f"multipart {upload_id} gone for {job_id}")
+
+    monkeypatch.setattr(main.storage, "list_parts", _gone)
+
+    client = TestClient(main.app)
+    r = client.post("/jobs/job_dead/upload-parts", json={"upload_id": "dead", "size": 1024})
+    assert r.status_code == 404
+
+
 def test_upload_parts_requires_auth(monkeypatch) -> None:
     # auth включён (SUPABASE_URL) + нет токена → 401 ДО обращения к R2 (list_parts не зовём).
     monkeypatch.setenv("SUPABASE_URL", "https://ref.supabase.co")

@@ -51,3 +51,36 @@ export function classifyPartError(status: number | null, kind: PartErrorKind): P
   if (status >= 400) return "fatal"; // other 4xx: a genuine client error, retrying won't help
   return "retry"; // unexpected non-error status reached the error path — be lenient
 }
+
+/** What a failed RESUME `/upload-parts` probe means for the interrupted transfer:
+ *  - `auth`      — 401/403: the session token expired or was momentarily rejected. The multipart is
+ *                  FINE (its parts still sit in R2). Refresh the token and retry; NEVER drop the checkpoint.
+ *  - `gone`      — an explicit 404: the multipart genuinely no longer exists → the ONLY case where we
+ *                  discard the checkpoint and legitimately restart from a fresh multipart.
+ *  - `transient` — everything else (network/null, 5xx, 408/429, any other 4xx): a server/network hiccup
+ *                  or an ambiguous error → retry with backoff, but KEEP the checkpoint. */
+export type ResumeErrorAction = "auth" | "gone" | "transient";
+
+/** Classify a failed resume-probe by HTTP status (null = transport-level failure). The guiding rule:
+ *  the checkpoint is destroyed (→ full re-upload from 0%) ONLY on a definitive 404. An auth blip or a
+ *  transient server/network error must never silently restart a multi-GB transfer — that data loss is
+ *  exactly the "login drops mid-long-upload → upload starts over" bug. PURE. */
+export function classifyResumeError(status: number | null): ResumeErrorAction {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 404) return "gone";
+  return "transient"; // null/network, 5xx, 408/429, and any other 4xx — keep the parts, don't restart
+}
+
+/** Thrown by the resume path once a probe failure has been classified. `kind` drives the caller:
+ *  only `gone` may discard the checkpoint; `auth`/`transient` keep it so the user can resume (after a
+ *  re-login / reconnect) instead of re-uploading everything. */
+export class ResumeError extends Error {
+  readonly kind: ResumeErrorAction;
+  readonly status: number | null;
+  constructor(kind: ResumeErrorAction, status: number | null, message: string) {
+    super(message);
+    this.name = "ResumeError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
