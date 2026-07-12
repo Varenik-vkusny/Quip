@@ -89,6 +89,23 @@ class TestPlanRegionsSpeakerSwitch:
         )
         assert r_default == r_none  # новые параметры без speaker-режима → байт-в-байт
 
+    def test_spurious_lowcoverage_lane_ignored(self) -> None:
+        from app.pipeline.speaker_switch import SpeakerTurn
+        from app.pipeline.stage3_reframe import SpeakerTrack, plan_regions
+
+        # спурьез-трек: 5 кадров (2.7% покрытия) с высоким ASD — coverage-гейт должен его выкинуть,
+        # binding остаётся на 2 реальных лицах (иначе привязка к мусору = кроп не на том).
+        spur = SpeakerTrack(
+            f0=40, f1=45, cx=(0.5,) * 5, width=0.12, speak=1.0, speak_frames=(1.0,) * 5
+        )
+        tracks = [self._track(0.2, (0, 90)), spur, self._track(0.65, (90, 180))]
+        turns = [SpeakerTurn(0, 0.0, 3.0, 10), SpeakerTurn(1, 3.0, 6.0, 10)]
+        regs = plan_regions(
+            [(0, 180)], tracks, fps=30.0, crop_w_frac=0.316, turns=turns, reframe_mode="speaker"
+        )
+        assert [r.mode for r in regs] == ["fill", "fill"]
+        assert regs[0].points[0].cx < 0.4 and regs[1].points[0].cx > 0.5
+
     def test_single_speaker_falls_through_to_default(self) -> None:
         from app.pipeline.speaker_switch import SpeakerTurn
         from app.pipeline.stage3_reframe import plan_regions

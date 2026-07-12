@@ -745,11 +745,22 @@ def _speaker_switch_regions(
     shot_turns = [tn for tn in turns if tn.t_end > t0 and tn.t_start < t1]
     if len(shot_turns) < 2:
         return None
-    binding = bind_lanes(shot_turns, active, fps, conf_min=cfg.bind_conf_min)
+    # Только СТАБИЛЬНЫЕ лейны (покрытие ≥ _FILL_MIN_COVERAGE + реальная ширина) — тот же гейт, что
+    # _is_wide_shot: IOU-трекер на реале плодит спурьез-треки (отражения/фон/разрывы IOU) с
+    # покрытием 0–6%, они НЕ должны получать голос в binding (иначе привяжем спикера к мусору).
+    real = [
+        t
+        for t in active
+        if len(_track_cx_in_shot(t, f0, f1)) >= _FILL_MIN_COVERAGE * (f1 - f0)
+        and t.width >= _MIN_FACE_FRAC
+    ]
+    if len(real) < 2:
+        return None
+    binding = bind_lanes(shot_turns, real, fps, conf_min=cfg.bind_conf_min)
     if len({ln for ln in binding.values() if ln is not None}) < 2:
         return None  # не 2-speaker диалог (off-screen/ambiguous/один лейн) → обычная логика
     regions: list[TrackRegion] = []
-    for sub in plan_switches(shot_turns, binding, active, crop_w_frac, t0, t1, fps, cfg):
+    for sub in plan_switches(shot_turns, binding, real, crop_w_frac, t0, t1, fps, cfg):
         sf0, sf1 = round(sub.t0 * fps), round(sub.t1 * fps)
         if sf1 <= sf0:
             continue
@@ -757,7 +768,7 @@ def _speaker_switch_regions(
             regions.append(TrackRegion(t0=sf0 / fps, t1=sf1 / fps, mode="fit", points=()))
         else:
             pts = _fill_points_for_target(
-                active[sub.target], sf0, sf1, fps,
+                real[sub.target], sf0, sf1, fps,
                 crop_w_frac=crop_w_frac, smoothing=smoothing,
                 lock_per_shot=lock_per_shot, prev_fill_end_cx=None,
             )  # fmt: skip
