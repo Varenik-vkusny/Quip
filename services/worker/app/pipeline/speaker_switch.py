@@ -188,47 +188,16 @@ def resolve_binding(
     return binding
 
 
-def match_identities(
-    clip_ids: Sequence[SpeakerTrack],
-    source_embeddings: Sequence[tuple[float, ...]],
-    *,
-    sim_min: float = 0.65,
-) -> dict[int, int]:
-    """Личности КЛИПА → личности ИСХОДНИКА по отпечатку лица. PURE. {clip_idx: source_idx}.
-
-    Клип считает свои личности независимо (свои треки/эмбеддинги) — чтобы применить source-level
-    привязку «голос↔личность», надо понять, КТО из source-личностей это лицо. Матчим по максимуму
-    косинуса (≥ sim_min). Не нашли похожего (новый человек, которого не было в сэмплах) → нет записи
-    → вызыватель честно не привяжет его к голосу (→ wide), а не приклеит к случайной личности.
-
-    ⚠️ sim_min ЗАВИСИТ ОТ ЭМБЕДДЕРА (шкала косинуса не переносима между моделями) — боевое значение
-    приходит из stage3_reframe._MATCH_SIM_MIN, там же замеры. Дефолт — под текущий SFace.
-    """
-    out: dict[int, int] = {}
-    for i, cid in enumerate(clip_ids):
-        if not cid.embedding:
-            continue
-        best_j, best_s = -1, -1.0
-        for j, semb in enumerate(source_embeddings):
-            if not semb:
-                continue
-            s = sum(x * y for x, y in zip(cid.embedding, semb, strict=False))
-            if s > best_s:
-                best_j, best_s = j, s
-        if best_j >= 0 and best_s >= sim_min:
-            out[i] = best_j
-    return out
-
-
 def clip_binding_from_source(
     source_binding: dict[int, int | None],
     clip_to_source: dict[int, int],
 ) -> dict[int, int | None]:
-    """Source-привязка (голос→личность ИСХОДНИКА) + матчинг лиц клипа → привязка ДЛЯ КЛИПА. PURE.
+    """Source-привязка (голос→личность ИСХОДНИКА) + лейны клипа → привязка ДЛЯ КЛИПА. PURE.
 
     source_binding: диар-кластер → индекс личности исходника (посчитан ОДИН раз по всему видео, где
-    есть диалог → надёжно). clip_to_source: индекс личности КЛИПА → индекс личности исходника
-    (match_identities по отпечатку). Возврат: диар-кластер → индекс личности КЛИПА.
+    есть диалог → надёжно). clip_to_source: индекс ЛЕЙНА клипа → индекс личности исходника (даёт
+    stage3_reframe.identities_from_source — прижимает КАЖДЫЙ трек к личности исходника напрямую).
+    Возврат: диар-кластер → индекс лейна клипа.
 
     Спикер, чьего лица НЕТ в этом клипе (говорит за кадром) → None → вызыватель уйдёт в wide /
     удержит текущего, а не начнёт кропить случайного. Это и есть фикс МОНОЛОГА: даже если в клипе

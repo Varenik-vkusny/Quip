@@ -144,6 +144,147 @@ class TestBuildIdentities:
         t1, t2 = self._t(0, 30, 0.2, ()), self._t(0, 30, 0.7, ())
         assert build_identities([t1, t2]) == build_seats([t1, t2])  # честный фолбэк, не деградация
 
+    # ── КОРОТКИЕ треки не имеют права ОПРЕДЕЛЯТЬ личности (репро на реальной смене камеры) ─────
+    # Отпечаток короткого трека усреднён по нескольким почти одинаковым (часто смазанным) кропам →
+    # «уезжает» к среднему лицу и раздувает похожесть РАЗНЫХ людей. Замер на camB (смена камеры,
+    # 15 осколков): чужой-чужой mean +0.48 (ВЫШЕ порога 0.45 → average-linkage склеивал двух людей
+    # в одну «личность»); те же треки с отсечкой ≥2с: свой +0.92 vs чужой +0.40 — чисто.
+    # Порогом это НЕ лечится (свой min 0.41 НИЖЕ чужого max 0.65 — распределения пересекаются) →
+    # структурное решение: личности ОПРЕДЕЛЯЮТ только ЯКОРНЫЕ (длинные) треки, короткие потом
+    # ПРИЛИПАЮТ к готовой (стабильной) личности.
+
+    def test_short_noisy_tracks_do_not_collapse_two_people(self) -> None:
+        import math
+
+        from app.pipeline.stage3_reframe import build_identities
+
+        def unit(x: float, y: float) -> tuple[float, ...]:
+            n = math.hypot(x, y)
+            return (x / n, y / n)
+
+        a, b = unit(1.0, 0.0), unit(0.0, 1.0)  # два ДЛИННЫХ трека = два разных человека (cos 0)
+        m1, m2 = unit(0.6, 0.4), unit(0.4, 0.6)  # два КОРОТКИХ осколка, «уехавших» к середине
+        ids = build_identities(
+            [
+                self._t(0, 200, 0.2, a),  # якорь: человек A
+                self._t(0, 200, 0.7, b),  # якорь: человек B
+                self._t(10, 20, 0.3, m1),  # осколок A (шумный отпечаток)
+                self._t(30, 40, 0.6, m2),  # осколок B (шумный отпечаток)
+            ],
+            fps=30.0,
+        )
+        # Кластеризуй мы ВСЁ подряд — осколки (cos(m1,m2)=0.92) склеили бы A и B в одну личность.
+        assert len(ids) == 2, "короткие осколки схлопнули двух людей в одну личность"
+
+    def test_short_tracks_still_attach_to_their_identity(self) -> None:
+        # Осколки не выбрасываем: они несут покрытие кадров, просто не ГОЛОСУЮТ за состав личности.
+        import math
+
+        from app.pipeline.stage3_reframe import build_identities
+
+        def unit(x: float, y: float) -> tuple[float, ...]:
+            n = math.hypot(x, y)
+            return (x / n, y / n)
+
+        a, b = unit(1.0, 0.0), unit(0.0, 1.0)
+        frag_a = unit(0.9, 0.1)  # явно «свой» для A
+        ids = build_identities(
+            [
+                self._t(0, 200, 0.2, a),
+                self._t(0, 200, 0.7, b),
+                self._t(210, 260, 0.25, frag_a),  # осколок ПОСЛЕ якорей → расширяет личность A
+            ],
+            fps=30.0,
+        )
+        assert len(ids) == 2
+        a_id = next(i for i in ids if i.cx[0] < 0.5)
+        assert a_id.f1 == 260, "осколок не прилип к своей личности (потеряли покрытие кадров)"
+
+    def test_no_anchors_falls_back_to_clustering_everything(self) -> None:
+        # Всё раздроблено (якорей нет) → не молчим и не падаем: кластеризуем что есть (как раньше).
+        from app.pipeline.stage3_reframe import build_identities
+
+        a, b = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+        ids = build_identities([self._t(0, 10, 0.2, a), self._t(0, 10, 0.7, b)], fps=30.0)
+        assert len(ids) == 2
+
+
+class TestIdentitiesFromSource:
+    """Есть source-привязка → НЕ кластеризуем клип, а прижимаем каждый трек к личности ИСХОДНИКА.
+
+    ⚠️ ЗАЧЕМ (репро на смене камеры, реальное видео). Кластеризация ВНУТРИ клипа опирается на то, что
+    у человека НЕСКОЛЬКО треков (average-linkage сравнивает ГРУППЫ). Когда детект чистый, у каждого
+    ровно ОДИН длинный трек → average-linkage вырождается в ОДНО попарное сравнение, а попарные
+    распределения ПЕРЕСЕКАЮТСЯ: замер — двое в похожих профильных позах дали cos +0.49 (ВЫШЕ порога
+    0.45) → слиплись в одну «личность» → фича падала в wide.
+    Отпечатки ИСХОДНИКА усреднены по многим трекам и окнам → они СТАБИЛЬНЫ и разделяют куда лучше:
+    те же два трека дали src +0.86 / +0.92 при отрыве +0.37 / +0.46. Поэтому при наличии source
+    кластеризация клипа — лишнее (и хрупкое) звено.
+    """
+
+    def _t(self, f0: int, f1: int, cx: float, emb: tuple[float, ...]) -> object:
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        n = f1 - f0
+        return SpeakerTrack(
+            f0=f0, f1=f1, cx=tuple([cx] * n), width=0.12, speak=1.0,
+            speak_frames=tuple([1.0] * n), embedding=emb,
+        )  # fmt: skip
+
+    def test_tracks_too_similar_to_cluster_still_split_by_source(self) -> None:
+        import math
+
+        from app.pipeline.stage3_reframe import (
+            _IDENTITY_SIM_MIN,
+            _cos,
+            build_identities,
+            identities_from_source,
+        )
+
+        def unit(*v: float) -> tuple[float, ...]:
+            n = math.sqrt(sum(x * x for x in v))
+            return tuple(x / n for x in v)
+
+        # два ЧЕЛОВЕКА, чьи треки похожи ДРУГ НА ДРУГА выше порога слияния (камера B: cos +0.49)
+        man = unit(1.0, 0.62, 0.0)
+        woman = unit(0.62, 1.0, 0.0)
+        assert _cos(man, woman) > _IDENTITY_SIM_MIN  # именно та ситуация, что ломала кластеризацию
+
+        # но к «своей» личности ИСХОДНИКА каждый ближе с большим отрывом
+        src = [unit(1.0, 0.0, 0.0), unit(0.0, 1.0, 0.0)]  # src0 = муж, src1 = жен
+        tracks = [self._t(0, 900, 0.70, man), self._t(0, 900, 0.21, woman)]
+
+        assert len(build_identities(tracks, fps=30.0)) == 1  # кластеризация клипа — СЛИПАЕТСЯ
+        lanes = identities_from_source(tracks, src, sim_min=0.65)
+        assert len(lanes) == 2, "прижатие к source обязано разделить их"
+        assert {s for s, _ in lanes} == {0, 1}  # каждый ушёл к СВОЕЙ личности исходника
+        by_src = dict(lanes)
+        assert by_src[0].cx[0] == 0.70 and by_src[1].cx[0] == 0.21  # муж/жен не перепутаны
+
+    def test_stranger_absent_from_source_is_dropped_not_misattached(self) -> None:
+        # Новый человек, которого не было в окнах привязки → НЕ приклеиваем к чужому голосу (кроп на
+        # чужое лицо = катастрофа), а честно выбрасываем → вызыватель уйдёт в wide.
+        from app.pipeline.stage3_reframe import identities_from_source
+
+        src = [(1.0, 0.0, 0.0)]
+        stranger = self._t(0, 900, 0.5, (0.0, 0.0, 1.0))  # cos 0 с единственной личностью
+        assert identities_from_source([stranger], src, sim_min=0.65) == []
+
+    def test_fragments_of_one_person_merge_into_one_lane(self) -> None:
+        # Осколки одного человека прижимаются к ОДНОЙ личности исходника → один лейн (не три).
+        from app.pipeline.stage3_reframe import identities_from_source
+
+        src = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        a = (1.0, 0.0, 0.0)
+        lanes = identities_from_source(
+            [self._t(0, 100, 0.2, a), self._t(150, 300, 0.21, a), self._t(400, 500, 0.19, a)],
+            src, sim_min=0.65,
+        )  # fmt: skip
+        assert len(lanes) == 1
+        src_idx, lane = lanes[0]
+        assert src_idx == 0
+        assert lane.f0 == 0 and lane.f1 == 500  # покрытие склеено, осколки не потеряны
+
 
 class TestPlanRegionsSpeakerSwitch:
     """plan_regions: reframe_mode='speaker' → суб-деление шота на cut-переключения по репликам."""

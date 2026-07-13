@@ -37,7 +37,6 @@ from app.pipeline.speaker_switch import (
     build_turns,
     clip_binding_from_source,
     collect_votes,
-    match_identities,
     plan_switches,
     resolve_binding,
 )
@@ -829,6 +828,14 @@ def _cos(a: tuple[float, ...], b: tuple[float, ...]) -> float:
 # Асимметрия риска: ПЕРЕ-дробить → лишние личности → в худшем случае wide (безопасно); НЕ-дробить →
 # два человека в одной личности → кроп на «среднего» = катастрофа. → порог держим ВЫШЕ середины.
 _IDENTITY_SIM_MIN = 0.45
+# ЯКОРЬ = трек не короче этого. Только якоря ОПРЕДЕЛЯЮТ состав личностей; короткие осколки потом
+# прилипают (cluster_by_embedding, фаза 2). Замер на реальной смене камеры (15 осколков): включая
+# осколки чужой-чужой mean +0.48 (ВЫШЕ 0.45 → склейка двух людей в одну «личность»); с отсечкой
+# ≥2.0с — свой +0.92 vs чужой +0.40. 1.5с — запас: на ≥1.0с чужой ещё +0.45 (впритык).
+_ANCHOR_MIN_SEC = 1.5
+# Порог прилипания осколка к ГОТОВОЙ личности. Сравниваем с УСРЕДНЁННЫМ (стабильным) отпечатком —
+# он разделяет лучше, чем трек-к-треку, поэтому берём тот же 0.45, но argmax обязателен.
+_ATTACH_SIM_MIN = 0.45
 # Матчинг личность-КЛИПА → личность-ИСХОДНИКА: сравниваем уже УСРЕДНЁННЫЕ (стабильные) отпечатки, и
 # берётся argmax — порог тут пол «это ВООБЩЕ тот же человек?»: защита от НОВОГО лица, которого не
 # было в окнах привязки (без пола его argmax приклеился бы к случайной личности → тайт на ЧУЖОГО).
@@ -840,13 +847,14 @@ _IDENTITY_SIM_MIN = 0.45
 _MATCH_SIM_MIN = 0.65
 
 
-def build_identities(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
+def build_identities(tracks: list[SpeakerTrack], *, fps: float | None = None) -> list[SpeakerTrack]:
     """Кластеризовать треки в ЛИЧНОСТИ по face-эмбеддингу (v2). PURE.
 
     Замена build_seats (по позиции): группируем по ВНЕШНОСТИ, а не по месту в кадре. Поэтому
     устойчиво к СМЕНЕ КАМЕР / движению камеры / «мафии» — один и тот же человек узнаётся в любой
     позиции и на любом плане (позиционная привязка тут разваливается). Кластеризация —
-    cluster_by_embedding (агломерация с AVERAGE linkage, см. её docstring).
+    cluster_by_embedding (якоря + прилипание, см. её docstring); ``fps`` нужен ей, чтобы отличить
+    ДЛИННЫЙ трек от осколка (без fps — якорей нет, кластеризуются все треки).
 
     Нет эмбеддингов (не speaker-режим / reID не считался) → ЧЕСТНЫЙ фолбэк на build_seats (позиция),
     а не молчаливая деградация. Порядок выхода — по cx (детерминизм).
@@ -855,23 +863,33 @@ def build_identities(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
         return []
     if not all(t.embedding for t in tracks):
         return build_seats(tracks)
-    groups = cluster_by_embedding(tracks)
+    groups = cluster_by_embedding(tracks, fps=fps)
     return sorted((_aggregate_group([tracks[i] for i in g]) for g in groups), key=_seat_mean_cx)
 
 
-def cluster_by_embedding(tracks: Sequence[SpeakerTrack]) -> list[list[int]]:
-    """Индексы треков → группы по ОТПЕЧАТКУ лица. Агломерация с AVERAGE linkage. PURE.
+def cluster_by_embedding(
+    tracks: Sequence[SpeakerTrack], *, fps: float | None = None
+) -> list[list[int]]:
+    """Индексы треков → группы по ОТПЕЧАТКУ лица. PURE.
 
-    Сливаем две ближайшие ГРУППЫ, пока их СРЕДНЯЯ взаимная похожесть ≥ _IDENTITY_SIM_MIN.
+    ДВЕ ФАЗЫ:
+      1. ЯКОРЯ (треки ≥ _ANCHOR_MIN_SEC) кластеризуются агломерацией с AVERAGE linkage — сливаем
+         две ближайшие ГРУППЫ, пока их СРЕДНЯЯ взаимная похожесть ≥ _IDENTITY_SIM_MIN.
+      2. ОСКОЛКИ (короткие треки) ПРИЛИПАЮТ к готовой личности по косинусу к её (уже усреднённому,
+         стабильному) отпечатку, если ≥ _ATTACH_SIM_MIN; иначе заводят свою (её отсеет гейт
+         покрытия, если это мусор). Осколки НЕ участвуют в фазе 1 → не влияют на СОСТАВ личностей.
 
-    ⚠️ ПОЧЕМУ НЕ «жадно прилипнуть к ближайшему центроиду» (так было — РАЗВАЛИВАЛОСЬ на реале):
-    у человека с сильной сменой позы (профиль/наклон головы) ОТДЕЛЬНЫЕ треки «дрейфуют» к другому
-    лицу — на реальном диван-видео трек мужчины имел cos 0.44–0.52 с треками женщины, хотя его
-    собственная минимальная self-похожесть всего 0.49. Распределения ПЕРЕСЕКАЮТСЯ → порога по парам
-    не существует. Один такой merge каскадом склеивал ВСЕХ в одну личность (репро: 12 треков → 1
-    «личность» с cx=0.50 = среднее между двумя людьми → фича не включалась).
-    Average-linkage смотрит на СРЕДНЮЮ похожесть между ГРУППАМИ (свой 0.73/0.93 vs чужой 0.26 —
-    расходятся с запасом), поэтому единичный выброс кластеризацию не ломает.
+    ⚠️ ПОЧЕМУ ОСКОЛКИ НЕ ГОЛОСУЮТ (репро на реальной смене камеры). Отпечаток короткого трека
+    усреднён по нескольким почти одинаковым (часто смазанным) кропам → «уезжает» к среднему лицу и
+    раздувает похожесть РАЗНЫХ людей. Замер (15 осколков): чужой-чужой mean +0.48 — ВЫШЕ порога
+    0.45, average-linkage склеивал двух людей в ОДНУ личность (cos к обоим source-лицам 0.74/0.81 =
+    «средний человек»). Те же треки с отсечкой ≥2с: свой +0.92 vs чужой +0.40. Порогом это НЕ
+    лечится (свой min +0.41 НИЖЕ чужого max +0.65 — распределения пересекаются).
+
+    ⚠️ ПОЧЕМУ НЕ «жадно прилипнуть к ближайшему центроиду» в фазе 1 (так было — РАЗВАЛИВАЛОСЬ):
+    у человека с сильной сменой позы (профиль/наклон) ОТДЕЛЬНЫЕ треки «дрейфуют» к другому лицу
+    (cos 0.44–0.52 при собственной self-похожести 0.49). Один такой merge каскадом склеивал ВСЕХ.
+    Average-linkage смотрит на СРЕДНЮЮ похожесть ГРУПП → единичный выброс её не ломает.
 
     Вынесено из build_identities: source-level привязке надо кластеризовать треки из НЕСКОЛЬКИХ окон
     исходника в ГЛОБАЛЬНЫЕ личности (агрегировать по кадрам нельзя — кадры разных окон). Треки без
@@ -880,10 +898,18 @@ def cluster_by_embedding(tracks: Sequence[SpeakerTrack]) -> list[list[int]]:
     idx = [i for i, t in enumerate(tracks) if t.embedding]
     if not idx:
         return []
+
+    # ── фаза 1: кто ЯКОРЬ ──
+    anchors = idx
+    if fps and fps > 0:
+        long_enough = [i for i in idx if (tracks[i].f1 - tracks[i].f0) >= _ANCHOR_MIN_SEC * fps]
+        if len(long_enough) >= 2:  # < 2 якорей → нечего разделять, честно кластеризуем всё
+            anchors = long_enough
+
     sim = {
         (i, j): _cos(tracks[i].embedding, tracks[j].embedding) for i in idx for j in idx if i < j
     }
-    groups: list[list[int]] = [[i] for i in idx]
+    groups: list[list[int]] = [[i] for i in anchors]
 
     def link(a: list[int], b: list[int]) -> float:
         vals = [sim[(min(i, j), max(i, j))] for i in a for j in b]
@@ -900,7 +926,59 @@ def cluster_by_embedding(tracks: Sequence[SpeakerTrack]) -> list[list[int]]:
             break
         groups[bx] = groups[bx] + groups[by]
         groups.pop(by)
+
+    # ── фаза 2: осколки прилипают к СТАБИЛЬНОМУ отпечатку личности (или заводят свою) ──
+    rest = [i for i in idx if i not in set(anchors)]
+    if rest:
+        centroids = [_mean_norm([tracks[i].embedding for i in g]) for g in groups]
+        for i in rest:
+            sims = [_cos(tracks[i].embedding, c) for c in centroids]
+            best = max(range(len(sims)), key=lambda k: sims[k]) if sims else -1
+            if best >= 0 and sims[best] >= _ATTACH_SIM_MIN:
+                groups[best].append(i)
+            else:
+                groups.append([i])
+                centroids.append(tracks[i].embedding)
     return groups
+
+
+def identities_from_source(
+    tracks: Sequence[SpeakerTrack],
+    source_embeddings: Sequence[tuple[float, ...]],
+    *,
+    sim_min: float = _MATCH_SIM_MIN,
+) -> list[tuple[int, SpeakerTrack]]:
+    """Треки клипа → личности, ПРИЖАТЫЕ к личностям ИСХОДНИКА. PURE. [(source_idx, дорожка), …].
+
+    Каждый трек уходит к source-личности с максимальным косинусом (≥ sim_min); треки одной личности
+    сливаются в одну дорожку (_aggregate_group). Порядок — по cx (детерминизм).
+
+    ⚠️ ПОЧЕМУ НЕ «кластеризовать клип, а потом матчить» (так было — РАЗВАЛИВАЛОСЬ на смене камеры):
+    кластеризация ВНУТРИ клипа держится на том, что у человека НЕСКОЛЬКО треков (average-linkage
+    сравнивает ГРУППЫ). При ЧИСТОМ детекте у каждого ровно ОДИН длинный трек → average-linkage
+    вырождается в ОДНО попарное сравнение, а попарные распределения ПЕРЕСЕКАЮТСЯ: замер на реальном
+    видео — двое в похожих ПРОФИЛЬНЫХ позах дали cos +0.49 (ВЫШЕ порога слияния 0.45) → слиплись в
+    «среднего человека» → фича молча падала в wide.
+    Отпечатки исходника усреднены по многим трекам и окнам → СТАБИЛЬНЫ и разделяют куда лучше: те же
+    два трека дали src +0.86 / +0.92 при отрыве +0.37 / +0.46 от чужой личности. Есть source —
+    кластеризация клипа лишнее и хрупкое звено.
+
+    Трек без уверенного матча (< sim_min) ОТБРАСЫВАЕТСЯ: человек, которого не было в окнах привязки,
+    не должен приклеиться к ЧУЖОМУ голосу (кроп на чужое лицо). Вызыватель тогда уйдёт в wide.
+    """
+    buckets: dict[int, list[SpeakerTrack]] = {}
+    for t in tracks:
+        if not t.embedding:
+            continue
+        sims = [_cos(t.embedding, e) for e in source_embeddings if e]
+        if not sims:
+            continue
+        best = max(range(len(sims)), key=lambda j: sims[j])
+        if sims[best] >= sim_min:
+            buckets.setdefault(best, []).append(t)
+    lanes = [(src_i, _aggregate_group(ts)) for src_i, ts in buckets.items()]
+    lanes.sort(key=lambda p: _seat_mean_cx(p[1]))
+    return lanes
 
 
 def _speaker_switch_regions(
@@ -928,33 +1006,39 @@ def _speaker_switch_regions(
     shot_turns = [tn for tn in turns if tn.t_end > t0 and tn.t_start < t1]
     if not shot_turns:
         return None
-    # Склеиваем осколки IOU-трекера в ЛИЧНОСТИ (по face-эмбеддингу; без эмбеддингов — фолбэк на
-    # позиционные места), затем берём только СТАБИЛЬНЫЕ: РЕАЛЬНОЕ покрытие (не-gap кадры, где лицо
-    # реально детектилось) ≥ _FILL_MIN_COVERAGE + ширина. Спурьез (краткое отражение/фон) → низкое
-    # real-покрытие → отсекается (как в _is_wide_shot).
+    # Осколки IOU-трекера → ЛИЧНОСТИ, затем только СТАБИЛЬНЫЕ: РЕАЛЬНОЕ покрытие (не-gap кадры, где
+    # лицо реально детектилось) ≥ _FILL_MIN_COVERAGE + ширина. Спурьез (краткое отражение/фон) →
+    # низкое real-покрытие → отсекается (как в _is_wide_shot).
     shot_len = f1 - f0
-    real = [
-        s
-        for s in build_identities(active)
-        if sum(1 for v in s.speak_frames if v > NO_ASD) >= _FILL_MIN_COVERAGE * shot_len
-        and s.width >= _MIN_FACE_FRAC
-    ]
-    if len(real) < 2:
-        return None  # 0/1 лицо → обычная логика (она и делает «1 крупное → tight на нём»)
+
+    def _stable(g: SpeakerTrack) -> bool:
+        real_cov = sum(1 for v in g.speak_frames if v > NO_ASD)
+        return real_cov >= _FILL_MIN_COVERAGE * shot_len and g.width >= _MIN_FACE_FRAC
 
     if source is not None:
-        # SOURCE-привязка (надёжна: посчитана по всему видео, где есть диалог; личности стабильны
-        # благодаря reID) → достаточно ОДНОГО говорящего в шоте. Это ФИКС МОНОЛОГА: в кадре двое,
-        # говорит один, чередования нет — но мы ЗНАЕМ его лицо из исходника → tight именно на него.
-        clip_to_src = match_identities(real, source.embeddings, sim_min=_MATCH_SIM_MIN)
-        binding = clip_binding_from_source(source.cluster_to_identity, clip_to_src)
+        # ЕСТЬ source-привязка → каждый трек прижимаем НАПРЯМУЮ к личности исходника
+        # (identities_from_source): её отпечатки усреднены по многим окнам → стабильны.
+        # Кластеризация ВНУТРИ клипа тут лишнее и хрупкое звено — на смене камеры она склеивала
+        # двух людей (см. docstring identities_from_source). Привязка надёжна → хватает ОДНОГО
+        # говорящего в шоте (ФИКС МОНОЛОГА: в кадре двое, говорит один, чередования нет — но мы
+        # ЗНАЕМ его лицо).
+        lanes = identities_from_source(active, source.embeddings)
+        pairs = [(si, g) for si, g in lanes if _stable(g)]
+        real = [g for _, g in pairs]
+        binding = clip_binding_from_source(
+            source.cluster_to_identity, {i: si for i, (si, _) in enumerate(pairs)}
+        )
         min_speakers = 1
     else:
-        # Без source-привязки надёжность берём из ЧЕРЕДОВАНИЯ в клипе → нужен диалог (2 спикера).
+        # Без source-привязки: кластеризуем клип сам по себе, надёжность берём из ЧЕРЕДОВАНИЯ реплик
+        # → нужен диалог (2 спикера).
+        real = [g for g in build_identities(active, fps=fps) if _stable(g)]
         if len(shot_turns) < 2:
             return None
         binding = bind_lanes(shot_turns, real, fps, conf_min=cfg.bind_conf_min)
         min_speakers = 2
+    if len(real) < 2:
+        return None  # 0/1 лицо → обычная логика (она и делает «1 крупное → tight на нём»)
     # Кто из говорящих В ЭТОМ шоте реально привязан к видимому лицу (остальные — за кадром).
     active_bound = {
         ln for tn in shot_turns if (ln := binding.get(tn.speaker)) is not None and ln < len(real)
@@ -1651,7 +1735,7 @@ def compute_source_binding(
             all_tracks.append(t)
             owner.append(wi)
 
-    groups = cluster_by_embedding(all_tracks)
+    groups = cluster_by_embedding(all_tracks, fps=fps)  # осколки не голосуют за состав личностей
     if len(groups) < 2:
         return None
     embeddings = tuple(_mean_norm([all_tracks[i].embedding for i in g]) for g in groups)
