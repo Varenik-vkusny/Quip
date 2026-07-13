@@ -167,6 +167,10 @@ class SpeakerTrack:
     # () = ASD не считался (single-track skip) ИЛИ back-compat конструкция без per-frame. Скаляр
     # `speak` = mean этого массива (совместимость). Ресемплится в resample_track вместе с cx.
     speak_frames: tuple[float, ...] = ()
+    # Face-reID отпечаток ЛИЧНОСТИ (512-d L2-норм, mean по кропам дорожки) для build_identities:
+    # кластеризация треков по ВНЕШНОСТИ, устойчиво к смене камер/позиций. () = не считался
+    # (не speaker-режим). НЕ per-frame → resample_track переносит как есть.
+    embedding: tuple[float, ...] = ()
 
 
 # MediaPipe Tasks FaceDetector
@@ -468,6 +472,7 @@ def resample_track(track: SpeakerTrack, src_fps: float, dst_fps: float) -> Speak
         width=track.width,
         speak=track.speak,
         speak_frames=tuple(sf_new),
+        embedding=track.embedding,  # личность не зависит от сетки fps — переносим как есть
     )
 
 
@@ -748,41 +753,104 @@ def build_seats(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
             clusters[-1].append(t)
         else:
             clusters.append([t])
-    seats: list[SpeakerTrack] = []
-    for cl in clusters:
-        f0 = min(t.f0 for t in cl)
-        f1 = max(t.f1 for t in cl)
-        cxs: list[float] = []
-        sfs: list[float] = []
-        last_cx = _seat_mean_cx(cl[0])
-        for f in range(f0, f1):
-            best_sp: float | None = None
-            best_cx: float | None = None
-            for t in cl:
-                if t.f0 <= f < t.f1:
-                    i = f - t.f0
-                    cx = t.cx[i] if i < len(t.cx) else None
-                    sp = t.speak_frames[i] if i < len(t.speak_frames) else None
-                    if sp is not None and (best_sp is None or sp > best_sp):
-                        best_sp, best_cx = sp, cx
-                    elif best_cx is None and cx is not None:
-                        best_cx = cx  # детект есть, но ASD-скор отсутствует (хвост score_track)
-            if best_cx is not None:
-                last_cx = best_cx
-            cxs.append(last_cx)
-            sfs.append(best_sp if best_sp is not None else NO_ASD)
-        real = [v for v in sfs if v > NO_ASD]
-        seats.append(
-            SpeakerTrack(
-                f0=f0,
-                f1=f1,
-                cx=tuple(cxs),
-                width=sum(t.width for t in cl) / len(cl),
-                speak=(sum(real) / len(real)) if real else NO_ASD,
-                speak_frames=tuple(sfs),
-            )
-        )
-    return seats
+    return [_aggregate_group(cl) for cl in clusters]
+
+
+def _aggregate_group(cl: list[SpeakerTrack]) -> SpeakerTrack:
+    """Слить группу треков (одно МЕСТО или одна ЛИЧНОСТЬ) в ОДНУ дорожку. PURE.
+
+    На каждый кадр cx/speak берём у члена с МАКС ASD (он и есть «лицо этого человека сейчас»);
+    кадр без члена → NO_ASD-гэп (в coverage/binding не считается). Эмбеддинг группы = средний по
+    членам (L2-норм) — отпечаток личности. cx per-frame СЛЕДУЕТ за человеком, поэтому при смене
+    камеры (личность в другой позиции) кроп всё равно попадает на него.
+    """
+    f0 = min(t.f0 for t in cl)
+    f1 = max(t.f1 for t in cl)
+    cxs: list[float] = []
+    sfs: list[float] = []
+    last_cx = _seat_mean_cx(cl[0])
+    for f in range(f0, f1):
+        best_sp: float | None = None
+        best_cx: float | None = None
+        for t in cl:
+            if t.f0 <= f < t.f1:
+                i = f - t.f0
+                cx = t.cx[i] if i < len(t.cx) else None
+                sp = t.speak_frames[i] if i < len(t.speak_frames) else None
+                if sp is not None and (best_sp is None or sp > best_sp):
+                    best_sp, best_cx = sp, cx
+                elif best_cx is None and cx is not None:
+                    best_cx = cx  # детект есть, но ASD-скор отсутствует (хвост score_track)
+        if best_cx is not None:
+            last_cx = best_cx
+        cxs.append(last_cx)
+        sfs.append(best_sp if best_sp is not None else NO_ASD)
+    real = [v for v in sfs if v > NO_ASD]
+    return SpeakerTrack(
+        f0=f0,
+        f1=f1,
+        cx=tuple(cxs),
+        width=sum(t.width for t in cl) / len(cl),
+        speak=(sum(real) / len(real)) if real else NO_ASD,
+        speak_frames=tuple(sfs),
+        embedding=_mean_norm([t.embedding for t in cl if t.embedding]),
+    )
+
+
+def _mean_norm(embs: list[tuple[float, ...]]) -> tuple[float, ...]:
+    """Средний L2-нормированный эмбеддинг группы (центроид личности). PURE. [] → ()."""
+    if not embs:
+        return ()
+    n = len(embs[0])
+    mean = [sum(e[i] for e in embs) / len(embs) for i in range(n)]
+    norm = sum(x * x for x in mean) ** 0.5
+    return tuple(x / norm for x in mean) if norm else ()
+
+
+def _cos(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    """Косинус между L2-нормированными эмбеддингами (= dot). PURE."""
+    return sum(x * y for x, y in zip(a, b, strict=False))
+
+
+# Порог косинуса «это один и тот же человек». Валидация на реальном диван-видео (reid_validate):
+# свой-свой 0.52–0.69, чужой 0.15 → 0.35 разделяет с большим запасом в обе стороны. Ниже порога —
+# новая личность. Поза/ракурс сильно гуляют (профиль/наклон) → не задираем.
+_IDENTITY_SIM_MIN = 0.35
+
+
+def build_identities(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
+    """Кластеризовать треки в ЛИЧНОСТИ по face-эмбеддингу (v2). PURE.
+
+    Замена build_seats (по позиции): группируем по ВНЕШНОСТИ, а не по месту в кадре. Поэтому
+    устойчиво к СМЕНЕ КАМЕР / движению камеры / «мафии» — один и тот же человек узнаётся в любой
+    позиции и на любом плане (позиционная привязка тут разваливается). Жадная агломерация: длинные
+    треки первыми (у них надёжнее отпечаток) сеют личности; остальные липнут к ближайшему центроиду,
+    если косинус ≥ _IDENTITY_SIM_MIN, иначе заводят новую личность.
+
+    Нет эмбеддингов (не speaker-режим / reID не считался) → ЧЕСТНЫЙ фолбэк на build_seats (позиция),
+    а не молчаливая деградация. Порядок выхода — по cx (детерминизм).
+    """
+    if not tracks:
+        return []
+    if not all(t.embedding for t in tracks):
+        return build_seats(tracks)
+    order = sorted(range(len(tracks)), key=lambda i: -(tracks[i].f1 - tracks[i].f0))
+    groups: list[list[SpeakerTrack]] = []
+    centroids: list[tuple[float, ...]] = []
+    for i in order:
+        t = tracks[i]
+        best_j, best_s = -1, -1.0
+        for j, c in enumerate(centroids):
+            s = _cos(t.embedding, c)
+            if s > best_s:
+                best_j, best_s = j, s
+        if best_j >= 0 and best_s >= _IDENTITY_SIM_MIN:
+            groups[best_j].append(t)
+            centroids[best_j] = _mean_norm([x.embedding for x in groups[best_j]])
+        else:
+            groups.append([t])
+            centroids.append(t.embedding)
+    return sorted((_aggregate_group(g) for g in groups), key=_seat_mean_cx)
 
 
 def _speaker_switch_regions(
@@ -809,13 +877,14 @@ def _speaker_switch_regions(
     shot_turns = [tn for tn in turns if tn.t_end > t0 and tn.t_start < t1]
     if len(shot_turns) < 2:
         return None
-    # Склеиваем осколки IOU-трекера в позиционные «места» (seats), затем берём только СТАБИЛЬНЫЕ:
-    # РЕАЛЬНОЕ покрытие (не-gap кадры, где лицо реально детектилось) ≥ _FILL_MIN_COVERAGE + ширина.
-    # Спурьез-место (краткое отражение/фон) → низкое real-покрытие → отсекается (как _is_wide_shot).
+    # Склеиваем осколки IOU-трекера в ЛИЧНОСТИ (по face-эмбеддингу; без эмбеддингов — фолбэк на
+    # позиционные места), затем берём только СТАБИЛЬНЫЕ: РЕАЛЬНОЕ покрытие (не-gap кадры, где лицо
+    # реально детектилось) ≥ _FILL_MIN_COVERAGE + ширина. Спурьез (краткое отражение/фон) → низкое
+    # real-покрытие → отсекается (как в _is_wide_shot).
     shot_len = f1 - f0
     real = [
         s
-        for s in build_seats(active)
+        for s in build_identities(active)
         if sum(1 for v in s.speak_frames if v > NO_ASD) >= _FILL_MIN_COVERAGE * shot_len
         and s.width >= _MIN_FACE_FRAC
     ]
@@ -1505,6 +1574,9 @@ def reframe_segment(
         crop_scale=speaker_crop_scale,
         cuts=cuts_face,
         det_conf=det_conf,
+        # reID-отпечатки нужны ТОЛЬКО speaker-режиму (кластеризация в личности) — в обычном пути
+        # не тратим CPU на torch-эмбеддер.
+        compute_embeddings=(reframe_mode == "speaker"),
     )
     face_found = bool(tracks_native)
     tracks = [resample_track(t, face_fps, fps) for t in tracks_native]

@@ -61,6 +61,28 @@ def _crop_faces(
     return np.array(out)
 
 
+# Сколько кадров дорожки эмбеддить для отпечатка личности. Поза/ракурс скачут (профиль, наклон) →
+# усредняем по разреженной выборке, чтобы отпечаток был стабильным. 12 хватает (валидация: свой-свой
+# 0.52–0.69 vs чужой 0.15 на реальном диван-видео), больше — лишний CPU.
+_EMBED_SAMPLES = 12
+
+
+def _track_embedding(faces224: np.ndarray) -> tuple[float, ...]:
+    """Кропы лица дорожки → ОДИН отпечаток личности (512-d L2-норм): mean по разреженной выборке."""
+    from app.reid.embedder import embed_faces  # noqa: PLC0415  (ленивый: тянет torch-модель)
+
+    n = faces224.shape[0]
+    idx = np.linspace(0, n - 1, num=min(_EMBED_SAMPLES, n)).astype(int)
+    embs = embed_faces([faces224[i] for i in idx])
+    if embs.shape[0] == 0:
+        return ()
+    mean = embs.mean(axis=0)
+    norm = float(np.linalg.norm(mean))
+    if norm == 0:
+        return ()
+    return tuple(float(x) for x in (mean / norm))
+
+
 def score_tracks_in_segment(
     video: Path,
     src_w: int,
@@ -72,6 +94,7 @@ def score_tracks_in_segment(
     crop_scale: float = 0.55,
     cuts: Sequence[int] = (),
     det_conf: float = 0.5,
+    compute_embeddings: bool = False,
 ) -> list[SpeakerTrack]:
     """Сегмент → дорожки лиц с ASD speak-score (вход plan_regions). [] если лиц нет.
 
@@ -206,6 +229,7 @@ def score_tracks_in_segment(
         out: list[SpeakerTrack] = []
         for tr in tracks:
             speak_frames: tuple[float, ...] = ()
+            embedding: tuple[float, ...] = ()
             if score_asd:
                 assert audio is not None  # score_asd → wav прочитан выше
                 faces224 = _crop_faces(tr, get_frame, crop_scale)
@@ -216,6 +240,10 @@ def score_tracks_in_segment(
                 # per-frame скоры сохраняем для turn-level binding (speaker_switch): какое лицо
                 # говорит в КАЖДОЙ реплике диаризации (скаляр speak за весь шот тут бесполезен).
                 speak_frames = tuple(float(x) for x in sc)
+                # v2 (identity): отпечаток ЛИЧНОСТИ по тем же кропам (без доп. декода) — среднее по
+                # РАЗРЕЖЕННОЙ выборке кадров (поза скачет → усреднение стабилизирует), L2-норм.
+                if compute_embeddings and faces224.shape[0]:
+                    embedding = _track_embedding(faces224)
             else:
                 speak = _SILENT
             cx_series = ((tr["bbox"][:, 0] + tr["bbox"][:, 2]) / 2 / src_w).tolist()
@@ -228,6 +256,7 @@ def score_tracks_in_segment(
                     width=width,
                     speak=speak,
                     speak_frames=speak_frames,
+                    embedding=embedding,
                 )
             )
         _phase_add("asd", time.monotonic() - t0)

@@ -84,6 +84,42 @@ class TestBuildSeats:
         assert build_seats([]) == []
 
 
+class TestBuildIdentities:
+    """build_identities: кластеризация по ЛИЧНОСТИ (эмбеддинг) — устойчива к смене камер/позиций."""
+
+    def _t(self, f0: int, f1: int, cx: float, emb: tuple[float, ...]) -> object:
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        n = f1 - f0
+        return SpeakerTrack(
+            f0=f0, f1=f1, cx=tuple([cx] * n), width=0.12, speak=1.0,
+            speak_frames=tuple([1.0] * n), embedding=emb,
+        )  # fmt: skip
+
+    def test_same_person_different_positions_is_one_identity(self) -> None:
+        # КЛЮЧЕВОЕ (кейс «мафия»): один человек снят в РАЗНЫХ позициях (камера сменилась) →
+        # ОДНА личность. Позиционный build_seats ошибочно даёт ДВА места — вот в чём выигрыш reID.
+        from app.pipeline.stage3_reframe import build_identities, build_seats
+
+        person_a = (1.0, 0.0, 0.0)
+        t1 = self._t(0, 30, 0.2, person_a)  # камера 1: человек слева
+        t2 = self._t(30, 60, 0.8, person_a)  # камера 2: ТОТ ЖЕ человек справа
+        assert len(build_identities([t1, t2])) == 1  # по личности — один
+        assert len(build_seats([t1, t2])) == 2  # по позиции — ошибочно два
+
+    def test_two_people_two_identities(self) -> None:
+        from app.pipeline.stage3_reframe import build_identities
+
+        a, b = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)  # ортогональные → cos 0 < порога 0.35
+        assert len(build_identities([self._t(0, 30, 0.2, a), self._t(0, 30, 0.7, b)])) == 2
+
+    def test_no_embeddings_falls_back_to_positional_seats(self) -> None:
+        from app.pipeline.stage3_reframe import build_identities, build_seats
+
+        t1, t2 = self._t(0, 30, 0.2, ()), self._t(0, 30, 0.7, ())
+        assert build_identities([t1, t2]) == build_seats([t1, t2])  # честный фолбэк, не деградация
+
+
 class TestPlanRegionsSpeakerSwitch:
     """plan_regions: reframe_mode='speaker' → суб-деление шота на cut-переключения по репликам."""
 
