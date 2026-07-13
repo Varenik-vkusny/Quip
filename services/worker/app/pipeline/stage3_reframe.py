@@ -30,11 +30,16 @@ from app.models import CropWindow
 from app.pipeline.speaker_switch import (
     NO_ASD,
     WIDE,
+    SourceBinding,
     SpeakerTurn,
     SwitchConfig,
     bind_lanes,
     build_turns,
+    clip_binding_from_source,
+    collect_votes,
+    match_identities,
     plan_switches,
+    resolve_binding,
 )
 
 if TYPE_CHECKING:
@@ -812,10 +817,17 @@ def _cos(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return sum(x * y for x, y in zip(a, b, strict=False))
 
 
-# Порог косинуса «это один и тот же человек». Валидация на реальном диван-видео (reid_validate):
-# свой-свой 0.52–0.69, чужой 0.15 → 0.35 разделяет с большим запасом в обе стороны. Ниже порога —
-# новая личность. Поза/ракурс сильно гуляют (профиль/наклон) → не задираем.
-_IDENTITY_SIM_MIN = 0.35
+# Порог AVERAGE-linkage: сливаем ДВЕ ГРУППЫ треков в одну личность, если СРЕДНЯЯ похожесть между
+# ними ≥ этого. Замеры на реальном диван-видео (12 треков, emb_matrix):
+#   свой-свой (мужчина) mean +0.73 (min +0.49), свой-свой (женщина) mean +0.93 (min +0.79),
+#   ЧУЖОЙ-чужой mean +0.26, но MAX +0.52 (!).
+# ⚠️ Порог по ОТДЕЛЬНЫМ ПАРАМ невозможен: распределения ПЕРЕСЕКАЮТСЯ (чужой max 0.52 > свой min 0.49)
+# — у человека с сильной сменой позы отдельные треки «дрейфуют» к другому лицу. А вот ГРУППОВЫЕ
+# средние расходятся с запасом (0.73/0.93 vs 0.26) → 0.45 делит их надёжно.
+_IDENTITY_SIM_MIN = 0.45
+# Матчинг личность-КЛИПА → личность-ИСХОДНИКА: сравниваем уже УСРЕДНЁННЫЕ (стабильные) отпечатки, и
+# берётся argmax — порог тут лишь пол «это вообще тот же человек?» (защита от нового лица).
+_MATCH_SIM_MIN = 0.35
 
 
 def build_identities(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
@@ -834,23 +846,52 @@ def build_identities(tracks: list[SpeakerTrack]) -> list[SpeakerTrack]:
         return []
     if not all(t.embedding for t in tracks):
         return build_seats(tracks)
-    order = sorted(range(len(tracks)), key=lambda i: -(tracks[i].f1 - tracks[i].f0))
-    groups: list[list[SpeakerTrack]] = []
-    centroids: list[tuple[float, ...]] = []
-    for i in order:
-        t = tracks[i]
-        best_j, best_s = -1, -1.0
-        for j, c in enumerate(centroids):
-            s = _cos(t.embedding, c)
-            if s > best_s:
-                best_j, best_s = j, s
-        if best_j >= 0 and best_s >= _IDENTITY_SIM_MIN:
-            groups[best_j].append(t)
-            centroids[best_j] = _mean_norm([x.embedding for x in groups[best_j]])
-        else:
-            groups.append([t])
-            centroids.append(t.embedding)
-    return sorted((_aggregate_group(g) for g in groups), key=_seat_mean_cx)
+    groups = cluster_by_embedding(tracks)
+    return sorted((_aggregate_group([tracks[i] for i in g]) for g in groups), key=_seat_mean_cx)
+
+
+def cluster_by_embedding(tracks: Sequence[SpeakerTrack]) -> list[list[int]]:
+    """Индексы треков → группы по ОТПЕЧАТКУ лица. Агломерация с AVERAGE linkage. PURE.
+
+    Сливаем две ближайшие ГРУППЫ, пока их СРЕДНЯЯ взаимная похожесть ≥ _IDENTITY_SIM_MIN.
+
+    ⚠️ ПОЧЕМУ НЕ «жадно прилипнуть к ближайшему центроиду» (так было — РАЗВАЛИВАЛОСЬ на реале):
+    у человека с сильной сменой позы (профиль/наклон головы) ОТДЕЛЬНЫЕ треки «дрейфуют» к другому
+    лицу — на реальном диван-видео трек мужчины имел cos 0.44–0.52 с треками женщины, хотя его
+    собственная минимальная self-похожесть всего 0.49. Распределения ПЕРЕСЕКАЮТСЯ → порога по парам
+    не существует. Один такой merge каскадом склеивал ВСЕХ в одну личность (репро: 12 треков → 1
+    «личность» с cx=0.50 = среднее между двумя людьми → фича не включалась).
+    Average-linkage смотрит на СРЕДНЮЮ похожесть между ГРУППАМИ (свой 0.73/0.93 vs чужой 0.26 —
+    расходятся с запасом), поэтому единичный выброс кластеризацию не ломает.
+
+    Вынесено из build_identities: source-level привязке надо кластеризовать треки из НЕСКОЛЬКИХ окон
+    исходника в ГЛОБАЛЬНЫЕ личности (агрегировать по кадрам нельзя — кадры разных окон). Треки без
+    эмбеддинга пропускаются (в группы не попадают).
+    """
+    idx = [i for i, t in enumerate(tracks) if t.embedding]
+    if not idx:
+        return []
+    sim = {
+        (i, j): _cos(tracks[i].embedding, tracks[j].embedding) for i in idx for j in idx if i < j
+    }
+    groups: list[list[int]] = [[i] for i in idx]
+
+    def link(a: list[int], b: list[int]) -> float:
+        vals = [sim[(min(i, j), max(i, j))] for i in a for j in b]
+        return sum(vals) / len(vals)
+
+    while len(groups) > 1:
+        best_s, bx, by = -2.0, -1, -1
+        for x in range(len(groups)):
+            for y in range(x + 1, len(groups)):
+                s = link(groups[x], groups[y])
+                if s > best_s:
+                    best_s, bx, by = s, x, y
+        if best_s < _IDENTITY_SIM_MIN:
+            break
+        groups[bx] = groups[bx] + groups[by]
+        groups.pop(by)
+    return groups
 
 
 def _speaker_switch_regions(
@@ -864,6 +905,7 @@ def _speaker_switch_regions(
     smoothing: float,
     lock_per_shot: bool,
     cfg: SwitchConfig,
+    source: SourceBinding | None = None,
 ) -> list[TrackRegion] | None:
     """Speaker-Focus: суб-деление шота [f0,f1) на fill(лейн)/fit регионы по сменам говорящего.
 
@@ -875,7 +917,7 @@ def _speaker_switch_regions(
     """
     t0, t1 = f0 / fps, f1 / fps
     shot_turns = [tn for tn in turns if tn.t_end > t0 and tn.t_start < t1]
-    if len(shot_turns) < 2:
+    if not shot_turns:
         return None
     # Склеиваем осколки IOU-трекера в ЛИЧНОСТИ (по face-эмбеддингу; без эмбеддингов — фолбэк на
     # позиционные места), затем берём только СТАБИЛЬНЫЕ: РЕАЛЬНОЕ покрытие (не-gap кадры, где лицо
@@ -889,10 +931,27 @@ def _speaker_switch_regions(
         and s.width >= _MIN_FACE_FRAC
     ]
     if len(real) < 2:
-        return None
-    binding = bind_lanes(shot_turns, real, fps, conf_min=cfg.bind_conf_min)
-    if len({ln for ln in binding.values() if ln is not None}) < 2:
-        return None  # не 2-speaker диалог (off-screen/ambiguous/один лейн) → обычная логика
+        return None  # 0/1 лицо → обычная логика (она и делает «1 крупное → tight на нём»)
+
+    if source is not None:
+        # SOURCE-привязка (надёжна: посчитана по всему видео, где есть диалог; личности стабильны
+        # благодаря reID) → достаточно ОДНОГО говорящего в шоте. Это ФИКС МОНОЛОГА: в кадре двое,
+        # говорит один, чередования нет — но мы ЗНАЕМ его лицо из исходника → tight именно на него.
+        clip_to_src = match_identities(real, source.embeddings, sim_min=_MATCH_SIM_MIN)
+        binding = clip_binding_from_source(source.cluster_to_identity, clip_to_src)
+        min_speakers = 1
+    else:
+        # Без source-привязки надёжность берём из ЧЕРЕДОВАНИЯ в клипе → нужен диалог (2 спикера).
+        if len(shot_turns) < 2:
+            return None
+        binding = bind_lanes(shot_turns, real, fps, conf_min=cfg.bind_conf_min)
+        min_speakers = 2
+    # Кто из говорящих В ЭТОМ шоте реально привязан к видимому лицу (остальные — за кадром).
+    active_bound = {
+        ln for tn in shot_turns if (ln := binding.get(tn.speaker)) is not None and ln < len(real)
+    }
+    if len(active_bound) < min_speakers:
+        return None  # не поняли, кто говорит / говорящий за кадром → обычная логика → wide
     regions: list[TrackRegion] = []
     for sub in plan_switches(shot_turns, binding, real, crop_w_frac, t0, t1, fps, cfg):
         sf0, sf1 = round(sub.t0 * fps), round(sub.t1 * fps)
@@ -928,6 +987,7 @@ def plan_regions(
     turns: Sequence[SpeakerTurn] | None = None,
     reframe_mode: str = "auto",
     switch_cfg: SwitchConfig | None = None,
+    source_binding: SourceBinding | None = None,
 ) -> list[TrackRegion]:
     """Cut-aligned планировщик: на КАЖДЫЙ шот один режим + траектория. Сердце Pass-1. PURE.
 
@@ -972,6 +1032,7 @@ def plan_regions(
                 active, turns, f0, f1, fps,
                 crop_w_frac=crop_w_frac, smoothing=smoothing,
                 lock_per_shot=lock_per_shot, cfg=switch_cfg or SwitchConfig(),
+                source=source_binding,
             )  # fmt: skip
             if sub is not None:
                 regions.extend(sub)
@@ -1499,6 +1560,114 @@ def _write_reframe_json(out_dir: Path, clip_id: str, regions: list[TrackRegion])
     )
 
 
+def pick_binding_windows(
+    words: Sequence[Word],
+    duration: float,
+    *,
+    n: int = 2,
+    window_sec: float = 60.0,
+    min_turn_sec: float = 1.5,
+) -> list[tuple[float, float]]:
+    """Окна исходника с ДИАЛОГОМ — на них считаем source-привязку голос↔личность. PURE.
+
+    Привязке нужен КОНТРАСТ «этот говорит / этот молчит» по каждому лицу → годятся окна, где реплики
+    ЧЕРЕДУЮТСЯ между 2+ спикерами и достаточно длинные (короткие «ага» сигнала не дают). Скользим
+    окном с полушагом, оцениваем «сколько слов сказали РАЗНЫЕ спикеры длинными репликами», берём
+    top-n НЕПЕРЕСЕКАЮЩИХСЯ. Диалога нет нигде (весь исходник — монолог одного) → [] (привязывать
+    нечего: второго голоса просто нет).
+    """
+    turns = build_turns(words, 0.0, duration)
+    good = [t for t in turns if (t.t_end - t.t_start) >= min_turn_sec]
+    if len({t.speaker for t in good}) < 2:
+        return []
+    cands: list[tuple[float, float, float]] = []
+    t = 0.0
+    while t + window_sec <= max(duration, window_sec):
+        ws, we = t, t + window_sec
+        inside = [g for g in good if g.t_start >= ws and g.t_end <= we]
+        if len({g.speaker for g in inside}) >= 2:
+            cands.append((float(sum(g.n_words for g in inside)), ws, we))
+        t += window_sec / 2
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    out: list[tuple[float, float]] = []
+    for _, ws, we in cands:
+        if all(we <= s or ws >= e for s, e in out):  # непересекающиеся
+            out.append((ws, we))
+        if len(out) >= n:
+            break
+    return out
+
+
+def compute_source_binding(
+    video: Path,
+    src_w: int,
+    src_h: int,
+    fps: float,
+    words: Sequence[Word],
+    windows: Sequence[tuple[float, float]],
+    *,
+    face_fps: float = 25.0,
+    speaker_crop_scale: float = 0.55,
+    det_conf: float = 0.25,
+    conf_min: float = 0.6,
+) -> SourceBinding | None:
+    """Привязка ГОЛОС↔ЛИЧНОСТЬ по ИСХОДНИКУ (считается ОДИН раз на видео). I/O.
+
+    По каждому окну-сэмплу (pick_binding_windows — там, где есть диалог): детект + ASD + reID →
+    треки. Треки со ВСЕХ окон кластеризуем в ГЛОБАЛЬНЫЕ личности по отпечатку лица (reID → устойчиво
+    к смене камер/позиций, в отличие от позиции). Голоса «кластер→личность» собираем в КАЖДОМ окне
+    ЕГО реплик и НАКАПЛИВАЕМ, резолвим один раз → надёжная привязка. Дальше ЛЮБОЙ клип (даже
+    чисто-монологный, где чередования нет) матчит свои лица к этим личностям (match_identities) и
+    знает, КТО говорит → наводится на него.
+
+    Нет окон / <2 личностей / нет голосов → None (ЯВНО: вызыватель работает без source-привязки —
+    тогда она считается внутри клипа и требует чередования; монолог уйдёт в wide).
+    """
+    from app.pipeline.asd_reframe import score_tracks_in_segment  # noqa: PLC0415
+
+    if not windows:
+        return None
+    per_window_turns: list[list[SpeakerTurn]] = []
+    all_tracks: list[SpeakerTrack] = []
+    owner: list[int] = []
+    for wi, (ws, we) in enumerate(windows):
+        aligned = round(ws * fps) / fps
+        native = score_tracks_in_segment(
+            video, src_w, src_h, aligned, we, face_fps,
+            crop_scale=speaker_crop_scale, cuts=(), det_conf=det_conf, compute_embeddings=True,
+        )  # fmt: skip
+        tracks = [resample_track(t, face_fps, fps) for t in native]
+        per_window_turns.append(build_turns(words, aligned, we))
+        for t in tracks:
+            all_tracks.append(t)
+            owner.append(wi)
+
+    groups = cluster_by_embedding(all_tracks)
+    if len(groups) < 2:
+        return None
+    embeddings = tuple(_mean_norm([all_tracks[i].embedding for i in g]) for g in groups)
+
+    # Голоса копим ПО ОКНАМ: лейн = ГЛОБАЛЬНЫЙ индекс личности (окна имеют свои кадровые сетки, но
+    # личность — сквозная). Личности нет в окне → пустая дорожка (collect_votes её пропустит).
+    empty = SpeakerTrack(f0=0, f1=0, cx=(), width=0.0, speak=NO_ASD)
+    votes: dict[int, dict[int, int]] = {}
+    for wi, turns_w in enumerate(per_window_turns):
+        lanes: list[SpeakerTrack] = []
+        for g in groups:
+            members = [all_tracks[i] for i in g if owner[i] == wi]
+            lanes.append(_aggregate_group(members) if members else empty)
+        for spk, lane_votes in collect_votes(turns_w, lanes, fps).items():
+            votes.setdefault(spk, {})
+            for lane, w in lane_votes.items():
+                votes[spk][lane] = votes[spk].get(lane, 0) + w
+    if not votes:
+        return None
+    return SourceBinding(
+        embeddings=embeddings,
+        cluster_to_identity=resolve_binding(votes, conf_min=conf_min),
+    )
+
+
 def reframe_segment(
     video: Path,
     src_w: int,
@@ -1527,6 +1696,7 @@ def reframe_segment(
     reframe_mode: str = "auto",
     switch_cfg: SwitchConfig | None = None,
     det_conf: float = 0.5,
+    source_binding: SourceBinding | None = None,
 ) -> tuple[list[TrackRegion], bool]:
     """Сегмент → (cut-aligned регионы, face_found). Единый путь (ASD по дефолту).
 
@@ -1607,6 +1777,7 @@ def reframe_segment(
             turns=turns,
             reframe_mode=reframe_mode,
             switch_cfg=switch_cfg,
+            source_binding=source_binding,
         ),
         min_hold_sec,
         crop_w_frac=crop_w_frac if keep_distant_cutaways else None,

@@ -110,8 +110,33 @@ class TestBuildIdentities:
     def test_two_people_two_identities(self) -> None:
         from app.pipeline.stage3_reframe import build_identities
 
-        a, b = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)  # ортогональные → cos 0 < порога 0.35
+        a, b = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)  # ортогональные → cos 0 < порога
         assert len(build_identities([self._t(0, 30, 0.2, a), self._t(0, 30, 0.7, b)])) == 2
+
+    def test_drifting_track_does_not_collapse_two_people(self) -> None:
+        # РЕГРЕСС (репро на реальном видео): у человека с сильной сменой позы ОДИН трек «дрейфует» к
+        # другому лицу (cos выше порога). Жадная кластеризация по центроиду на этом склеивала ВСЕХ в
+        # одну личность. Average-linkage смотрит на СРЕДНЮЮ похожесть групп → выброс её не ломает.
+        import math
+
+        from app.pipeline.stage3_reframe import build_identities
+
+        def unit(x: float, y: float, z: float) -> tuple[float, ...]:
+            n = math.sqrt(x * x + y * y + z * z)
+            return (x / n, y / n, z / n)
+
+        a1 = unit(1.0, 0.0, 0.0)  # человек A — три «своих» трека
+        a2 = unit(0.98, 0.2, 0.0)
+        a3 = unit(0.98, 0.0, 0.2)
+        drift = unit(0.6, 0.8, 0.0)  # трек A, «уехавший» к B (cos 0.8 с b1 — ВЫШЕ порога!)
+        b1 = unit(0.0, 1.0, 0.0)  # человек B
+        b2 = unit(0.2, 0.98, 0.0)
+        ids = build_identities([
+            self._t(0, 60, 0.2, a1), self._t(0, 60, 0.2, a2), self._t(0, 60, 0.21, a3),
+            self._t(0, 20, 0.25, drift),
+            self._t(0, 60, 0.7, b1), self._t(0, 60, 0.7, b2),
+        ])  # fmt: skip
+        assert len(ids) == 2  # НЕ схлопнулось в одну личность из-за дрейфующего трека
 
     def test_no_embeddings_falls_back_to_positional_seats(self) -> None:
         from app.pipeline.stage3_reframe import build_identities, build_seats
@@ -143,6 +168,49 @@ class TestPlanRegionsSpeakerSwitch:
         assert [r.mode for r in regs] == ["fill", "fill"]
         assert abs(regs[0].t1 - 3.0) < 1e-6
         assert regs[0].points[0].cx < 0.4 and regs[1].points[0].cx > 0.5  # разные лица
+
+    def _track_emb(self, cx: float, hi: tuple[int, int], emb: tuple[float, ...]) -> object:
+        from app.pipeline.stage3_reframe import SpeakerTrack
+
+        sf = tuple(1.0 if hi[0] <= i < hi[1] else -1.0 for i in range(180))
+        return SpeakerTrack(
+            f0=0, f1=180, cx=tuple([cx] * 180), width=0.12, speak=0.0,
+            speak_frames=sf, embedding=emb,
+        )  # fmt: skip
+
+    def test_monologue_with_source_binding_goes_tight_on_speaker(self) -> None:
+        # МОНОЛОГ: 2 лица в кадре, говорит ОДИН (чередования нет) → внутри клипа привязку не
+        # вычислить. С SOURCE-привязкой (личность говорящего известна из исходника) → tight НА НЁМ.
+        from app.pipeline.speaker_switch import SourceBinding, SpeakerTurn
+        from app.pipeline.stage3_reframe import plan_regions
+
+        emb_a, emb_b = (1.0, 0.0), (0.0, 1.0)
+        left = self._track_emb(0.2, (0, 180), emb_a)  # говорит весь клип
+        right = self._track_emb(0.65, (0, 0), emb_b)  # молчит рядом
+        turns = [SpeakerTurn(0, 0.0, 6.0, 30)]  # ОДИН спикер, один турн
+        src = SourceBinding(
+            embeddings=(emb_a, emb_b), cluster_to_identity={0: 0}
+        )  # голос0 = лицо A
+        regs = plan_regions(
+            [(0, 180)], [left, right], fps=30.0, crop_w_frac=0.316,
+            turns=turns, reframe_mode="speaker", source_binding=src,
+        )  # fmt: skip
+        assert [r.mode for r in regs] == ["fill"]
+        assert regs[0].points[0].cx < 0.4  # tight на ЛЕВОМ (говорящем), а НЕ wide
+
+    def test_monologue_without_source_binding_falls_back_to_wide(self) -> None:
+        # Тот же монолог, но БЕЗ source-привязки → кто говорит, не определить → wide (безопасно).
+        from app.pipeline.speaker_switch import SpeakerTurn
+        from app.pipeline.stage3_reframe import plan_regions
+
+        emb_a, emb_b = (1.0, 0.0), (0.0, 1.0)
+        left = self._track_emb(0.2, (0, 180), emb_a)
+        right = self._track_emb(0.65, (0, 0), emb_b)
+        regs = plan_regions(
+            [(0, 180)], [left, right], fps=30.0, crop_w_frac=0.316,
+            turns=[SpeakerTurn(0, 0.0, 6.0, 30)], reframe_mode="speaker",
+        )  # fmt: skip
+        assert [r.mode for r in regs] == ["fit"]
 
     def test_backcompat_turns_none_identical_to_default(self) -> None:
         from app.pipeline.stage3_reframe import plan_regions

@@ -22,6 +22,7 @@ if TYPE_CHECKING:  # только для тайп-хинтов — рантай�
     from app.pipeline.stage3_reframe import SpeakerTrack
 
 WIDE = -1  # SubRegion.target: wide/fit фолбэк (не индекс лейна)
+_IDENTITY_SIM_MIN_DEFAULT = 0.35  # см. stage3_reframe._IDENTITY_SIM_MIN (тот же порог косинуса)
 # Порог «этот лейн реально говорит в реплике» для голоса при binding. Light-ASD: >0 ≈ говорит.
 # Ниже → голос не отдаём (off-screen спикер: ни одно лицо не говорит → кластер не привязан → None).
 _VOTE_MIN = 0.0
@@ -47,6 +48,19 @@ class SubRegion:
     t0: float
     t1: float
     target: int
+
+
+@dataclass(frozen=True)
+class SourceBinding:
+    """Привязка ГОЛОС↔ЛИЧНОСТЬ, посчитанная ОДИН раз по ИСХОДНИКУ (не по клипу).
+
+    В исходнике реплик много → голосование надёжно; личности стабильны (reID, не позиция) → привязку
+    можно применить к ЛЮБОМУ клипу, включая чисто-монологный (где внутри клипа чередования нет и
+    привязку не вычислить). Это и есть фикс монолога + устойчивость к смене камер.
+    """
+
+    embeddings: tuple[tuple[float, ...], ...]  # отпечаток каждой личности исходника
+    cluster_to_identity: dict[int, int | None]  # диар-кластер → индекс личности исходника
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,22 @@ def bind_lanes(
     выигрывало все 7 реплик независимо от говорящего). Сигнал речи = ОТКЛОНЕНИЕ ASD дорожки ВВЕРХ от
     ЕЁ базлайна (её поза — константа, сокращается). С нормализацией per-turn winner стал 6/7 верным.
     """
+    votes = collect_votes(turns, tracks, fps)
+    binding: dict[int, int | None] = resolve_binding(votes, conf_min=conf_min)
+    for turn in turns:  # спикеры без голосов → явно None (off-screen), не отсутствуют в словаре
+        binding.setdefault(turn.speaker, None)
+    return binding
+
+
+def collect_votes(
+    turns: Sequence[SpeakerTurn], tracks: Sequence[SpeakerTrack], fps: float
+) -> dict[int, dict[int, int]]:
+    """Голоса «диар-кластер → лейн/личность» по репликам. PURE. См. bind_lanes (доктрина там).
+
+    Вынесено отдельно, чтобы НАКАПЛИВАТЬ голоса по НЕСКОЛЬКИМ окнам исходника (source-level
+    привязка): личности глобальные (reID), а ASD-свидетельства собираются из разных мест видео.
+    Индекс лейна ДОЛЖЕН быть согласован между окнами (глобальный индекс личности).
+    """
     baseline: list[float] = []
     for tr in tracks:
         real = [v for v in tr.speak_frames if v > NO_ASD]
@@ -139,14 +169,74 @@ def bind_lanes(
             votes.setdefault(turn.speaker, {})
             votes[turn.speaker][best_lane] = votes[turn.speaker].get(best_lane, 0) + w
 
+    return votes
+
+
+def resolve_binding(
+    votes: dict[int, dict[int, int]], *, conf_min: float = 0.6
+) -> dict[int, int | None]:
+    """Накопленные голоса → привязка кластер→лейн/личность. PURE.
+
+    winner = argmax веса (тай → меньший индекс); confidence = вес_winner / всего; ниже conf_min →
+    None = «не уверены, кто это говорит» → вызыватель уходит в WIDE (правило «непонятно → широкий»).
+    """
     binding: dict[int, int | None] = {}
     for spk, lane_votes in votes.items():
         total = sum(lane_votes.values())
         winner = max(lane_votes, key=lambda ln: (lane_votes[ln], -ln))
         binding[spk] = winner if lane_votes[winner] / total >= conf_min else None
-    for turn in turns:  # спикеры без голосов → явно None (off-screen), не отсутствуют в словаре
-        binding.setdefault(turn.speaker, None)
     return binding
+
+
+def match_identities(
+    clip_ids: Sequence[SpeakerTrack],
+    source_embeddings: Sequence[tuple[float, ...]],
+    *,
+    sim_min: float = 0.35,
+) -> dict[int, int]:
+    """Личности КЛИПА → личности ИСХОДНИКА по отпечатку лица. PURE. {clip_idx: source_idx}.
+
+    Клип считает свои личности независимо (свои треки/эмбеддинги) — чтобы применить source-level
+    привязку «голос↔личность», надо понять, КТО из source-личностей это лицо. Матчим по максимуму
+    косинуса (≥ sim_min). Не нашли похожего (новый человек, которого не было в сэмплах) → нет записи
+    → вызыватель честно не привяжет его к голосу (→ wide), а не приклеит к случайной личности.
+    """
+    out: dict[int, int] = {}
+    for i, cid in enumerate(clip_ids):
+        if not cid.embedding:
+            continue
+        best_j, best_s = -1, -1.0
+        for j, semb in enumerate(source_embeddings):
+            if not semb:
+                continue
+            s = sum(x * y for x, y in zip(cid.embedding, semb, strict=False))
+            if s > best_s:
+                best_j, best_s = j, s
+        if best_j >= 0 and best_s >= sim_min:
+            out[i] = best_j
+    return out
+
+
+def clip_binding_from_source(
+    source_binding: dict[int, int | None],
+    clip_to_source: dict[int, int],
+) -> dict[int, int | None]:
+    """Source-привязка (голос→личность ИСХОДНИКА) + матчинг лиц клипа → привязка ДЛЯ КЛИПА. PURE.
+
+    source_binding: диар-кластер → индекс личности исходника (посчитан ОДИН раз по всему видео, где
+    есть диалог → надёжно). clip_to_source: индекс личности КЛИПА → индекс личности исходника
+    (match_identities по отпечатку). Возврат: диар-кластер → индекс личности КЛИПА.
+
+    Спикер, чьего лица НЕТ в этом клипе (говорит за кадром) → None → вызыватель уйдёт в wide /
+    удержит текущего, а не начнёт кропить случайного. Это и есть фикс МОНОЛОГА: даже если в клипе
+    ОДИН говорящий (нет чередования, привязку внутри клипа не посчитать), мы знаем его личность из
+    исходника → наводимся именно на него.
+    """
+    src_to_clip = {sj: ci for ci, sj in clip_to_source.items()}
+    return {
+        cluster: (src_to_clip.get(sj) if sj is not None else None)
+        for cluster, sj in source_binding.items()
+    }
 
 
 def fill_crop_xrange(cx: float, crop_w_frac: float) -> tuple[float, float]:
