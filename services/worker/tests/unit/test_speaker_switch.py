@@ -37,24 +37,53 @@ class TestMergeGroupsByVoice:
     """
 
     def test_two_face_clusters_of_one_speaker_merge(self) -> None:
-        groups = [[0, 1], [2], [3, 4]]  # 0=женщина, 1 и 2 = ОДИН мужчина, разбитый надвое
+        # Осколки ОДНОГО человека: живут на ОДНОМ месте (cx≈0.2) → склеиваем.
+        tracks = [
+            _track(0, 300, 0.70), _track(300, 600, 0.71),  # женщина
+            _track(0, 200, 0.20), _track(400, 600, 0.21), _track(600, 900, 0.20),  # мужчина
+        ]  # fmt: skip
+        groups = [[0, 1], [2], [3, 4]]
         votes = {10: {0: 50}, 20: {1: 30, 2: 40}}  # голос20 «зажигает» И лейн1, И лейн2
-        merged, remapped = merge_groups_by_voice(groups, votes)
+        merged, remapped = merge_groups_by_voice(groups, votes, tracks)
         assert merged == [[0, 1], [2, 3, 4]]  # лицевые кластеры мужчины склеены
         assert remapped == {10: {0: 50}, 20: {1: 70}}  # голоса тоже переехали и сложились
         assert resolve_binding(remapped, conf_min=0.6) == {10: 0, 20: 1}
 
+    def test_two_faces_in_the_same_frame_are_never_merged(self) -> None:
+        # ⚠️ ЗАЩИТА ОТ КАТАСТРОФЫ (репро: подкаст Юлия, 4K). Поза-биас ASD → у ОБОИХ лиц «главным»
+        # оказался ОДИН голос → склейка по голосу слила ДВУХ РАЗНЫХ людей в «среднего человека»
+        # (оба матчились к одной source-личности) → кроп уехал бы на ЧУЖОГО.
+        # Физический факт БЕЗ порогов: два лица, видимые ОДНОВРЕМЕННО на РАЗНЫХ позициях, — это
+        # гарантированно РАЗНЫЕ люди. Никакой reID и никакая диаризация этого не отменяют.
+        tracks = [_track(0, 600, 0.40), _track(0, 600, 0.63)]  # оба в кадре ОДНОВРЕМЕННО
+        groups = [[0], [1]]
+        votes = {10: {0: 40, 1: 35}}  # ASD ошибочно отдал ОБА лица одному голосу
+        merged, remapped = merge_groups_by_voice(groups, votes, tracks)
+        assert merged == [[0], [1]], "склеили двух людей, одновременно видимых в кадре"
+        assert remapped == votes
+
+    def test_same_person_moving_between_shots_still_merges(self) -> None:
+        # «Мафия»: человек ПЕРЕЕХАЛ (камера сменилась) — позиции разные, но ОДНОВРЕМЕННО его нет.
+        # Запрет на склейку НЕ должен ломать этот кейс.
+        tracks = [_track(0, 300, 0.19), _track(300, 600, 0.81)]  # до склейки слева, после — справа
+        groups = [[0], [1]]
+        votes = {10: {0: 40, 1: 35}}
+        merged, _ = merge_groups_by_voice(groups, votes, tracks)
+        assert merged == [[0, 1]], "человек, сменивший позицию МЕЖДУ шотами, должен остаться одним"
+
     def test_silent_person_keeps_own_identity(self) -> None:
         # У молчащего лица голосов нет → он остаётся ОТДЕЛЬНОЙ личностью (не приклеиваем к чужой).
+        tracks = [_track(0, 300, 0.2), _track(0, 300, 0.5), _track(0, 300, 0.8)]
         groups = [[0], [1], [2]]
         votes = {10: {0: 40}, 20: {1: 30}}  # лейн2 не голосует ни за кого — он молчит
-        merged, remapped = merge_groups_by_voice(groups, votes)
+        merged, remapped = merge_groups_by_voice(groups, votes, tracks)
         assert merged == [[0], [1], [2]]
         assert remapped == votes
 
     def test_no_votes_is_identity(self) -> None:
         groups = [[0], [1]]
-        assert merge_groups_by_voice(groups, {}) == (groups, {})
+        tracks = [_track(0, 100, 0.2), _track(0, 100, 0.8)]
+        assert merge_groups_by_voice(groups, {}, tracks) == (groups, {})
 
 
 def _track(f0: int, f1: int, cx: float, *, speak_hi: tuple[int, int] | None = None) -> SpeakerTrack:

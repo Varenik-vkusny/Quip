@@ -188,9 +188,42 @@ def resolve_binding(
     return binding
 
 
+_COOCCUR_MIN_FRAMES = 5  # столько общих кадров уже достаточно, чтобы считать лица одновременными
+_COOCCUR_CX_APART = 0.12  # разнос центров, при котором это ТОЧНО два разных лица (= _SEAT_MERGE_CX)
+
+
+def _mean_cx_over(t: SpeakerTrack, lo: int, hi: int) -> float | None:
+    """Средний cx дорожки на кадрах [lo,hi). PURE. Нет валидных кадров → None."""
+    vals = [v for f in range(max(lo, t.f0), min(hi, t.f1)) if (v := t.cx[f - t.f0]) is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _same_frame_conflict(
+    a: Sequence[int], b: Sequence[int], tracks: Sequence[SpeakerTrack]
+) -> bool:
+    """Есть ли кадр, где дорожки групп ВИДНЫ ОДНОВРЕМЕННО и стоят ДАЛЕКО друг от друга? PURE.
+
+    Если да — это ФИЗИЧЕСКИ разные люди (одного человека не бывает дважды в одном кадре), и
+    склеивать группы нельзя, что бы ни говорили голоса и эмбеддинги.
+    Одновременность на ОДНОМ месте (cx рядом) конфликтом НЕ считается — это дубли трекера на одном
+    лице (IOU-трекер регулярно плодит параллельные дорожки одного лица).
+    """
+    for i in a:
+        for j in b:
+            ta, tb = tracks[i], tracks[j]
+            lo, hi = max(ta.f0, tb.f0), min(ta.f1, tb.f1)
+            if hi - lo < _COOCCUR_MIN_FRAMES:
+                continue
+            ca, cb = _mean_cx_over(ta, lo, hi), _mean_cx_over(tb, lo, hi)
+            if ca is not None and cb is not None and abs(ca - cb) > _COOCCUR_CX_APART:
+                return True
+    return False
+
+
 def merge_groups_by_voice(
     groups: Sequence[Sequence[int]],
     votes: dict[int, dict[int, int]],
+    tracks: Sequence[SpeakerTrack],
 ) -> tuple[list[list[int]], dict[int, dict[int, int]]]:
     """Слить лица, обслуживающие ОДИН голос → (новые группы, пересчитанные голоса). PURE.
 
@@ -206,6 +239,13 @@ def merge_groups_by_voice(
 
     Лицо БЕЗ голосов (молчащий в кадре) остаётся ОТДЕЛЬНОЙ личностью — не приклеиваем его к чужому
     голосу (иначе кроп уедет на молчуна, когда заговорит другой).
+
+    ⚠️⚠️ ЖЁСТКИЙ ЗАПРЕТ (_same_frame_conflict): НИКОГДА не сливаем группы, чьи лица видны В ОДНОМ
+    КАДРЕ на РАЗНЫХ местах. Репро (подкаст Юлия, 4K): поза-биас ASD отдал ОБА лица одному голосу →
+    два РАЗНЫХ человека слились в «среднего» (оба матчились к одной source-личности) → кроп уехал бы
+    на ЧУЖОГО. Голос — сигнал сильный, но НЕ абсолютный; одновременность в кадре — физика, она
+    сильнее. Кейс «мафия» это не ломает: там человек меняет место МЕЖДУ шотами, а не соседствует
+    сам с собой.
     """
     # каждому лейну — голос, который он обслуживает (по максимуму веса)
     dominant: dict[int, int] = {}
@@ -220,13 +260,16 @@ def merge_groups_by_voice(
     old_to_new: dict[int, int] = {}
     for li, g in enumerate(groups):
         voice = dominant.get(li)
-        if voice is not None and voice in voice_slot:
-            slot = voice_slot[voice]
+        slot = voice_slot.get(voice) if voice is not None else None
+        # физика важнее голоса: одновременно в кадре на разных местах = разные люди
+        if slot is not None and _same_frame_conflict(merged[slot], g, tracks):
+            slot = None
+        if slot is not None:
             merged[slot].extend(g)
         else:
             slot = len(merged)
             merged.append(list(g))
-            if voice is not None:
+            if voice is not None and voice not in voice_slot:
                 voice_slot[voice] = slot
         old_to_new[li] = slot
 

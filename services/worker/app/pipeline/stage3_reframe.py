@@ -1775,12 +1775,18 @@ def compute_source_binding(
     # (замер: две личности одного мужчины — похожесть +0.48, столько же, сколько между РАЗНЫМИ
     # людьми). Порогом не лечится. Склеиваем ПО ГОЛОСУ: кто «загорается» на одном голосе — тот один
     # человек. Иначе голос привязан к осколочной личности, её режет гейт покрытия в клипе → WIDE.
-    groups, votes = merge_groups_by_voice(groups, votes)
+    groups, votes = merge_groups_by_voice(groups, votes, all_tracks)
     embeddings = tuple(_mean_norm([all_tracks[i].embedding for i in g]) for g in groups)
-    return SourceBinding(
-        embeddings=embeddings,
-        cluster_to_identity=resolve_binding(votes, conf_min=conf_min),
-    )
+    binding = resolve_binding(votes, conf_min=conf_min)
+
+    # ⚠️ ВЫРОЖДЕННАЯ привязка: два РАЗНЫХ голоса указывают на ОДНО лицо → мы просто не различаем
+    # говорящих (ASD не справился). Отдать такое в клип = держать кроп на ОДНОМ человеке, пока
+    # говорит ДРУГОЙ. Честно возвращаем None: клип уйдёт на привязку внутри себя (нужно чередование)
+    # или в wide. Лучше не навестись, чем навестись на чужого.
+    used = [i for i in binding.values() if i is not None]
+    if len(used) != len(set(used)):
+        return None
+    return SourceBinding(embeddings=embeddings, cluster_to_identity=binding)
 
 
 def reframe_segment(
