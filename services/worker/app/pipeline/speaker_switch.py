@@ -188,6 +188,57 @@ def resolve_binding(
     return binding
 
 
+def merge_groups_by_voice(
+    groups: Sequence[Sequence[int]],
+    votes: dict[int, dict[int, int]],
+) -> tuple[list[list[int]], dict[int, dict[int, int]]]:
+    """Слить лица, обслуживающие ОДИН голос → (новые группы, пересчитанные голоса). PURE.
+
+    ⚠️ ЗАЧЕМ (репро на реальном видео). reID разбивает ОДНОГО человека на несколько кластеров,
+    когда поза/свет гуляют: замер — две личности ОДНОГО мужчины имели похожесть +0.48, СТОЛЬКО ЖЕ,
+    сколько между РАЗНЫМИ людьми (+0.48). Порогом это не лечится — распределения пересекаются (та
+    же ловушка, что и везде в этом файле). Итог: голос привязывался к «осколочной» личности, а в
+    клипе её отсеивал гейт покрытия (99 кадров из 1800), хотя НАСТОЯЩЕЕ лицо было на месте → голос
+    указывал в никуда → весь монолог уходил в WIDE.
+
+    ГОЛОС — сигнал СИЛЬНЕЕ внешности: два лицевых кластера, «загорающихся» на одном и том же голосе,
+    принадлежат одному человеку, какими бы ни были их эмбеддинги. Диаризация тут надёжнее reID.
+
+    Лицо БЕЗ голосов (молчащий в кадре) остаётся ОТДЕЛЬНОЙ личностью — не приклеиваем его к чужому
+    голосу (иначе кроп уедет на молчуна, когда заговорит другой).
+    """
+    # каждому лейну — голос, который он обслуживает (по максимуму веса)
+    dominant: dict[int, int] = {}
+    best_w: dict[int, int] = {}
+    for spk, lane_votes in votes.items():
+        for lane, w in lane_votes.items():
+            if w > best_w.get(lane, 0):
+                dominant[lane], best_w[lane] = spk, w
+
+    merged: list[list[int]] = []
+    voice_slot: dict[int, int] = {}
+    old_to_new: dict[int, int] = {}
+    for li, g in enumerate(groups):
+        voice = dominant.get(li)
+        if voice is not None and voice in voice_slot:
+            slot = voice_slot[voice]
+            merged[slot].extend(g)
+        else:
+            slot = len(merged)
+            merged.append(list(g))
+            if voice is not None:
+                voice_slot[voice] = slot
+        old_to_new[li] = slot
+
+    remapped: dict[int, dict[int, int]] = {}
+    for spk, lane_votes in votes.items():
+        acc = remapped.setdefault(spk, {})
+        for lane, w in lane_votes.items():
+            slot = old_to_new[lane]
+            acc[slot] = acc.get(slot, 0) + w
+    return merged, remapped
+
+
 def clip_binding_from_source(
     source_binding: dict[int, int | None],
     clip_to_source: dict[int, int],

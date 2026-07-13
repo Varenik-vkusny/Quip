@@ -37,6 +37,7 @@ from app.pipeline.speaker_switch import (
     build_turns,
     clip_binding_from_source,
     collect_votes,
+    merge_groups_by_voice,
     plan_switches,
     resolve_binding,
 )
@@ -1703,6 +1704,8 @@ def compute_source_binding(
     speaker_crop_scale: float = 0.55,
     det_conf: float = 0.25,
     conf_min: float = 0.6,
+    scene_threshold: float = 27.0,
+    min_scene_sec: float = 0.25,
 ) -> SourceBinding | None:
     """Привязка ГОЛОС↔ЛИЧНОСТЬ по ИСХОДНИКУ (считается ОДИН раз на видео). I/O.
 
@@ -1725,9 +1728,18 @@ def compute_source_binding(
     owner: list[int] = []
     for wi, (ws, we) in enumerate(windows):
         aligned = round(ws * fps) / fps
+        # ⚠️ Окно привязки ОБЯЗАНО резаться по склейкам (как и обычный путь, reframe_segment).
+        # Иначе IOU-трекер ПЕРЕПРЫГИВАЕТ смену камеры: старый бокс одного лица пересекается с новым
+        # боксом ДРУГОГО → ОДИН трек содержит ДВУХ людей, его отпечаток = «средний человек» → все
+        # source-личности отравлены, и привязка врёт по всему видео. В мульти-камерном материале
+        # (подкаст с 2-3 камерами, сериал) склейка в 45-секундном окне — норма, а не редкость.
+        cuts = detect_scene_cuts(
+            video, aligned, we, fps, threshold=scene_threshold, min_scene_sec=min_scene_sec
+        )
         native = score_tracks_in_segment(
             video, src_w, src_h, aligned, we, face_fps,
-            crop_scale=speaker_crop_scale, cuts=(), det_conf=det_conf, compute_embeddings=True,
+            crop_scale=speaker_crop_scale, cuts=[round(c / fps * face_fps) for c in cuts],
+            det_conf=det_conf, compute_embeddings=True,
         )  # fmt: skip
         tracks = [resample_track(t, face_fps, fps) for t in native]
         per_window_turns.append(build_turns(words, aligned, we))
@@ -1738,23 +1750,33 @@ def compute_source_binding(
     groups = cluster_by_embedding(all_tracks, fps=fps)  # осколки не голосуют за состав личностей
     if len(groups) < 2:
         return None
-    embeddings = tuple(_mean_norm([all_tracks[i].embedding for i in g]) for g in groups)
 
     # Голоса копим ПО ОКНАМ: лейн = ГЛОБАЛЬНЫЙ индекс личности (окна имеют свои кадровые сетки, но
     # личность — сквозная). Личности нет в окне → пустая дорожка (collect_votes её пропустит).
     empty = SpeakerTrack(f0=0, f1=0, cx=(), width=0.0, speak=NO_ASD)
-    votes: dict[int, dict[int, int]] = {}
-    for wi, turns_w in enumerate(per_window_turns):
-        lanes: list[SpeakerTrack] = []
-        for g in groups:
-            members = [all_tracks[i] for i in g if owner[i] == wi]
-            lanes.append(_aggregate_group(members) if members else empty)
-        for spk, lane_votes in collect_votes(turns_w, lanes, fps).items():
-            votes.setdefault(spk, {})
-            for lane, w in lane_votes.items():
-                votes[spk][lane] = votes[spk].get(lane, 0) + w
+
+    def _tally(gs: list[list[int]]) -> dict[int, dict[int, int]]:
+        acc: dict[int, dict[int, int]] = {}
+        for wi, turns_w in enumerate(per_window_turns):
+            lanes: list[SpeakerTrack] = []
+            for g in gs:
+                members = [all_tracks[i] for i in g if owner[i] == wi]
+                lanes.append(_aggregate_group(members) if members else empty)
+            for spk, lane_votes in collect_votes(turns_w, lanes, fps).items():
+                acc.setdefault(spk, {})
+                for lane, w in lane_votes.items():
+                    acc[spk][lane] = acc[spk].get(lane, 0) + w
+        return acc
+
+    votes = _tally(groups)
     if not votes:
         return None
+    # ⚠️ reID разбивает ОДНОГО человека на НЕСКОЛЬКО лицевых кластеров, когда гуляет поза/свет
+    # (замер: две личности одного мужчины — похожесть +0.48, столько же, сколько между РАЗНЫМИ
+    # людьми). Порогом не лечится. Склеиваем ПО ГОЛОСУ: кто «загорается» на одном голосе — тот один
+    # человек. Иначе голос привязан к осколочной личности, её режет гейт покрытия в клипе → WIDE.
+    groups, votes = merge_groups_by_voice(groups, votes)
+    embeddings = tuple(_mean_norm([all_tracks[i].embedding for i in g]) for g in groups)
     return SourceBinding(
         embeddings=embeddings,
         cluster_to_identity=resolve_binding(votes, conf_min=conf_min),

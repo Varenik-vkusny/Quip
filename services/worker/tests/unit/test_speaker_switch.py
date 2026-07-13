@@ -17,9 +17,44 @@ from app.pipeline.speaker_switch import (
     build_turns,
     crop_iou_x,
     fill_crop_xrange,
+    merge_groups_by_voice,
     plan_switches,
+    resolve_binding,
 )
 from app.pipeline.stage3_reframe import SpeakerTrack
+
+
+class TestMergeGroupsByVoice:
+    """Один человек, разбитый на НЕСКОЛЬКО лицевых кластеров, — склеиваем ПО ГОЛОСУ.
+
+    ⚠️ ЗАЧЕМ (репро на реальном видео, кейс «монолог»). reID разбил ОДНОГО мужчину на ДВЕ
+    source-личности: их взаимная похожесть +0.48 — РОВНО столько же, сколько между РАЗНЫМИ людьми
+    (+0.48). Порогом это не лечится (распределения снова пересекаются). Дальше рвётся цепочка:
+    голос привязался к «осколочной» личности, а в клипе она отсеивается гейтом покрытия (99 кадров
+    из 1800), тогда как НАСТОЯЩЕЕ лицо живо → голос указывает в никуда → весь монолог в WIDE.
+    Сигнал сильнее внешности — ГОЛОС: два лицевых кластера, «загорающихся» на ОДНОМ голосе, это
+    один человек, какими бы ни были их эмбеддинги.
+    """
+
+    def test_two_face_clusters_of_one_speaker_merge(self) -> None:
+        groups = [[0, 1], [2], [3, 4]]  # 0=женщина, 1 и 2 = ОДИН мужчина, разбитый надвое
+        votes = {10: {0: 50}, 20: {1: 30, 2: 40}}  # голос20 «зажигает» И лейн1, И лейн2
+        merged, remapped = merge_groups_by_voice(groups, votes)
+        assert merged == [[0, 1], [2, 3, 4]]  # лицевые кластеры мужчины склеены
+        assert remapped == {10: {0: 50}, 20: {1: 70}}  # голоса тоже переехали и сложились
+        assert resolve_binding(remapped, conf_min=0.6) == {10: 0, 20: 1}
+
+    def test_silent_person_keeps_own_identity(self) -> None:
+        # У молчащего лица голосов нет → он остаётся ОТДЕЛЬНОЙ личностью (не приклеиваем к чужой).
+        groups = [[0], [1], [2]]
+        votes = {10: {0: 40}, 20: {1: 30}}  # лейн2 не голосует ни за кого — он молчит
+        merged, remapped = merge_groups_by_voice(groups, votes)
+        assert merged == [[0], [1], [2]]
+        assert remapped == votes
+
+    def test_no_votes_is_identity(self) -> None:
+        groups = [[0], [1]]
+        assert merge_groups_by_voice(groups, {}) == (groups, {})
 
 
 def _track(f0: int, f1: int, cx: float, *, speak_hi: tuple[int, int] | None = None) -> SpeakerTrack:
