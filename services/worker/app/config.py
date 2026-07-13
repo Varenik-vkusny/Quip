@@ -241,13 +241,15 @@ class Settings(BaseSettings):
     # reframe_mode='speaker' (дефолт клипа) кропит tight на говорящем и переключается синтетическим
     # cut'ом на смене реплики («вторая камера»); 'wide' = прежний широкий вид. switch_min_hold_sec
     # — главный анти-пинг-понг рычаг (реплика короче → линжер на текущем). switch_iou_beta — порог
-    # «кропы слишком похожи → wide вместо cut» (анти «фотку подвинули»). switch_bind_conf_min —
-    # уверенность привязки кластер↔лицо. Строятся в SwitchConfig на месте вызова reframe_segment.
+    # «кропы слишком похожи → wide вместо cut» (анти «фотку подвинули»). switch_bind_margin_min —
+    # НАСКОЛЬКО лучший вариант НАЗНАЧЕНИЯ «голоса↔лица» обгоняет следующий (не «уверенность голоса»:
+    # её ASD занижает поза-биасом у профильного спикера — см. resolve_binding). Строятся в
+    # SwitchConfig на месте вызова reframe_segment.
     switch_min_hold_sec: float = 1.7
     switch_iou_alpha: float = 0.15
     switch_iou_beta: float = 0.30
     switch_establish_sec: float = 0.0
-    switch_bind_conf_min: float = 0.6
+    switch_bind_margin_min: float = 0.05
     # MediaPipe face-detection confidence. Дефолт 0.5 (normal 2-shot→fit путь, обкатан). Speaker
     # mode использует switch_det_conf=0.25: спикеры в интервью смотрят ДРУГ НА ДРУГА (профиль/наклон
     # головы вниз) — на 0.5 фронтально-смещённый BlazeFace теряет их (репро: мужчина детектился 12%

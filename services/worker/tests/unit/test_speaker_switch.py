@@ -47,7 +47,7 @@ class TestMergeGroupsByVoice:
         merged, remapped = merge_groups_by_voice(groups, votes, tracks)
         assert merged == [[0, 1], [2, 3, 4]]  # лицевые кластеры мужчины склеены
         assert remapped == {10: {0: 50}, 20: {1: 70}}  # голоса тоже переехали и сложились
-        assert resolve_binding(remapped, conf_min=0.6) == {10: 0, 20: 1}
+        assert resolve_binding(remapped) == {10: 0, 20: 1}
 
     def test_two_faces_in_the_same_frame_are_never_merged(self) -> None:
         # ⚠️ ЗАЩИТА ОТ КАТАСТРОФЫ (репро: подкаст Юлия, 4K). Поза-биас ASD → у ОБОИХ лиц «главным»
@@ -240,12 +240,63 @@ class TestBindLanes:
         b = bind_lanes(turns, [lane0, lane1], 30.0)
         assert b.get(5) is None
 
-    def test_ambiguous_below_conf_is_none(self) -> None:
-        # spk0 два турна: лицо0 выигрывает один, лицо1 другой → 1:1 → conf 0.5 < 0.6 → None
+    def test_ambiguous_single_voice_is_none(self) -> None:
+        # ОДИН голос, голоса 1:1 между лицами → кто говорит, непонятно → None (правило «непонятно →
+        # широкий»). Биекция тут не спасает: вариантов назначения два и они РАВНЫ.
         turns = [SpeakerTurn(0, 0.0, 1.0, 3), SpeakerTurn(0, 1.0, 2.0, 3)]
         lane0 = _track(0, 60, 0.2, speak_hi=(0, 30))
         lane1 = _track(0, 60, 0.65, speak_hi=(30, 60))
-        assert bind_lanes(turns, [lane0, lane1], 30.0, conf_min=0.6).get(0) is None
+        assert bind_lanes(turns, [lane0, lane1], 30.0).get(0) is None
+
+
+class TestBindingIsBijection:
+    """ОДИН ГОЛОС = ОДНО ЛИЦО. Привязка — это НАЗНАЧЕНИЕ, а не независимый argmax по каждому голосу.
+
+    ⚠️ ЗАЧЕМ (репро на реальном видео, кейс 04 «couch-late» — фаундер увидел это глазами).
+    ASD поза-биасен: одно лицо (более фронтальное) «выигрывает речь» у ОБОИХ голосов. Сырые голоса:
+        s0 (женщина): лейн0=34 (44%), лейн1=44 (56%)
+        s1 (мужчина): лейн0=14 (24%), лейн1=44 (76%)
+    Независимый argmax: мужчина забирает лейн1 (76%), женщина тоже тянется к лейн1 (56%), но не
+    добирает до conf_min=0.6 → None → ВСЕ ЕЁ РЕПЛИКИ УХОДЯТ В WIDE, хотя она ГОВОРИТ и её лицо
+    прекрасно видно. Это ломает саму спеку («несколько людей → наводимся на ГОВОРЯЩЕГО»).
+    34 голоса за её собственное лицо просто выбрасывались.
+
+    Назначение с условием «один голос = одно лицо» решает это без порогов:
+        вариант A: s1→лейн1 (0.76) + s0→лейн0 (0.44) = 1.20   ✓
+        вариант B: s0→лейн1 (0.56) + s1→лейн0 (0.24) = 0.80
+    Побеждает A — верная биекция. Разница ВАРИАНТОВ (а не абсолютная уверенность голоса) и есть мера
+    надёжности: равные варианты = мы не различаем говорящих = честный None.
+    """
+
+    def test_pose_biased_asd_does_not_steal_both_voices(self) -> None:
+        votes = {0: {0: 34, 1: 44}, 1: {0: 14, 1: 44}}  # реальные числа с кейса 04
+        assert resolve_binding(votes) == {0: 0, 1: 1}
+
+    def test_both_voices_pointing_at_one_face_are_separated(self) -> None:
+        # Оба голоса тянутся к лицу0 (поза-биас), НО s0 тянется к нему СИЛЬНЕЕ (0.71 против 0.53).
+        # Назначение разводит их: s0→лицо0, s1→лицо1. Раньше оба уходили в лицо0 (вырожденная).
+        votes = {0: {0: 50, 1: 20}, 1: {0: 45, 1: 40}}
+        assert resolve_binding(votes) == {0: 0, 1: 1}
+
+    def test_indistinguishable_voices_are_none(self) -> None:
+        # А вот если оба тянутся к лицу0 ОДИНАКОВО (0.71 vs 0.75) — сигнала «кто есть кто» нет.
+        # Честно не привязываем: лучше wide, чем кроп на чужого. Это НЕ баг, это правило продукта.
+        votes = {0: {0: 50, 1: 20}, 1: {0: 45, 1: 15}}
+        assert resolve_binding(votes) == {0: None, 1: None}
+
+    def test_tie_between_arrangements_is_none(self) -> None:
+        # Оба варианта назначения равны → мы честно не знаем, кто есть кто → wide.
+        assert resolve_binding({0: {0: 10, 1: 10}, 1: {0: 10, 1: 10}}) == {0: None, 1: None}
+
+    def test_voice_without_votes_stays_unbound(self) -> None:
+        # Спикер за кадром (его лица нет) → не приклеиваем к чужому лицу.
+        b = resolve_binding({0: {0: 40}, 1: {}})
+        assert b[0] == 0 and b[1] is None
+
+    def test_more_voices_than_faces_leaves_extra_unbound(self) -> None:
+        # 3 голоса, 2 лица → третий (самый слабый) остаётся без лица, а не крадёт чужое.
+        b = resolve_binding({0: {0: 90, 1: 10}, 1: {1: 80, 0: 20}, 2: {0: 5, 1: 5}})
+        assert b[0] == 0 and b[1] == 1 and b[2] is None
 
 
 class TestPlanSwitches:

@@ -1036,7 +1036,7 @@ def _speaker_switch_regions(
         real = [g for g in build_identities(active, fps=fps) if _stable(g)]
         if len(shot_turns) < 2:
             return None
-        binding = bind_lanes(shot_turns, real, fps, conf_min=cfg.bind_conf_min)
+        binding = bind_lanes(shot_turns, real, fps, margin_min=cfg.bind_margin_min)
         min_speakers = 2
     if len(real) < 2:
         return None  # 0/1 лицо → обычная логика (она и делает «1 крупное → tight на нём»)
@@ -1703,7 +1703,7 @@ def compute_source_binding(
     face_fps: float = 25.0,
     speaker_crop_scale: float = 0.55,
     det_conf: float = 0.25,
-    conf_min: float = 0.6,
+    margin_min: float = 0.05,
     scene_threshold: float = 27.0,
     min_scene_sec: float = 0.25,
 ) -> SourceBinding | None:
@@ -1777,15 +1777,9 @@ def compute_source_binding(
     # человек. Иначе голос привязан к осколочной личности, её режет гейт покрытия в клипе → WIDE.
     groups, votes = merge_groups_by_voice(groups, votes, all_tracks)
     embeddings = tuple(_mean_norm([all_tracks[i].embedding for i in g]) for g in groups)
-    binding = resolve_binding(votes, conf_min=conf_min)
-
-    # ⚠️ ВЫРОЖДЕННАЯ привязка: два РАЗНЫХ голоса указывают на ОДНО лицо → мы просто не различаем
-    # говорящих (ASD не справился). Отдать такое в клип = держать кроп на ОДНОМ человеке, пока
-    # говорит ДРУГОЙ. Честно возвращаем None: клип уйдёт на привязку внутри себя (нужно чередование)
-    # или в wide. Лучше не навестись, чем навестись на чужого.
-    used = [i for i in binding.values() if i is not None]
-    if len(used) != len(set(used)):
-        return None
+    # resolve_binding решает ЗАДАЧУ НАЗНАЧЕНИЯ (один голос = одно лицо) → вырожденная привязка «два
+    # голоса на одно лицо» тут невозможна ПО ПОСТРОЕНИЮ (раньше её приходилось ловить постфактум).
+    binding = resolve_binding(votes, margin_min=margin_min)
     return SourceBinding(embeddings=embeddings, cluster_to_identity=binding)
 
 

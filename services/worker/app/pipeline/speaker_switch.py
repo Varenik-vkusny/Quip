@@ -26,6 +26,11 @@ _IDENTITY_SIM_MIN_DEFAULT = 0.35  # см. stage3_reframe._IDENTITY_SIM_MIN (то
 # Порог «этот лейн реально говорит в реплике» для голоса при binding. Light-ASD: >0 ≈ говорит.
 # Ниже → голос не отдаём (off-screen спикер: ни одно лицо не говорит → кластер не привязан → None).
 _VOTE_MIN = 0.0
+# Насколько лучший вариант НАЗНАЧЕНИЯ «голоса↔лица» должен обгонять следующий (в долях, на голос),
+# чтобы мы вообще кому-то поверили. Это НЕ «уверенность голоса» (её ASD поза-биасом занижает у
+# профильного спикера — см. resolve_binding), а различимость ВАРИАНТОВ. Замер (кейс 04): верный
+# вариант обгонял ошибочный на 0.20/голос; равные варианты (0.0) = мы не различаем говорящих → wide.
+_BIND_MARGIN_MIN = 0.05
 # Сентинель «на этом кадре лица нет / ASD не считался» в speak_frames места (seat). Кадры-гэпы
 # при склейке фрагментов в seat (build_seats) НЕ считаются в binding (иначе занижают средний ASD).
 NO_ASD = -99.0
@@ -71,7 +76,7 @@ class SwitchConfig:
     iou_alpha: float = 0.15
     iou_beta: float = 0.30
     establish_sec: float = 0.0  # зарезервировано под establishing-wide (P2); v1 = 0
-    bind_conf_min: float = 0.6
+    bind_margin_min: float = _BIND_MARGIN_MIN
 
 
 def build_turns(words: Sequence[Word], clip_start: float, clip_end: float) -> list[SpeakerTurn]:
@@ -103,16 +108,15 @@ def bind_lanes(
     tracks: Sequence[SpeakerTrack],
     fps: float,
     *,
-    conf_min: float = 0.6,
+    margin_min: float = _BIND_MARGIN_MIN,
 ) -> dict[int, int | None]:
     """Кластер-спикер → индекс лейна-лица (в списке ``tracks``) голосованием per-turn ASD. PURE.
 
     На каждый турн: лейн с МАКС средним speak_frames на кадрах турна (и > _VOTE_MIN — реально
-    говорит) отдаёт один голос за turn.speaker. По кластеру winner = argmax голосов (тай →
-    меньший индекс); confidence = голоса_winner / всего; < conf_min → None (ambiguous). Кластер
-    без единого голоса (все реплики без говорящего on-screen лица) → None (off-screen). tracks
-    несут speak_frames @native fps (выровнены по cx). Робастно: один шумный турн не переворачивает
-    majority по всему клипу.
+    говорит) отдаёт голос (вес = n_words) за turn.speaker. Дальше resolve_binding решает ЗАДАЧУ
+    НАЗНАЧЕНИЯ (один голос = одно лицо) — см. её docstring: независимый argmax тут ломается на
+    поза-биасе ASD. Кластер без единого голоса (все реплики без говорящего on-screen лица) → None
+    (off-screen). tracks несут speak_frames @native fps (выровнены по cx).
 
     ⚠️ БАЗЛАЙН-НОРМАЛИЗАЦИЯ (важно для интервью лицом-к-лицу): вычитаем средний ASD дорожки за весь
     шот. На профиль/tilt-съёмке (спикеры смотрят друг на друга) ASD отражает ПОЗУ (насколько лицо
@@ -121,7 +125,7 @@ def bind_lanes(
     ЕЁ базлайна (её поза — константа, сокращается). С нормализацией per-turn winner стал 6/7 верным.
     """
     votes = collect_votes(turns, tracks, fps)
-    binding: dict[int, int | None] = resolve_binding(votes, conf_min=conf_min)
+    binding: dict[int, int | None] = resolve_binding(votes, margin_min=margin_min)
     for turn in turns:  # спикеры без голосов → явно None (off-screen), не отсутствуют в словаре
         binding.setdefault(turn.speaker, None)
     return binding
@@ -172,20 +176,78 @@ def collect_votes(
     return votes
 
 
-def resolve_binding(
-    votes: dict[int, dict[int, int]], *, conf_min: float = 0.6
-) -> dict[int, int | None]:
-    """Накопленные голоса → привязка кластер→лейн/личность. PURE.
+_MAX_ASSIGN = 6  # больше голосов/лиц → перебор биекций дорог, падаем в жадный режим
 
-    winner = argmax веса (тай → меньший индекс); confidence = вес_winner / всего; ниже conf_min →
-    None = «не уверены, кто это говорит» → вызыватель уходит в WIDE (правило «непонятно → широкий»).
+
+def resolve_binding(
+    votes: dict[int, dict[int, int]], *, margin_min: float = _BIND_MARGIN_MIN
+) -> dict[int, int | None]:
+    """Накопленные голоса → привязка ГОЛОС↔ЛИЦО. ОДИН ГОЛОС = ОДНО ЛИЦО (биекция). PURE.
+
+    ⚠️ ПОЧЕМУ НЕ НЕЗАВИСИМЫЙ argmax ПО КАЖДОМУ ГОЛОСУ (так было — ЛОМАЛОСЬ на реале, кейс 04):
+    ASD поза-биасен — более фронтальное лицо «выигрывает речь» у ОБОИХ голосов. Замер:
+        s0 (женщина): лейн0=34 (44%), лейн1=44 (56%)
+        s1 (мужчина): лейн0=14 (24%), лейн1=44 (76%)
+    Независимый argmax: мужчина забирает лейн1, женщина тоже тянется туда (56%), не добирает до
+    порога уверенности → None → ВСЕ ЕЁ РЕПЛИКИ В WIDE, хотя она ГОВОРИТ и её лицо отлично видно.
+    34 голоса за ЕЁ СОБСТВЕННОЕ лицо просто выбрасывались. Это ломает спеку продукта («несколько
+    людей → наводимся на ГОВОРЯЩЕГО; wide — только когда непонятно»).
+
+    Физика: один голос принадлежит одному лицу. Значит это ЗАДАЧА НАЗНАЧЕНИЯ, а не N независимых
+    argmax'ов. Максимизируем сумму ДОЛЕЙ (доля = вес лейна / все голоса этого голоса — так «громкий»
+    спикер с кучей слов не перевешивает тихого) при условии биекции:
+        вариант A: s1→лейн1 (0.76) + s0→лейн0 (0.44) = 1.20   ✓ побеждает
+        вариант B: s0→лейн1 (0.56) + s1→лейн0 (0.24) = 0.80
+    Верная пара находится сама, БЕЗ порога уверенности.
+
+    Мера надёжности — не абсолютная уверенность голоса, а ОТРЫВ лучшего варианта назначения от
+    следующего (на голос). Варианты равны → мы реально не различаем говорящих → все None → WIDE
+    (правило «непонятно → широкий»). Голос без голосов (спикер ЗА КАДРОМ) → None: не приклеиваем
+    его к чужому лицу. Голосов больше, чем лиц → лишние остаются без лица (а не крадут чужое).
     """
-    binding: dict[int, int | None] = {}
-    for spk, lane_votes in votes.items():
-        total = sum(lane_votes.values())
-        winner = max(lane_votes, key=lambda ln: (lane_votes[ln], -ln))
-        binding[spk] = winner if lane_votes[winner] / total >= conf_min else None
-    return binding
+    from itertools import permutations  # noqa: PLC0415
+
+    voiced = sorted(s for s, lv in votes.items() if sum(lv.values()) > 0)
+    lanes = sorted({ln for lv in votes.values() for ln in lv})
+    out: dict[int, int | None] = dict.fromkeys(votes)
+    if not voiced or not lanes:
+        return out
+
+    share = {
+        s: {ln: w / sum(votes[s].values()) for ln, w in votes[s].items()} for s in voiced
+    }  # доля голоса за лейн: нормируем, чтобы многословный спикер не давил малословного
+
+    def score(assign: dict[int, int | None]) -> float:
+        return sum(share[s].get(ln, 0.0) for s, ln in assign.items() if ln is not None)
+
+    if len(voiced) > _MAX_ASSIGN or len(lanes) > _MAX_ASSIGN:  # деградируем ЯВНО, не молча
+        best_assign: dict[int, int | None] = {}
+        used: set[int] = set()
+        for s in sorted(voiced, key=lambda s: -max(share[s].values())):
+            free = [ln for ln in lanes if ln not in used]
+            if not free:
+                break
+            ln = max(free, key=lambda ln: (share[s].get(ln, 0.0), -ln))
+            best_assign[s] = ln
+            used.add(ln)
+        out.update(best_assign)
+        return out
+
+    slots = [*lanes, *([None] * max(0, len(voiced) - len(lanes)))]
+    best = second = -1.0
+    best_assign = {}
+    for perm in permutations(slots, len(voiced)):
+        cand = dict(zip(voiced, perm, strict=True))
+        sc = score(cand)
+        if sc > best:
+            best, second, best_assign = sc, best, cand
+        elif sc > second:
+            second = sc
+    # отрыв ЛУЧШЕГО варианта от следующего (на голос) — вот это и есть уверенность привязки
+    if (best - max(second, 0.0)) / len(voiced) < margin_min:
+        return out  # варианты неразличимы → никого не привязываем → WIDE
+    out.update(best_assign)
+    return out
 
 
 _COOCCUR_MIN_FRAMES = 5  # столько общих кадров уже достаточно, чтобы считать лица одновременными
