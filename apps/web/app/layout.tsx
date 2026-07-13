@@ -62,9 +62,16 @@ export const metadata: Metadata = {
   // (Google Search Console + Yandex.Webmaster give you the token). Yandex.Webmaster
   // is a P0 for the Russian market — Yandex is ~73% of RU search. Undefined env =
   // tag omitted (no empty meta).
+  //
+  // Bing has no first-class key in Next's metadata API, so it goes through `other`,
+  // which renders <meta name="msvalidate.01" content="…"> verbatim. Spread it in only
+  // when the token exists — an undefined value inside `other` would emit an empty meta.
   verification: {
     google: siteConfig.googleVerification,
     yandex: siteConfig.yandexVerification,
+    ...(siteConfig.bingVerification
+      ? { other: { "msvalidate.01": siteConfig.bingVerification } }
+      : {}),
   },
   icons: {
     icon: [

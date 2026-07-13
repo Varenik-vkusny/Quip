@@ -24,6 +24,14 @@ export const siteConfig = {
   yandexVerification:
     process.env.NEXT_PUBLIC_YANDEX_VERIFICATION ?? "4232fdc5dc030e61",
   googleVerification: process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION ?? undefined,
+  // Bing Webmaster Tools (also feeds DuckDuckGo/Ecosia, and Copilot/ChatGPT web results).
+  // Same PUBLIC-token contract as Yandex above. Bing accepts either method, and we ship
+  // BOTH for redundancy: this token renders as <meta name="msvalidate.01"> (app/layout.tsx)
+  // AND is served as a static file at /BingSiteAuth.xml (public/) — whichever check Bing
+  // runs, it passes. Keep the two in sync when rotating (the XML holds the token verbatim).
+  bingVerification:
+    process.env.NEXT_PUBLIC_BING_SITE_VERIFICATION ??
+    "1F0E4DD8A7C5A73431F5AD13C7FB27DD",
   // Yandex.Metrica counter id (PUBLIC). Drives behavioral signals for Yandex ranking
   // (Webvisor enabled in the dashboard). Env overrides for rotation; empty disables.
   yandexMetrikaId: process.env.NEXT_PUBLIC_YANDEX_METRIKA_ID ?? "109870225",
