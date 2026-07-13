@@ -65,3 +65,50 @@ def test_crop_faces_provider_various_scales_and_positions() -> None:
         ref = _ref_crop_faces_list(track, frames, scale)
         got = asd_reframe._crop_faces(track, lambda i, f=frames: f[i], scale)
         assert np.array_equal(got, ref), f"crop mismatch at scale={scale}"
+
+
+# ── _tight_face: ASD-кроп (широкий, обучен так) → ТЕСНЫЙ бокс лица для reID ──────────────────────
+# ЗАЧЕМ тест: поля ASD-кропа = ФОН, а фон у собеседников ОБЩИЙ → эмбеддер кодирует диван/стену и
+# раздувает похожесть РАЗНЫХ людей (замер: cross 0.41 → 0.23 после тесного кропа). Геометрия тесного
+# бокса ВЫВЕДЕНА из математики _crop_faces — если та поедет, reID тихо деградирует. Пиним связь.
+
+
+def _face_marked(crop_scale: float) -> tuple[np.ndarray, np.ndarray]:
+    """Кадр, где ПИКСЕЛИ ЛИЦА помечены цветом → (224-кроп ASD, тесный кроп). Доля «цвета лица»
+    показывает, сколько в кропе реального лица, а сколько фона."""
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[:, :, 1] = 200  # фон (зелёный)
+    x0, y0, x1, y1 = 120, 70, 200, 150  # бокс лица
+    frame[y0:y1, x0:x1] = (0, 0, 255)  # лицо (красный)
+    n = 15  # ≥ kernel медфильтра (13)
+    track = {
+        "frame": list(range(n)),
+        "bbox": np.array([[x0, y0, x1, y1]] * n, dtype=float),
+    }
+    crop = asd_reframe._crop_faces(track, lambda i: frame, crop_scale)[n // 2]
+    return crop, asd_reframe._tight_face(crop, crop_scale)
+
+
+def _face_frac(img: np.ndarray) -> float:
+    return float(np.mean((img[:, :, 2] > 128) & (img[:, :, 1] < 128)))  # доля красных пикселей
+
+
+def test_tight_face_keeps_the_face_and_drops_the_shared_background() -> None:
+    wide, tight = _face_marked(0.55)  # 0.55 = боевой reframe_speaker_crop_scale
+    assert wide.shape == (224, 224, 3)
+    # ASD-кроп: лицо занимает лишь ~треть — остальное фон/паддинг (модели так и надо)
+    assert _face_frac(wide) < 0.5
+    # тесный кроп: почти целиком лицо → фон (общий у собеседников) в эмбеддинг не попадает
+    assert _face_frac(tight) > 0.9, f"tight crop is only {_face_frac(tight):.0%} face"
+
+
+def test_tight_face_geometry_holds_across_crop_scales() -> None:
+    for scale in (0.25, 0.4, 0.55, 0.6):
+        _, tight = _face_marked(scale)
+        assert _face_frac(tight) > 0.9, f"tight crop leaks background at crop_scale={scale}"
+
+
+def test_tight_face_degenerate_crop_falls_back_to_input() -> None:
+    # крошечный кроп: тесный бокс выродился бы (<20px) → отдаём исходный, а не пустой массив
+    tiny = np.zeros((10, 10, 3), dtype=np.uint8)
+    assert asd_reframe._tight_face(tiny, 0.55).shape == tiny.shape

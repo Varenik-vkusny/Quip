@@ -62,18 +62,36 @@ def _crop_faces(
 
 
 # Сколько кадров дорожки эмбеддить для отпечатка личности. Поза/ракурс скачут (профиль, наклон) →
-# усредняем по разреженной выборке, чтобы отпечаток был стабильным. 12 хватает (валидация: свой-свой
-# 0.52–0.69 vs чужой 0.15 на реальном диван-видео), больше — лишний CPU.
+# усредняем по разреженной выборке, чтобы отпечаток был стабильным. 12 хватает, больше — лишний CPU.
 _EMBED_SAMPLES = 12
 
 
-def _track_embedding(faces224: np.ndarray) -> tuple[float, ...]:
-    """Кропы лица дорожки → ОДИН отпечаток личности (512-d L2-норм): mean по разреженной выборке."""
-    from app.reid.embedder import embed_faces  # noqa: PLC0415  (ленивый: тянет torch-модель)
+def _tight_face(crop224: np.ndarray, crop_scale: float) -> np.ndarray:
+    """224-кроп LR-ASD (широкий, с полями) → ТЕСНЫЙ бокс лица. Без лишнего декода — режем то, что
+    уже вырезано для ASD.
+
+    ЗАЧЕМ: ASD-кроп намеренно широкий (crop_scale=0.55) — модель так обучена. Но для reID поля =
+    ФОН (диван/стена/свет), а фон у собеседников ОБЩИЙ → SFace кодирует его и раздувает
+    similarity МЕЖДУ РАЗНЫМИ людьми. Замер на реальном видео: cross 0.411 (широкий кроп) → 0.233
+    (тесный), запас разделимости +0.140 → +0.211. Т.е. тесним не ради «похожести», а ради ЗАПАСА.
+
+    Геометрия — ровно из _crop_faces: кроп = 2·bs·(1+cs) по обеим осям, лицо (2·bs) прижато к
+    ВЕРХУ (y от 0) и центрировано по x."""
+    denom = 2.0 * (1.0 + crop_scale)
+    h, w = crop224.shape[:2]
+    x0, x1 = int(w * crop_scale / denom), int(w * (crop_scale + 2.0) / denom)
+    y1 = int(h * 2.0 / denom)
+    face = crop224[0:y1, x0:x1]
+    return face if face.size and min(face.shape[:2]) >= 20 else crop224
+
+
+def _track_embedding(faces224: np.ndarray, crop_scale: float) -> tuple[float, ...]:
+    """Кропы лица дорожки → ОДИН отпечаток личности (128-d L2-норм): mean по разреженной выборке."""
+    from app.reid.embedder import embed_faces  # noqa: PLC0415  (ленивый: тянет reID-модель)
 
     n = faces224.shape[0]
     idx = np.linspace(0, n - 1, num=min(_EMBED_SAMPLES, n)).astype(int)
-    embs = embed_faces([faces224[i] for i in idx])
+    embs = embed_faces([_tight_face(faces224[i], crop_scale) for i in idx])
     if embs.shape[0] == 0:
         return ()
     mean = embs.mean(axis=0)
@@ -243,7 +261,7 @@ def score_tracks_in_segment(
                 # v2 (identity): отпечаток ЛИЧНОСТИ по тем же кропам (без доп. декода) — среднее по
                 # РАЗРЕЖЕННОЙ выборке кадров (поза скачет → усреднение стабилизирует), L2-норм.
                 if compute_embeddings and faces224.shape[0]:
-                    embedding = _track_embedding(faces224)
+                    embedding = _track_embedding(faces224, crop_scale)
             else:
                 speak = _SILENT
             cx_series = ((tr["bbox"][:, 0] + tr["bbox"][:, 2]) / 2 / src_w).tolist()

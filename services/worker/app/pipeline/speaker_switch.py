@@ -192,7 +192,7 @@ def match_identities(
     clip_ids: Sequence[SpeakerTrack],
     source_embeddings: Sequence[tuple[float, ...]],
     *,
-    sim_min: float = 0.35,
+    sim_min: float = 0.65,
 ) -> dict[int, int]:
     """Личности КЛИПА → личности ИСХОДНИКА по отпечатку лица. PURE. {clip_idx: source_idx}.
 
@@ -200,6 +200,9 @@ def match_identities(
     привязку «голос↔личность», надо понять, КТО из source-личностей это лицо. Матчим по максимуму
     косинуса (≥ sim_min). Не нашли похожего (новый человек, которого не было в сэмплах) → нет записи
     → вызыватель честно не привяжет его к голосу (→ wide), а не приклеит к случайной личности.
+
+    ⚠️ sim_min ЗАВИСИТ ОТ ЭМБЕДДЕРА (шкала косинуса не переносима между моделями) — боевое значение
+    приходит из stage3_reframe._MATCH_SIM_MIN, там же замеры. Дефолт — под текущий SFace.
     """
     out: dict[int, int] = {}
     for i, cid in enumerate(clip_ids):

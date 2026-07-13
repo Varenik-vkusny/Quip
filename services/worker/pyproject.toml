@@ -75,13 +75,6 @@ ignore_missing_imports = true
 module = ["scenedetect", "scenedetect.*"]
 ignore_missing_imports = true
 
-# facenet-pytorch — face-reID эмбеддер (app/reid). ВАЛИДАЦИОННАЯ стадия: веса VGGFace2 =
-# research/NON-COMMERCIAL → перед продом заменить на коммерчески-чистый reID. Импортится ЛЕНИВО
-# (только reframe_mode="speaker"), поэтому в pyproject-зависимостях его намеренно НЕТ.
-[[tool.mypy.overrides]]
-module = ["facenet_pytorch", "facenet_pytorch.*"]
-ignore_missing_imports = true
-
 # boto3/botocore — нет строгих стабов (R2 S3-клиент через Any).
 [[tool.mypy.overrides]]
 module = ["boto3", "boto3.*", "botocore", "botocore.*"]
