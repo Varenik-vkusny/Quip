@@ -6,7 +6,7 @@ import { Numeral } from "@/components/ui/Numeral";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { createClipFromRange, getVideoMap } from "@/lib/api";
 import { mmss } from "@/lib/format";
-import { canExtractClip, EXTRACT } from "@/lib/plans";
+import { EXTRACT, extractStateFor } from "@/lib/plans";
 import { extraClipCheckoutHref } from "@/lib/polar";
 import { classifyMoment, type ClipLike } from "@/lib/videoMapCoverage";
 import type { ClipOut, VideoMap } from "@/lib/types";
@@ -164,13 +164,9 @@ export function VideoMapCockpit({
   const nowChapter =
     chapters.find((c) => playheadSec >= c.start && playheadSec < c.end) ?? chapters[0];
 
-  // Extract-button appearance (worker is authoritative on the gate; this is UI only): non-paid → an
-  // upgrade nudge; at/over the free cap → paywall; else the live accent CTA.
-  const extractState: ExtractState = !canExtractClip(plan)
-    ? "gated"
-    : clipCount >= EXTRACT.freeCap
-      ? "paywall"
-      : "available";
+  // Extract-button appearance (worker is authoritative on the gate; this is UI only). Pure + tested:
+  // see lib/plans.extractStateFor — an UNKNOWN plan (/usage still in flight) must NOT read as "free".
+  const extractState: ExtractState = extractStateFor(plan, clipCount);
 
   const handleExtract = useCallback(
     async (start: number, end: number) => {

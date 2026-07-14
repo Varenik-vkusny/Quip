@@ -30,6 +30,7 @@ import {
   fileFingerprint,
   ResumeError,
 } from "./uploadResilience";
+import { UsageHttpError } from "./usageRetry";
 
 // База воркера: реальный worker через env, иначе встроенный мок (/api/mock).
 const BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "/api/mock";
@@ -1037,11 +1038,22 @@ export async function createUploadJob(
   }
 }
 
-/** Живой расход (план + остаток кредитов) для UsageMeter. Бросает при недоступности —
- *  UsageMeter откатывается на дефолт free (dual-mode без воркера/auth). */
+/** Живой расход (план + остаток кредитов) для UsageMeter/UsagePill. ВСЕГДА бросает при сбое — НИКАКОГО
+ *  отката на free (тихий откат = платящему юзеру показывали «Free»; см. useUsage + usageRetry).
+ *
+ *  Two deliberate choices, both for the scale-to-zero cold start (`quip-api` runs with
+ *  containerConcurrency=8 → containers spin up often, and the first request after idle can die
+ *  before a container exists — the browser reports that as a CORS error + a rejected fetch):
+ *   • `fetchWithTimeout` — a cold container can hold the socket open and never answer; a bare
+ *     `fetch` would then NEVER settle and the meter would sit on its skeleton forever.
+ *   • `UsageHttpError` (carries the status) instead of a stringly `Error("getUsage failed: 503")` —
+ *     it's what lets `classifyUsageError` retry a cold 502/503 but fail fast on a real 401. */
 export async function getUsage(): Promise<UsageInfo> {
-  const res = await fetch(`${BASE}/usage`, { cache: "no-store", headers: await authHeaders() });
-  if (!res.ok) throw new Error(`getUsage failed: ${res.status}`);
+  const res = await fetchWithTimeout(`${BASE}/usage`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw new UsageHttpError(res.status);
   return res.json();
 }
 

@@ -18,11 +18,13 @@ import { deriveUsage, fmtMinutes, fmtVideos, useUsage } from "@/lib/useUsage";
 // data otherwise. Hero = TOTAL videos available now (monthly remaining + never-expiring
 // PAYG); the meter below is the MONTHLY pool only. Limit numbers come from billing.py via /usage.
 
-/** Pulsing placeholder while /usage loads — same shape as the real panel, so no layout jump. */
-function MeterSkeleton() {
+/** Pulsing placeholder while /usage loads — same shape as the real panel, so no layout jump.
+ *  `retrying` = the first attempt failed transiently (cold container) and we're backing off: the
+ *  plan is still UNKNOWN, so we keep the skeleton (never a guessed plan) and just explain the wait. */
+function MeterSkeleton({ retrying }: { retrying: boolean }) {
   const t = useTranslations("usageMeter");
   return (
-    <div aria-busy="true" aria-label={t("loading")}>
+    <div aria-busy="true" aria-label={retrying ? t("retrying") : t("loading")}>
       <div className="flex items-center justify-between">
         <Skeleton className="h-3 w-12" />
         <Skeleton className="h-3 w-14" />
@@ -30,6 +32,7 @@ function MeterSkeleton() {
       <Skeleton className="mt-4 h-10 w-28" />
       <Skeleton className="mt-4 h-0.5 w-full" />
       <Skeleton className="mt-4 h-10 w-full" />
+      {retrying && <p className="mt-3 text-xs leading-relaxed text-faint">{t("retrying")}</p>}
     </div>
   );
 }
@@ -67,7 +70,7 @@ function MeterError({ onRetry }: { onRetry: () => void }) {
 
 export function UsageMeter({ className }: { className?: string }) {
   const t = useTranslations("usageMeter");
-  const { status, usage, reload } = useUsage();
+  const { status, usage, retrying, reload } = useUsage();
   // Immediate feedback on click: /pricing nav can lag (cold route / slow network), and a
   // dead-looking link makes people click twice. Spinner + locked link until we leave.
   const [navigating, setNavigating] = useState(false);
@@ -76,7 +79,7 @@ export function UsageMeter({ className }: { className?: string }) {
   let plan: string | null = null;
 
   if (status === "loading") {
-    body = <MeterSkeleton />;
+    body = <MeterSkeleton retrying={retrying} />;
   } else if (status === "error" || !usage) {
     body = <MeterError onRetry={reload} />;
   } else {

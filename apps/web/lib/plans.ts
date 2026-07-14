@@ -116,3 +116,20 @@ export const EXTRACT = {
 export function canExtractClip(plan: string | null | undefined): boolean {
   return !!plan && (EXTRACT.plans as readonly string[]).includes(plan);
 }
+
+/** Which Extract-button state a viewer sees. PURE. UI only — the worker enforces the real gate.
+ *
+ * ⚠️ `plan == null` means **NOT KNOWN YET** (`/usage` still in flight — a cold container makes that
+ * window seconds long), and it is NOT the same as "free". Collapsing the two is a real bug we shipped:
+ * `canExtractClip(undefined)` is false, so an unknown plan rendered the "Upgrade to Pro" nudge AT a
+ * PAYING customer — we silently told them they weren't paying. Unknown gets its own quiet, disabled
+ * state until we actually know. (Same class as the UsageMeter rendering Free on a failed /usage.)
+ */
+export function extractStateFor(
+  plan: string | null | undefined,
+  clipCount: number,
+): "loading" | "gated" | "paywall" | "available" {
+  if (plan == null) return "loading";
+  if (!canExtractClip(plan)) return "gated";
+  return clipCount >= EXTRACT.freeCap ? "paywall" : "available";
+}

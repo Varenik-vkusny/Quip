@@ -103,6 +103,7 @@
   "usageMeter": {
     "heading": "Usage",
     "loading": "Loading your plan and limits",
+    "retrying": "Taking longer than usual — still loading your plan…",
     "errorTitle": "Couldn't load your limits",
     "errorBody": "Your plan and remaining videos didn't load — this is on our side, not your account. Try again, or email <mail>{email}</mail>.",
     "tryAgain": "Try again",

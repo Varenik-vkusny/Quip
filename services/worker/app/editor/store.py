@@ -71,16 +71,34 @@ def save_edit(
     return saved
 
 
-def ensure_edit(job_id: str, clip_id: str) -> ClipEdit:
-    """Загрузить edit, либо создать дефолт из сегмента (artifacts: disk-first / cloud)."""
+def ensure_edit(
+    job_id: str,
+    clip_id: str,
+    *,
+    segments: list[Segment] | None = None,
+    words: list[Word] | None = None,
+) -> ClipEdit:
+    """Загрузить edit, либо создать дефолт из сегмента (artifacts: disk-first / cloud).
+
+    ``segments`` / ``words`` — УЖЕ загруженные артефакты джобы (опционально). Нужны BULK-вызывателю
+    (``main._build_handoff``: EDL/FCPXML/markers/package.zip зовут ensure_edit на КАЖДЫЙ клип — на
+    30-клиповой джобе это было 30 повторных чтений сегментов И транскрипта, т.е. десятки мегабайт
+    по проводу и реальный риск 504). Передал — читаем из них; не передал — грузим сами, как раньше.
+
+    Это ИНЪЕКЦИЯ, а НЕ кэш: данные передаются вниз явно, в рамках ОДНОГО запроса, и живут ровно
+    столько, сколько живёт вызов → «протухнуть» между клипами физически не могут.
+    """
     existing = load_edit(job_id, clip_id)
     if existing is not None:
         return existing
-    segs = artifacts.load_segments_raw(job_id)
+    segs: list[Any] = (
+        list(segments) if segments is not None else artifacts.load_segments_raw(job_id)
+    )
     idx = int(clip_id.split("_")[1]) - 1  # clip_01 → 0
     if idx < 0 or idx >= len(segs):
         raise KeyError(clip_id)
-    seg = Segment.model_validate(segs[idx])
+    raw = segs[idx]
+    seg = raw if isinstance(raw, Segment) else Segment.model_validate(raw)
     # Domain 5: сидим из СОХРАНЁННОГО дефолт-стиля владельца джобы (если есть), иначе preset A.
     # Не критично для создания клипа: ошибка чтения/битый блоб → лог + фолбэк на preset A
     # (правило №8: явный фолбэк с логом, не тихий except: pass).
@@ -107,7 +125,7 @@ def ensure_edit(job_id: str, clip_id: str) -> ClipEdit:
     edit = default_clip_edit(
         clip_id,
         seg,
-        load_transcript_words(job_id),
+        words if words is not None else load_transcript_words(job_id),
         pref_style=pref_style,
         pref_highlight=pref_highlight,
         pref_hook_look=pref_hook_look,

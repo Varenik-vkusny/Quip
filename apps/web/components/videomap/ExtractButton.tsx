@@ -8,10 +8,15 @@
 // text action, so the outline's right-hand column reads as one calm column ("Clip 3" / "Extract"),
 // never a row of loud buttons.
 
-export type ExtractState = "coming" | "available" | "gated" | "paywall" | "expired";
+// `loading` = the owner's plan is NOT KNOWN YET (/usage still in flight, e.g. a cold container).
+// It must NOT collapse into `gated`: canExtractClip(undefined) is false, so an unknown plan used to
+// render the "Upgrade to Pro" nudge AT a Pro customer — i.e. we silently told a paying user they
+// weren't paying. Unknown is its own state (quiet, disabled, no upsell tag) until we actually know.
+export type ExtractState = "coming" | "loading" | "available" | "gated" | "paywall" | "expired";
 
 const LABEL: Record<ExtractState, string> = {
   coming: "Extract",
+  loading: "Extract",
   available: "Extract",
   gated: "Extract",
   paywall: "Extract",
@@ -20,6 +25,7 @@ const LABEL: Record<ExtractState, string> = {
 
 const HINT: Record<ExtractState, string> = {
   coming: "Coming soon — turn this moment into a clip",
+  loading: "Checking your plan…",
   available: "Turn this moment into a clip",
   gated: "Upgrade to Pro to extract clips",
   paywall: "You've used your free extractions for this video",
@@ -27,6 +33,7 @@ const HINT: Record<ExtractState, string> = {
 };
 
 // A small trailing tag for the upsell states only — normal case, faint, not an uppercase mono badge.
+// Deliberately NO tag for `loading`: an upsell tag on an unknown plan is the very lie we're fixing.
 const TAG: Partial<Record<ExtractState, string>> = {
   gated: "Pro",
   paywall: "$",
@@ -41,7 +48,8 @@ export function ExtractButton({
   onExtract?: () => void;
   state?: ExtractState;
 }) {
-  const isDisabled = disabled ?? (state === "coming" || state === "expired");
+  const isDisabled =
+    disabled ?? (state === "coming" || state === "expired" || state === "loading");
   const live = state === "available" && !isDisabled;
 
   if (live) {

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -590,11 +591,26 @@ def put_job_artifacts(
         cs.put_job_artifacts(job_id, meta, segments, transcript)
 
 
-def get_job_artifacts(job_id: str) -> dict[str, Any] | None:
-    """Артефакты из Postgres (cloud) → {meta, segments, transcript}. Локально → None (диск)."""
+def get_job_artifacts(
+    job_id: str, columns: Sequence[str] = cs.ARTIFACT_COLUMNS
+) -> dict[str, Any] | None:
+    """Артефакты из Postgres (cloud) → строка с ЗАПРОШЕННЫМИ колонками. Локально → None (диск).
+
+    ``columns`` сужает ``?select=`` (см. ``cs.get_job_artifacts``): читателю ``meta`` НЕ нужен
+    транскрипт (мегабайты на проводе + пиковая RAM на парсинг)."""
     if cs.cloud_enabled():
-        return cs.get_job_artifacts(job_id)
+        return cs.get_job_artifacts(job_id, columns=columns)
     return None
+
+
+def has_job_artifact(job_id: str, key: str) -> bool:
+    """Есть ли НЕ-null ``job_artifacts[key]`` (cloud), БЕЗ чтения самого блоба. Локально → False.
+
+    Локальный False корректен: на диске существование артефакта проверяет вызыватель
+    (``artifacts.has_transcript`` — disk-first), а SQLite-режим таблицы артефактов не имеет."""
+    if cs.cloud_enabled():
+        return cs.has_job_artifact(job_id, key)
+    return False
 
 
 def put_job_artifact(job_id: str, key: str, value: Any) -> None:

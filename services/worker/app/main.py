@@ -1160,10 +1160,11 @@ def get_chapters(
 
     out = artifacts.job_dir(job_id)
     out.mkdir(parents=True, exist_ok=True)
-    try:
-        artifacts.load_transcript(job_id)  # 404, если транскрипта нет нигде (диск/Postgres)
-    except JobError as e:
-        raise HTTPException(status_code=404, detail="transcript not found") from e
+    # Гейт 404 — это ВОПРОС «транскрипт есть?», а не «дай транскрипт»: has_transcript проверяет
+    # наличие файла/не-null колонки (один id по проводу). Раньше тут парсился ВЕСЬ блоб (2.18 МБ /
+    # ~33 МБ пиковой RAM на 86-мин видео) ради булева — и сразу выбрасывался.
+    if not artifacts.has_transcript(job_id):
+        raise HTTPException(status_code=404, detail="transcript not found")
     # NB: кэш chapters.json — на scratch-диске контейнера; на Modal может перегенериться на
     # холодном web-контейнере (Gemini-вызов). Перенос кэша в Postgres — follow-up (Phase C).
     cached = load_chapters(out)
@@ -1200,10 +1201,9 @@ def get_video_map(
     from app.editor.video_map import load_video_map, save_video_map
     from app.models import VideoMap
 
-    try:
-        artifacts.load_transcript(job_id)  # 404, если транскрипта нет нигде (диск/Postgres)
-    except JobError as e:
-        raise HTTPException(status_code=404, detail="transcript not found") from e
+    # 404-гейт = дешёвая проверка наличия (см. get_chapters), НЕ парсинг всего транскрипта.
+    if not artifacts.has_transcript(job_id):
+        raise HTTPException(status_code=404, detail="transcript not found")
     cached = load_video_map(job_id)
     if cached is not None and not (retry and cached.status == "failed"):
         return cached.model_dump()
@@ -1725,20 +1725,24 @@ def _build_handoff(
     явно, а не тихий пустой пакет). Карта видео (главы/моменты) — ОПЦИОНАЛЬНОЕ обогащение: нет
     (или ещё pending) → пустые chapters/markers (это не ошибка). Интервалы берём из edit-state
     (реальная правка юзера), падая на сегмент, если правок ещё нет.
+
+    ⚠️ Артефакты грузятся РОВНО ОДИН РАЗ и ПРОКИДЫВАЮТСЯ в ensure_edit. Раньше ensure_edit сам
+    перечитывал segments И transcript на КАЖДЫЙ клип: на 30-клиповой джобе это 30 полных
+    транскриптов по проводу (86-мин видео → ~65 МБ и десятки секунд) → реальный риск 504.
     """
     from app import artifacts
     from app.editor.video_map import load_video_map
 
-    meta = artifacts.load_meta(job_id)  # JobError → 404
-    segments = artifacts.load_segments(job_id)  # JobError → 404
-    artifacts.load_transcript_words(job_id)  # fail-fast: транскрипт обязателен для субтитров
+    meta = artifacts.load_meta(job_id)  # JobError → 404 (тянет ТОЛЬКО колонку meta)
+    segments = artifacts.load_segments(job_id)  # JobError → 404 (ТОЛЬКО segments)
+    words = artifacts.load_transcript_words(job_id)  # fail-fast: без транскрипта субтитров нет
 
     clips: list[HandoffClip] = []
     clip_markers: list[HandoffMarker] = []
     edits_by_id: dict[str, Any] = {}
     for i, seg in enumerate(segments, start=1):
         clip_id = f"clip_{i:02d}"
-        edit = store.ensure_edit(job_id, clip_id)
+        edit = store.ensure_edit(job_id, clip_id, segments=segments, words=words)
         edits_by_id[clip_id] = edit
         ivs = list(edit.source_intervals) or [
             SourceInterval(source_start=seg.start, source_end=seg.end)

@@ -16,6 +16,8 @@ transcript_cache (см. docs или Supabase Table Editor).
 from __future__ import annotations
 
 import os
+import re
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -61,6 +63,37 @@ def lock_applied(rows: list[dict[str, Any]]) -> bool:
     Пустой массив → версия не совпала (никакая строка не подошла под фильтр) → конфликт. PURE.
     """
     return len(rows) == 1
+
+
+_COLUMN_RE = re.compile(r"[a-z_][a-z0-9_]*")
+
+
+def _column(name: str) -> str:
+    """Валидное имя колонки (``[a-z_][a-z0-9_]*``) или ValueError. PURE.
+
+    Имена приходят ИЗ КОДА (не из пользовательского ввода), но они склеиваются в URL-параметры
+    PostgREST → валидируем ЯВНО, чтобы ``select``/фильтр нельзя было расширить опечаткой или
+    случайной склейкой (``"meta,transcript"`` одной строкой прошло бы как «колонка»).
+    """
+    if not _COLUMN_RE.fullmatch(name):
+        raise ValueError(f"bad column name: {name!r}")
+    return name
+
+
+def select_clause(columns: Sequence[str]) -> str:
+    """Колонки → PostgREST ``?select=`` (``("meta",)`` → ``"meta"``). PURE, ЕДИНЫЙ источник.
+
+    ЗАЧЕМ: строка ``job_artifacts`` несёт ВЕСЬ транскрипт (86-мин видео = 2.18 МБ на проводе /
+    ~33 МБ пиковой RAM на парсинг; 6-часовое ≈ 113 МБ). Читатель, которому нужен только
+    ``meta.fps`` (fast-path ``GET /reframe``!), ОБЯЗАН просить ТОЛЬКО ``meta``.
+
+    Пустой список — это НЕ «все колонки», а баг вызывателя → ValueError (правило №8: явная
+    ошибка вместо тихого ``select=*``, который вернул бы нас к полной строке).
+    """
+    cols = [_column(c.strip()) for c in columns]
+    if not cols:
+        raise ValueError("select_clause: empty column list (did you mean ARTIFACT_COLUMNS?)")
+    return ",".join(cols)
 
 
 # Суффикс follow-варианта плана в ключе jsonb-словаря job_artifacts.reframe_regions.
@@ -417,6 +450,10 @@ def set_source_fingerprint(job_id: str, fingerprint: str) -> None:
 
 # ─────────────────────────── job_artifacts (meta/segments/transcript) ───────────────────────────
 
+# Core-артефакты пайплайна: три jsonb-колонки ОДНОЙ строки job_artifacts. Дефолт get_job_artifacts
+# (обратная совместимость), но НЕ дефолт для читателей — те сужают до своей колонки.
+ARTIFACT_COLUMNS: tuple[str, ...] = ("meta", "segments", "transcript")
+
 
 def put_job_artifacts(
     job_id: str, meta: dict[str, Any], segments: list[Any], transcript: dict[str, Any]
@@ -431,10 +468,19 @@ def put_job_artifacts(
     r.raise_for_status()
 
 
-def get_job_artifacts(job_id: str) -> dict[str, Any] | None:
+def get_job_artifacts(
+    job_id: str, columns: Sequence[str] = ARTIFACT_COLUMNS
+) -> dict[str, Any] | None:
+    """Строка ``job_artifacts`` — ТОЛЬКО запрошенные ``columns``. None, если строки нет.
+
+    ⚠️ ``columns`` — не косметика, а бюджет памяти/трафика: дефолт (все три) тянет транскрипт
+    (мегабайты, см. ``select_clause``). Вызыватель, которому нужен один артефакт, ОБЯЗАН сузить:
+    ``get_job_artifacts(job_id, columns=("meta",))``. Один запрос на колонку дешевле, чем один
+    запрос на всё: 33 МБ пиковой RAM ради ``meta.fps`` — это не экономия round-trip'а.
+    """
     r = http.get(
         f"{_base()}/job_artifacts",
-        params={"job_id": f"eq.{job_id}", "select": "meta,segments,transcript"},
+        params={"job_id": f"eq.{job_id}", "select": select_clause(columns)},
         headers=_headers(),
         timeout=_TIMEOUT,
     )
@@ -461,16 +507,30 @@ def put_job_artifact(job_id: str, key: str, value: Any) -> None:
 
 
 def get_job_artifact(job_id: str, key: str) -> Any:
-    """Прочитать ОДНУ jsonb-колонку job_artifacts[key]; None если строки/значения нет."""
+    """Прочитать ОДНУ jsonb-колонку job_artifacts[key]; None если строки/значения нет.
+
+    Тонкая обёртка над ``get_job_artifacts(columns=(key,))`` — ОДИН путь чтения строки артефактов
+    (правило «дублируется логика → выноси в ОДНУ функцию»), а не второй свой GET.
+    """
+    row = get_job_artifacts(job_id, columns=(key,))
+    return row.get(key) if row else None
+
+
+def has_job_artifact(job_id: str, key: str) -> bool:
+    """Есть ли в ``job_artifacts[key]`` НЕ-null значение — БЕЗ выкачивания самого блоба.
+
+    Серверный фильтр ``<key>=not.is.null`` + ``select=job_id``: по проводу едет ОДИН id вместо
+    мегабайтного транскрипта. Нужен 404-гейтам ``/chapters`` и ``/video-map``, которым важно
+    ТОЛЬКО «транскрипт существует?» — они парсили его ЦЕЛИКОМ ради этого булева.
+    """
     r = http.get(
         f"{_base()}/job_artifacts",
-        params={"job_id": f"eq.{job_id}", "select": key},
+        params={"job_id": f"eq.{job_id}", _column(key): "not.is.null", "select": "job_id"},
         headers=_headers(),
         timeout=_TIMEOUT,
     )
     r.raise_for_status()
-    row = first_row(r.json())
-    return row.get(key) if row else None
+    return first_row(r.json()) is not None
 
 
 def merge_reframe_regions(
@@ -511,16 +571,11 @@ def get_reframe_regions(
     """Персистнутый reframe-payload ОДНОГО клипа (или None). Читает job_artifacts.reframe_regions
     (словарь {key: payload}) и достаёт запись ВАРИАНТА (locked → clip_id, follow → clip_id#follow —
     ``reframe_regions_key``). Locked-план НИКОГДА не отдаётся follow-читателю и наоборот: это
-    РАЗНЫЕ геометрии (статика vs пан), подмешивание = «то залипло, то поехало» на одном клипе."""
-    r = http.get(
-        f"{_base()}/job_artifacts",
-        params={"job_id": f"eq.{job_id}", "select": "reframe_regions"},
-        headers=_headers(),
-        timeout=_TIMEOUT,
-    )
-    r.raise_for_status()
-    row = first_row(r.json())
-    blob = row.get("reframe_regions") if row else None
+    РАЗНЫЕ геометрии (статика vs пан), подмешивание = «то залипло, то поехало» на одном клипе.
+
+    Читает через ``get_job_artifact`` (тот же ЕДИНЫЙ однo-колоночный путь) — запрос байт-в-байт
+    тот же (``select=reframe_regions``), транскрипт не задевается."""
+    blob = get_job_artifact(job_id, "reframe_regions")
     if not isinstance(blob, dict):
         return None
     entry = blob.get(reframe_regions_key(clip_id, lock_per_shot=lock_per_shot))
