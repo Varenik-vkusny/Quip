@@ -59,8 +59,9 @@ export function FrameTab({
   shotIntervals,
   shotOverrides,
   nowSec,
-  shotVariant,
   shotLoading,
+  shotFailed,
+  onRetryShots,
   onApplyShotRange,
   selectedShot,
   selectedShotSeed,
@@ -84,8 +85,10 @@ export function FrameTab({
   shotIntervals: SourceInterval[];
   shotOverrides?: CropOverride[];
   nowSec?: number;
-  shotVariant?: "ai" | "manual";
   shotLoading?: boolean;
+  /** Расчёт плана шотов упал → FitTimeline рисует честную ошибку + «Повторить». */
+  shotFailed?: boolean;
+  onRetryShots?: () => void;
   onApplyShotRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
   // ── P1: per-shot binding — the mode/crop/bg controls act on the SELECTED shot when one is picked ──
   selectedShot?: SelectedShot | null;
@@ -360,8 +363,9 @@ export function FrameTab({
           overrides={shotOverrides}
           nowSec={nowSec}
           busy={busy}
-          variant={shotVariant}
           loading={shotLoading}
+          failed={shotFailed}
+          onRetry={onRetryShots}
           onApplyRange={onApplyShotRange}
           selectedShot={selectedShot}
           onSelectShot={onSelectShot}

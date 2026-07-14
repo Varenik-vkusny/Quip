@@ -399,6 +399,90 @@ def render_clip_edit_job(job_id: str, clip_id: str) -> None:
         db.set_render_status(job_id, clip_id, "failed", None, f"unexpected: {e}")
 
 
+def rebake_reframe_regions_job(job_id: str, clip_id: str | None = None) -> None:
+    """Пере-испечь КАНОНИЧЕСКИЕ reframe-регионы клипа (домен 1) в БОЛЬШОМ контейнере Cloud Run Job.
+
+    ЗАЧЕМ (прод-инцидент 2026-07-13): при промахе кэша ``GET …/reframe`` раньше качал source.mp4 в
+    RAM-FS web-Service'а (8Gi, filesystem=RAM) и гонял PySceneDetect+MediaPipe+torch-ASD ВНУТРИ
+    HTTP-запроса (80–195с) → ``Memory limit of 8192 MiB exceeded`` → контейнер убит ВМЕСТЕ со всеми
+    in-flight запросами. CV принадлежит Cloud Run JOB'у (32Gi, 8 CPU, настоящий эфемерный диск) —
+    web-Service теперь лишь спавнит ЭТУ функцию (``JOB_KIND=rebake_regions``) и отвечает 202.
+
+    ЧТО ПЕЧЁМ: РОВНО тот payload, который читает fast-path ``/reframe`` и plan-read рендера —
+    ДЕФОЛТНЫЙ интервал клипа (границы сегмента из ``segment_bounds``, НЕ пользовательский трим),
+    ``lock_per_shot=True``, БЕЗ override'ов/ручных cut'ов: persisted-запись = каноническая batch-
+    геометрия, поверх которой читатель сам накладывает override'ы юзера. Тот же вызов
+    ``resolve_regions_accurate`` + ``build_persist_payload(..., fps=meta.fps)``, что делал API →
+    считаем ТО ЖЕ, просто в другом контейнере (кадровая сетка не трогается, Δ=0).
+
+    ``clip_id=None`` → печём ВСЕ клипы джоба (это же и инструмент ремедиации для юзеров, у кого
+    ``job_artifacts.reframe_regions`` вычищен/пуст). Ошибка любого клипа НЕ глотается: логируем и
+    поднимаем ``JobError`` в конце (остальные клипы всё же испеклись) → execution падает видимо.
+    """
+    from app import artifacts
+    from app.config import get_settings
+    from app.editor import reframe_cache
+    from app.models import SourceInterval
+
+    s = get_settings()
+    meta = artifacts.load_meta(job_id)
+    if clip_id is not None:
+        clip_ids = [clip_id]
+    else:
+        clip_ids = [f"clip_{i + 1:02d}" for i in range(len(artifacts.load_segments(job_id)))]
+    if not clip_ids:
+        raise JobError("reframe", f"rebake: no clips for job {job_id}")
+    # source.mp4 качаем ОДИН раз на весь прогон (в job-контейнере это дёшево: реальный диск).
+    out = artifacts.ensure_source(job_id).parent
+    failed: list[str] = []
+    for cid in clip_ids:
+        bounds = segment_bounds(job_id, cid)
+        if bounds is None:
+            raise JobError("reframe", f"rebake: no segment for {job_id}/{cid}")
+        iv = SourceInterval(source_start=bounds[0], source_end=bounds[1])
+        t0 = time.perf_counter()
+        try:
+            region_lists = reframe_cache.resolve_regions_accurate(
+                out / "source.mp4",
+                [iv],
+                [],  # канонический payload = ЧИСТЫЕ авто-регионы (override'ы накладывает читатель)
+                src_w=meta.width,
+                src_h=meta.height,
+                fps=meta.fps,
+                clip_id=cid,
+                out_dir=out,
+                cache_dir=out / "analysis",
+                mode_setting=s.reframe_mode,
+                speaker_crop_scale=s.reframe_speaker_crop_scale,
+                face_fps=s.reframe_face_fps,
+                smoothing=s.reframe_smoothing,
+                lock_per_shot=True,  # persisted-регионы ВСЕГДА locked (follow пересчитывается)
+                min_hold_sec=s.reframe_min_hold_sec,
+                speak_threshold=s.reframe_speak_threshold,
+                scene_threshold=s.reframe_scene_threshold,
+                min_scene_sec=s.reframe_min_scene_sec,
+                split_enabled=s.reframe_split_enabled,
+                wide_speak_min=s.reframe_wide_speak_min,
+            )
+            db.put_reframe_regions(
+                job_id,
+                cid,
+                reframe_cache.build_persist_payload(
+                    region_lists[0], iv.source_start, iv.source_end, fps=meta.fps
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 — падение ОДНОГО клипа не должно съесть остальные…
+            failed.append(cid)
+            _rlog.exception("rebake: FAILED job=%s clip=%s: %s", job_id, cid, e)
+            continue  # …но и не глотается: JobError ниже (правило №8)
+        _rlog.info(
+            "rebake: baked job=%s clip=%s [%.2f..%.2f] in %.1fs",
+            job_id, cid, iv.source_start, iv.source_end, time.perf_counter() - t0,
+        )  # fmt: skip
+    if failed:
+        raise JobError("reframe", f"rebake failed for {job_id}: {', '.join(failed)}")
+
+
 def agent_edit_job(run_id: str) -> None:
     """W3: фон-точка агент-чата (Modal-spawn / local-bg). Статус и события пишет run_clip_agent
     (правило №8). Биллинг НЕ трогаем — агент-путь минут не списывает."""

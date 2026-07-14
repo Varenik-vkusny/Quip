@@ -3,6 +3,7 @@
 import { Loader2, Scissors, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/Button";
 import { mmss } from "@/lib/format";
 import { shotIsManual } from "@/lib/reframeFrame";
 import type { CropOverride, SourceInterval } from "@/lib/types";
@@ -13,11 +14,11 @@ import type { CropOverride, SourceInterval } from "@/lib/types";
 // как уместить его в 9:16: Wide (весь кадр) / Tight (кроп на спикере) / Split.
 // Тут можно ПЕРЕОПРЕДЕЛИТЬ кадр на выбранных шотах.
 //
-// Три честных состояния (variant):
-//   • "ai"      — реальные границы шотов от CV (PySceneDetect): блок = реальная склейка.
-//   • "manual"  — AI-план недоступен → равные слоты как РУЧНАЯ разметка (честно подписано,
-//                 НЕ маскируется под реальные шоты — это была главная путаница).
-//   • loading   — план шотов ещё считается → скелетон, а не фейковые «шоты».
+// Честные состояния (никаких выдуманных границ — 2026-07-14, решение фаундера):
+//   • loading  — план шотов ещё считается (или сервер вернул 202 и мы поллим) → скелетон.
+//   • failed   — расчёт плана НЕ удался → явная ошибка + «Повторить» (раньше тут молча
+//                рисовались РАВНЫЕ куски под видом реальных шотов ИИ — это и был обман).
+//   • regions  — реальные границы шотов от CV (PySceneDetect): блок = реальная склейка.
 //
 // Драг по полосе → выбор СМЕЖНОГО диапазона шотов (снап к границам = целый шот).
 // [Wide / Tight / Auto] применяет режим к диапазону (Auto = убрать override).
@@ -59,10 +60,12 @@ export interface FitTimelineProps {
   nowSec?: number;
   /** Идёт сохранение/рендер: взаимодействие заблокировано. */
   busy?: boolean;
-  /** "ai" = реальные шоты от CV; "manual" = равные слоты (AI-план недоступен). */
-  variant?: "ai" | "manual";
-  /** План шотов ещё грузится → скелетон вместо полосы. */
+  /** План шотов ещё грузится (или сервер считает — 202-поллинг) → скелетон вместо полосы. */
   loading?: boolean;
+  /** Расчёт плана упал → честная ошибка + «Повторить» (НЕ выдуманные равные куски). */
+  failed?: boolean;
+  /** Повторить расчёт плана шотов (кнопка в failed-состоянии). */
+  onRetry?: () => void;
   /** Применить режим к source-диапазону выделенных регионов. mode:"auto" чистит override. */
   onApplyRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
   /** P1: шот, к которому привязаны верхние Frame-контролы + драг-пан превью (null = весь клип). */
@@ -139,8 +142,9 @@ export function FitTimeline({
   overrides = [],
   nowSec,
   busy = false,
-  variant = "ai",
   loading = false,
+  failed = false,
+  onRetry,
   onApplyRange,
   selectedShot,
   onSelectShot,
@@ -321,9 +325,9 @@ export function FitTimeline({
     return blocks.some((b) => rounded > b.t0 + 1e-3 && rounded < b.t1 - 1e-3);
   }, [blocks, nowSec, intervals, userSplits]);
 
-  const unit = variant === "manual" ? "part" : "shot";
+  const unit = "shot";
 
-  // ── loading: план шотов считается → скелетон (НЕ фейковые «шоты») ──
+  // ── loading: план шотов считается (в т.ч. сервер отдал 202 и мы поллим) → скелетон ──
   if (loading) {
     return (
       <div className="mt-2 space-y-1.5">
@@ -336,6 +340,22 @@ export function FitTimeline({
           <Loader2 className="size-3 animate-spin" />
           {t("detecting")}
         </p>
+      </div>
+    );
+  }
+
+  // ── расчёт упал → ЧЕСТНАЯ ошибка + «Повторить» ──
+  // Раньше здесь молча рисовались равные временны́е куски под видом шотов ИИ. Не показываем
+  // выдуманные границы: говорим правду и даём перезапустить расчёт.
+  if (failed) {
+    return (
+      <div className="mt-2 flex flex-col items-center gap-2 rounded-lg border border-dashed border-line bg-surface-2 px-3 py-3 text-center">
+        <p className="text-[11px] text-muted">{t("shotPlanFailed")}</p>
+        {onRetry && (
+          <Button type="button" variant="secondary" size="sm" onClick={onRetry} className="text-xs">
+            {t("retryShotPlan")}
+          </Button>
+        )}
       </div>
     );
   }
@@ -393,9 +413,6 @@ export function FitTimeline({
             <span className="ml-1.5 font-normal text-muted">
               · {t("partsCount", { count: blocks.length })}
             </span>
-          )}
-          {variant === "manual" && (
-            <span className="ml-1.5 font-normal text-muted">· {t("manualNoAiPlan")}</span>
           )}
         </span>
         <span className="text-[10px] text-muted">{selLabel}</span>
@@ -501,10 +518,10 @@ export function FitTimeline({
 
         {/* P3: merge (✕) на КАЖДОЙ внутренней границе шотов → убрать AI-рез, склеив два соседних
             шота. Появляется на hover полосы (чистый NLE-паттерн). stopPropagation на pointerdown,
-            чтобы клик по ✕ не стартовал драг-выделение. Только для реальных AI-шотов (variant="ai")
-            и когда родитель дал onCut. Граница на blocks[i+1].t0 = стык blocks[i]/blocks[i+1]. */}
+            чтобы клик по ✕ не стартовал драг-выделение. Рисуется, когда родитель дал onCut
+            (границы всегда реальные — фейкового плана больше нет). Граница на blocks[i+1].t0 =
+            стык blocks[i]/blocks[i+1]. */}
         {onCut &&
-          variant === "ai" &&
           blocks.length > 1 &&
           blocks.slice(1).map((blk, i) => {
             const frac = clamp((blk.t0 - t0) / clipDur, 0, 1);

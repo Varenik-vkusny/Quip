@@ -1366,19 +1366,91 @@ export interface ReframeRegion {
   fit_style?: string;
 }
 
-export async function getClipReframe(
+/** Ответ /reframe как ДИСКРИМИНИРОВАННЫЙ союз — статус решает, что делать (никаких «тихих» undefined).
+ *  • ready     — план готов (200).
+ *  • computing — сервер запустил фоновый расчёт (202) → ПОЛЛИТЬ тот же GET до ready.
+ *  • absent    — кэша нет, и сервер намеренно НЕ считал (204, только при compute=0).
+ *  Реальная ошибка (503 и пр.) → throw (никаких фолбэков в «пустой план»). */
+export type ReframeResult =
+  | { status: "ready"; regions: ReframeRegion[] }
+  | { status: "computing" }
+  | { status: "absent" };
+
+/** In-flight дедупликация /reframe: ключ `${jobId}/${clipId}/${compute}`.
+ *  ПРИЧИНА (прод-инцидент): /reframe гоняет тяжёлый CV (до ~3 мин, гигабайты). Редактор дёргал
+ *  ОДИН И ТОТ ЖЕ клип 3–4 раза ПАРАЛЛЕЛЬНО (load-эффект + prefetch + ревалидация на switch) —
+ *  каждый запрос стартовал СВОЙ расчёт → OOM-kill API-контейнера. Конкурентные вызовы теперь
+ *  делят ОДИН промис; запись удаляется, когда он settled (успех/ошибка) → ретрай снова считает. */
+const reframeInFlight = new Map<string, Promise<ReframeResult>>();
+
+/** ВИДИМО для тестов/диагностики: сколько запросов /reframe сейчас в полёте. */
+export function reframeInFlightCount(): number {
+  return reframeInFlight.size;
+}
+
+async function fetchClipReframe(
   jobId: string,
   clipId: string,
-): Promise<{ regions: ReframeRegion[] }> {
-  // D2: reframe-план (fit/fill/split + центры) от ЕДИНОГО frame-accurate пути (как у рендера).
-  // Заменяет прямой fetch media/<job>/reframe_<clip>.json — тот 404-ил на облаке (файл только
-  // на scratch batch-контейнера) → превью откатывалось в центр-кроп ≠ рендер.
-  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/reframe`, {
+  compute: boolean,
+  signal?: AbortSignal,
+): Promise<ReframeResult> {
+  // compute=0 → «отдай кэш, но НЕ запускай расчёт» (префетч соседей: юзер их даже не открыл).
+  const query = compute ? "" : "?compute=0";
+  const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/reframe${query}`, {
     cache: "no-store",
     headers: await authHeaders(),
+    signal,
   });
+  // ⚠️ res.ok === true и для 202 — наивный разбор дал бы regions === undefined и МОЛЧАЛИВЫЙ
+  // фейковый план. Дискриминируем ПО СТАТУСУ, до json().
+  if (res.status === 202) return { status: "computing" };
+  if (res.status === 204) return { status: "absent" };
   if (!res.ok) throw new Error(`getClipReframe failed: ${res.status}`);
-  return res.json();
+  const data = (await res.json()) as { regions?: ReframeRegion[] };
+  // Никаких тихих фолбэков: 200 без regions — это сломанный контракт, а не «пустой план».
+  if (!Array.isArray(data.regions)) throw new Error("getClipReframe: 200 without regions");
+  return { status: "ready", regions: data.regions };
+}
+
+/**
+ * D2: reframe-план (fit/fill + центры) от ЕДИНОГО frame-accurate пути (как у рендера).
+ * Заменяет прямой fetch media/<job>/reframe_<clip>.json — тот 404-ил на облаке (файл только
+ * на scratch batch-контейнера) → превью откатывалось в центр-кроп ≠ рендер.
+ *
+ * Контракт: 200 → ready · 202 → computing (поллить) · 204 → absent (только при compute:false) ·
+ * иначе throw. Конкурентные ОДИНАКОВЫЕ вызовы делят один промис (см. reframeInFlight).
+ * ⚠️ Общий промис = общий AbortController: abort одного потребителя отменит запрос для всех,
+ * кто ждёт ТОТ ЖЕ ключ. В редакторе это ровно то, что нужно (все потребители одного clipId
+ * живут в одном lifecycle и отменяются вместе на switch/unmount).
+ */
+export function getClipReframe(
+  jobId: string,
+  clipId: string,
+  opts: { compute?: boolean; signal?: AbortSignal } = {},
+): Promise<ReframeResult> {
+  const compute = opts.compute !== false;
+  const key = `${jobId}/${clipId}/${compute}`;
+  const existing = reframeInFlight.get(key);
+  if (existing) return existing;
+  const p: Promise<ReframeResult> = fetchClipReframe(jobId, clipId, compute, opts.signal).finally(
+    () => {
+      // Снимаем ТОЛЬКО свою запись (за время полёта ключ мог быть перезанят новым промисом).
+      if (reframeInFlight.get(key) === p) reframeInFlight.delete(key);
+    },
+  );
+  // ⚠️ ГОНКА: abort роняет промис АСИНХРОННО, а .finally снимает запись ещё позже. Без этого
+  // слушателя вызов сразу ПОСЛЕ abort (перезагрузка плана: stopReframe → loadReframe; StrictMode)
+  // подхватывал бы УЖЕ ОТМЕНЁННЫЙ промис и получал AbortError как «ошибку расчёта». Слушатель
+  // abort'а срабатывает СИНХРОННО внутри .abort() → слот свободен ДО следующего вызова.
+  opts.signal?.addEventListener(
+    "abort",
+    () => {
+      if (reframeInFlight.get(key) === p) reframeInFlight.delete(key);
+    },
+    { once: true },
+  );
+  reframeInFlight.set(key, p);
+  return p;
 }
 
 export async function getClipEdit(jobId: string, clipId: string): Promise<ClipEdit> {

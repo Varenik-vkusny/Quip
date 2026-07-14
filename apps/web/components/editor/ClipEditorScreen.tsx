@@ -120,6 +120,9 @@ const PausesTab = dynamic(() => import("./PausesTab").then((m) => m.PausesTab), 
 
 type Phase = "loading" | "ready" | "saving" | "error";
 
+/** Интервал поллинга /reframe, когда сервер ответил 202 «computing» (как chapters/render-поллинг). */
+const REFRAME_POLL_MS = 2500;
+
 /** Регион reframe-плана пайплайна (reframe_<clip>.json), клип-время. */
 interface RawRegion {
   t0: number;
@@ -281,9 +284,12 @@ export default function ClipEditorScreen({
   // reframe-план для честного превью кадра (D2: от эндпоинта /reframe = единый путь рендера;
   // отражает ТЕКУЩИЕ интервалы → не устаревает после сдвига/трима, и работает на облаке)
   const [rawRegions, setRawRegions] = useState<RawRegion[] | null>(null);
-  // Грузится ли план шотов (/reframe) → полоса показывает скелетон «Detecting shots…»
-  // вместо мгновенного фейкового фолбэка равными кусками (это и путало юзера).
+  // Грузится ли план шотов (/reframe) → полоса показывает скелетон «Detecting shots…».
+  // Тот же флаг покрывает ПОЛЛИНГ 202 (сервер считает в фоне) — для юзера это одно состояние.
   const [reframeLoading, setReframeLoading] = useState(true);
+  // Расчёт плана шотов упал (503 / битый контракт / сеть) → ЧЕСТНАЯ ошибка + «Повторить».
+  // Раньше тут молча рисовалась фейковая полоса равных кусков (правило «никаких тихих фолбэков»).
+  const [reframeFailed, setReframeFailed] = useState(false);
   // Показывает оверлей «Recomputing framing…» пока идёт setCropOverride + loadReframe
   // (Tight-режим гоняет face-detection — может занять несколько секунд на cold-start).
   const [recomputingFrame, setRecomputingFrame] = useState(false);
@@ -375,40 +381,120 @@ export default function ClipEditorScreen({
     }
   }, []);
 
-  // ── общий хелпер: перезапрос ASS после любой правки ──
-  // Секвенсирование: быстрые правки подряд → ответы могут прийти не по порядку,
-  // устаревший НЕ должен перетирать свежий (иначе субтитры «прыгают» назад).
-  // reframe-план превью: единый путь /reframe (как рендер), отражает текущие интервалы.
-  // Нефатально: ошибка/таймаут → null → превью fallback в центр (как было), без поломки.
-  const loadReframe = useCallback(async () => {
-    setReframeLoading(true);
-    try {
-      let data;
-      try {
-        data = await getClipReframe(jobId, clipId);
-      } catch {
-        // The on-demand reframe runs heavy CV on a scale-to-zero worker → the FIRST hit on a cold
-        // container can 503/timeout. Retry once after it warms instead of dropping straight to the
-        // equal-chunk fallback strip (which shows shot boundaries that don't match the real cuts).
-        await new Promise((r) => setTimeout(r, 1500));
-        data = await getClipReframe(jobId, clipId);
-      }
-      setRawRegions((data.regions as RawRegion[]) ?? null);
-    } catch {
-      setRawRegions(null);
-    } finally {
-      setReframeLoading(false);
-    }
-  }, [jobId, clipId]);
+  // clipIdRef = ВСЕГДА текущий активный clipId (синкается на каждый render, как editRef).
+  // Switch-race guard (Task 7): любой async-путь, выпущенный для клипа A (flushed PATCH,
+  // background revalidate, reframe-поллинг), сверяет clipIdRef ПОСЛЕ await — если юзер уже
+  // переключился на B, результат для A НЕ применяется на B (иначе cross-clip clobber).
+  // Объявлен ДО loadReframe и load-эффекта (оба читают clipIdRef): React Compiler запрещает
+  // мутировать ref в эффекте ПОСЛЕ того, как он прочитан в более раннем эффекте.
+  const clipIdRef = useRef(clipId);
+  useEffect(() => {
+    clipIdRef.current = clipId;
+  }, [clipId]);
 
   // ── neighbor-prefetch cache (Task 7): warm ±1 clips so switching paints instantly ──
-  // LRU(3): current clip + both neighbors. On switch, a cache HIT paints synchronously
-  // (no "Loading editor…" flash) and the load effect revalidates in the background.
+  // LRU(7), was 3: с тремя слотами навигация 11→12→13→14 ВЫТЕСНЯЛА 12, и возврат назад
+  // заново дёргал /reframe (тяжёлый CV) + перепрогревал соседей. Семь слотов держат окно
+  // из нескольких клипов вокруг текущего → «туда-обратно» больше не пересчитывает план.
+  // On switch, a cache HIT paints synchronously (no "Loading editor…" flash) and the load
+  // effect revalidates in the background.
   const clipCacheRef = useRef<ClipCache<ClipData> | null>(null);
-  if (clipCacheRef.current === null) clipCacheRef.current = createClipCache<ClipData>(3);
+  if (clipCacheRef.current === null) clipCacheRef.current = createClipCache<ClipData>(7);
   // Records the clip we just instant-painted from cache → the load effect for that clip
   // SKIPS the loading flash (it still revalidates in the background under the same guards).
   const paintedClipRef = useRef<string | null>(null);
+
+  // ── /reframe: поколение + отмена + поллинг ────────────────────────────────────────────
+  // ПРОД-ИНЦИДЕНТ (2026-07-14): /reframe считает тяжёлый CV (до ~3 мин, гигабайты RAM), а
+  // фронт умудрялся дёргать ОДИН клип 3–4 раза ПАРАЛЛЕЛЬНО → API-контейнер ловил OOM.
+  // Три уровня защиты: (1) in-flight дедуп в lib/api.ts, (2) seq-гард тут (шесть путей зовут
+  // loadReframe — перекрывающиеся ответы больше не перетирают друг друга), (3) AbortController
+  // (раньше `cancelled` глушил только setState — HTTP-запрос продолжал жечь сервер).
+  const reframeSeq = useRef(0);
+  const reframeAbortRef = useRef<AbortController | null>(null);
+  const reframePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Останов всего reframe-цикла: инвалидируем поколение, гасим поллинг, ОТМЕНЯЕМ HTTP.
+  const stopReframe = useCallback(() => {
+    reframeSeq.current++;
+    if (reframePollRef.current) {
+      clearTimeout(reframePollRef.current);
+      reframePollRef.current = null;
+    }
+    reframeAbortRef.current?.abort();
+    reframeAbortRef.current = null;
+  }, []);
+
+  // ── план кадра (/reframe) для превью + полосы шотов ──
+  // Контракт: 200 ready · 202 computing (сервер считает в фоне → ПОЛЛИМ тот же GET) · 503 → fail.
+  // НИКАКИХ тихих фолбэков: не удалось — reframeFailed → честная ошибка + «Повторить».
+  // `silent` — фоновая ревалидация поверх УЖЕ отрисованного из кэша плана (switch по соседям):
+  // не гасим полосу в скелетон, просто тихо обновим регионы, когда приедут.
+  const loadReframe = useCallback(
+    async (opts: { silent?: boolean } = {}) => {
+      stopReframe(); // сносим предыдущий цикл (его seq уже инвалидирован)
+      const seq = reframeSeq.current;
+      const ctl = new AbortController();
+      reframeAbortRef.current = ctl;
+      const targetClip = clipId;
+      // Актуален ли ещё этот цикл: не пришёл ли НОВЫЙ loadReframe и не сменился ли клип.
+      const alive = () => seq === reframeSeq.current && clipIdRef.current === targetClip;
+
+      setReframeFailed(false);
+      if (!opts.silent) setReframeLoading(true);
+
+      const attempt = async (): Promise<void> => {
+        try {
+          const res = await getClipReframe(jobId, targetClip, { signal: ctl.signal });
+          if (!alive()) return;
+          if (res.status === "computing") {
+            // Сервер поставил фоновый расчёт → тот же GET через ~2.5с (как chapters/render-поллинг).
+            reframePollRef.current = setTimeout(() => {
+              if (alive()) void attempt();
+            }, REFRAME_POLL_MS);
+            return;
+          }
+          if (res.status === "absent") {
+            // compute=1 не должен возвращать 204 — если вернул, это НЕ «пустой план», а сломанный
+            // контракт: показываем ошибку, а не выдуманные шоты.
+            setRawRegions(null);
+            setReframeLoading(false);
+            setReframeFailed(true);
+            return;
+          }
+          const regions = res.regions as RawRegion[];
+          setRawRegions(regions);
+          setReframeLoading(false);
+          // Догоняем кэш клипа свежими регионами (запись создаёт load-эффект ещё до плана).
+          const cached = clipCacheRef.current?.get(targetClip);
+          if (cached) clipCacheRef.current?.set(targetClip, { ...cached, regions });
+        } catch (e) {
+          if (!alive() || ctl.signal.aborted) return; // отменили/сменили клип — это не ошибка
+          if ((e as { name?: string })?.name === "AbortError") {
+            // Дедуплицированный запрос отменил ДРУГОЙ потребитель (наш signal цел) — это не сбой
+            // расчёта: переспрашиваем, а не врём юзеру про ошибку и не виснем в скелетоне.
+            reframePollRef.current = setTimeout(() => {
+              if (alive()) void attempt();
+            }, REFRAME_POLL_MS);
+            return;
+          }
+          console.warn(`[editor] reframe plan failed for ${targetClip}:`, e);
+          setRawRegions(null);
+          setReframeLoading(false);
+          setReframeFailed(true);
+        }
+      };
+      await attempt();
+    },
+    [jobId, clipId, stopReframe],
+  );
+
+  // Кнопка «Повторить» в полосе шотов (failed-состояние) — перезапуск расчёта плана.
+  const retryReframe = useCallback(() => {
+    void loadReframe();
+  }, [loadReframe]);
+
+  // Unmount: гасим поллинг + отменяем HTTP (иначе сервер продолжает считать «в никуда»).
+  useEffect(() => stopReframe, [stopReframe]);
 
   // Idle-prefetch the ±1 neighbors of `centerId` into the cache (best-effort). Logs
   // failures — NO silent swallow (a warming miss just falls back to the loading path).
@@ -425,8 +511,12 @@ export default function ClipEditorScreen({
           getClipEdit(jobId, id),
           getClipAnalysis(jobId, id),
           getClipAss(jobId, id).catch(() => ""),
-          getClipReframe(jobId, id).then(
-            (d) => (d.regions as RawRegion[]) ?? null,
+          // compute:false — ПРЕФЕТЧ НИКОГДА не запускает серверный расчёт (решение фаундера):
+          // юзер этот клип даже не открыл, а один /reframe = минуты CV и гигабайты на API.
+          // Есть в кэше сервера → мгновенно греем; нет (204 absent) → просто не кэшируем
+          // регионы, откроет клип — посчитаем по-настоящему.
+          getClipReframe(jobId, id, { compute: false }).then(
+            (r) => (r.status === "ready" ? (r.regions as RawRegion[]) : null),
             () => null,
           ),
         ])
@@ -533,17 +623,6 @@ export default function ClipEditorScreen({
     }
   }, [jobId, clipId, refreshAss, loadReframe, commitEdit, recordSnapshot]);
 
-  // clipIdRef = ВСЕГДА текущий активный clipId (синкается на каждый render, как editRef).
-  // Switch-race guard (Task 7): любой async-путь, выпущенный для клипа A (flushed PATCH,
-  // background revalidate), сверяет clipIdRef ПОСЛЕ await — если юзер уже переключился на B,
-  // результат для A НЕ применяется на B (иначе cross-clip clobber старой версией/стилем).
-  // Объявлен ДО load-эффекта (который читает clipIdRef): React Compiler запрещает мутировать
-  // ref в эффекте ПОСЛЕ того, как он прочитан в более раннем эффекте — поэтому sync-эффект тут.
-  const clipIdRef = useRef(clipId);
-  useEffect(() => {
-    clipIdRef.current = clipId;
-  }, [clipId]);
-
   // ── загрузка: edit + analysis + ASS (фатально), timeline/job (нефатально) ──
   useEffect(() => {
     let cancelled = false;
@@ -565,6 +644,7 @@ export default function ClipEditorScreen({
         setPixelDirty(false); // fresh clip — no pending pixel edits
         setRawRegions(null);
         setReframeLoading(true);
+        setReframeFailed(false);
       }
       // Switch-race guard (Task 7, IMPORTANT): on the instant-paint (cache-hit) path this
       // fetch is a BACKGROUND revalidation — the user already sees painted state and CAN edit
@@ -619,34 +699,23 @@ export default function ClipEditorScreen({
             })
             .catch(() => !cancelled && setClipIds([clipId]));
           // D2: план кадра от эндпоинта /reframe (единый путь рендера, работает и на облаке).
-          // Fetch inline (not loadReframe) so the SAME regions feed both the preview AND the
-          // prefetch cache without a duplicate request.
+          // Идёт ТОЛЬКО через loadReframe (единая точка: дедуп + seq-гард + abort + 202-поллинг).
+          // Раньше тут был ОТДЕЛЬНЫЙ inline-fetch — он и давал вторую параллельную CV-задачу на
+          // тот же клип, когда любой edit-путь одновременно звал loadReframe.
           if (!cancelled) {
-            void getClipReframe(jobId, clipId)
-              .then((data) => {
-                const regions = (data.regions as RawRegion[]) ?? null;
-                if (!cancelled) {
-                  setRawRegions(regions);
-                  setReframeLoading(false);
-                }
-                // Cache the fully-loaded current clip, then warm ±1 neighbors.
-                clipCacheRef.current?.set(clipId, {
-                  edit: editData,
-                  words: analysisData.words,
-                  ass,
-                  regions,
-                });
-                void prefetchNeighbors(clipId);
-              })
-              .catch(() => {
-                if (!cancelled) {
-                  setRawRegions(null);
-                  setReframeLoading(false);
-                }
-                // Couldn't load the frame plan → don't cache (would paint a center-crop
-                // preview on next switch); still warm neighbors so their fetch is fast.
-                void prefetchNeighbors(clipId);
-              });
+            // Кэшируем клип СРАЗУ (регионы догонит loadReframe → патчит эту же запись). Так
+            // мгновенная отрисовка при возврате работает даже пока план ещё считается.
+            const cachedRegions = clipCacheRef.current?.get(clipId)?.regions ?? null;
+            clipCacheRef.current?.set(clipId, {
+              edit: editData,
+              words: analysisData.words,
+              ass,
+              regions: cachedRegions,
+            });
+            // Мы УЖЕ отрисовали клип из кэша вместе с его планом → ревалидируем ТИХО
+            // (без скелетона поверх нормальной полосы). Иначе — обычная загрузка.
+            void loadReframe({ silent: painted && cachedRegions !== null });
+            void prefetchNeighbors(clipId);
           }
           return; // успех
         } catch (e) {
@@ -665,8 +734,11 @@ export default function ClipEditorScreen({
     return () => {
       cancelled = true;
       stopPoll();
+      // Смена клипа / unmount → ОТМЕНЯЕМ незавершённый /reframe и его поллинг. Без abort'а
+      // сервер продолжал молотить CV для клипа, который уже никому не нужен (это и клало API).
+      stopReframe();
     };
-  }, [jobId, clipId, loadKey, stopPoll, prefetchNeighbors, t]);
+  }, [jobId, clipId, loadKey, stopPoll, stopReframe, loadReframe, prefetchNeighbors, t]);
 
   const handleConflict = useCallback(() => {
     setError(t("errDataChanged"));
@@ -871,6 +943,7 @@ export default function ClipEditorScreen({
         setAssText(cached.ass);
         setRawRegions(cached.regions);
         setReframeLoading(cached.regions === null); // нет регионов в кэше → ждём ревалидацию
+        setReframeFailed(false); // новый клип — прошлая ошибка плана к нему не относится
         setEditingReply(null);
         setActivePresetId(null);
         setLibassFailed(false);
@@ -1940,27 +2013,11 @@ export default function ClipEditorScreen({
   );
 
   // ── Shots-таб: что рисуем в полосе пошотового кадрирования ──
-  // Нормально берём AI-шоты (rawRegions от /reframe). НО /reframe гоняет тяжёлый CV на лету
-  // (PySceneDetect + ASD) и на «холодном» клипе медленный/падает → loadReframe глотает в null →
-  // полоса показывала мёртвую плашку «Framing follows AI» и НИКАКОГО контроля. Фолбэк: режем
-  // клип на ровные временны́е чанки, чтобы юзер ВСЕГДА мог выделить момент и форснуть fit/fill —
-  // override (reframe_overrides) применяется на рендере и в превью независимо от AI-плана.
-  const usingFallbackShots = !(rawRegions && rawRegions.length > 0);
-  const stripRegions = useMemo<FitRegion[]>(() => {
-    if (rawRegions && rawRegions.length > 0) return rawRegions;
-    const clipDur = (edit?.source_intervals ?? []).reduce(
-      (a, iv) => a + (iv.source_end - iv.source_start),
-      0,
-    );
-    if (clipDur <= 0.1) return [];
-    const n = Math.max(6, Math.min(20, Math.round(clipDur / 3)));
-    const step = clipDur / n;
-    return Array.from({ length: n }, (_, i) => ({
-      t0: i * step,
-      t1: i === n - 1 ? clipDur : (i + 1) * step,
-      mode: "fill",
-    }));
-  }, [rawRegions, edit?.source_intervals]);
+  // ТОЛЬКО реальные AI-шоты (rawRegions от /reframe). Раньше при ошибке/таймауте плана тут
+  // молча подставлялись РАВНЫЕ временны́е чанки — юзер видел «шоты», которых нет, и думал, что
+  // это границы от ИИ. Решение фаундера (2026-07-14): говорить правду — план не посчитался →
+  // FitTimeline рисует ошибку + «Повторить» (см. reframeFailed), а не выдуманную разметку.
+  const stripRegions: FitRegion[] | null = rawRegions;
 
   // T5: аспект превью-контейнера (литералы → Tailwind JIT их видит)
   const aspectClass =
@@ -2027,8 +2084,9 @@ export default function ClipEditorScreen({
           shotIntervals={edit.source_intervals}
           shotOverrides={edit.reframe_overrides}
           nowSec={nowSec}
-          shotVariant={usingFallbackShots ? "manual" : "ai"}
           shotLoading={reframeLoading}
+          shotFailed={reframeFailed}
+          onRetryShots={retryReframe}
           onApplyShotRange={handleApplyRange}
           selectedShot={selectedShot}
           selectedShotSeed={selectedShotSeed}

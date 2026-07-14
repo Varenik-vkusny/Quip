@@ -11,6 +11,8 @@ import io
 import json
 import os
 import sys
+import threading
+import time
 import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable
@@ -2420,21 +2422,83 @@ def get_render(
     }
 
 
-@app.get("/jobs/{job_id}/clips/{clip_id}/reframe")
+# ── /reframe: тяжёлый CV НЕ живёт в HTTP-запросе web-Service'а (прод-OOM 2026-07-13) ──
+# Инцидент: промах кэша регионов → ВНУТРИ запроса качался source.mp4 в RAM-FS (8Gi, filesystem=RAM)
+# и гонялся PySceneDetect + ffmpeg-JPG@25fps + MediaPipe + torch-ASD (80–195с) → «Memory limit of
+# 8192 MiB exceeded» → контейнер убит ВМЕСТЕ со всеми in-flight запросами (массовые 503). CV теперь
+# уезжает в Cloud Run Job (32Gi, 8 CPU, реальный диск), а здесь остаются два предохранителя.
+
+# Гвардия от стампида спавнов: (job, clip) → monotonic-время последнего спавна rebake-job'а. Фронт
+# поллит тот же GET, и БЕЗ этого каждый поллинг спавнил бы новый Job. ⚠️ ПРОЦЕССНАЯ и best-effort:
+# Cloud Run держит N контейнеров, у каждого свой дикт → дубль-спавн между контейнерами возможен
+# (безвреден — rebake идемпотентен, перепечёт тот же payload). Фронт дедупит со своей стороны.
+_REBAKE_SPAWNED: dict[tuple[str, str], float] = {}
+_REBAKE_LOCK = threading.Lock()
+
+# Потолок ОДНОВРЕМЕННЫХ in-process CV (остался только edited-кейс: трим/follow — его persisted
+# payload обслужить не может). Ленивая инициализация — размер из settings в рантайме (тест может
+# подменить сам объект).
+_CV_SEMAPHORE: threading.Semaphore | None = None
+_CV_SEM_LOCK = threading.Lock()
+
+
+def _cv_semaphore() -> threading.Semaphore:
+    """Семафор in-process reframe-CV (``REFRAME_API_CV_CONCURRENCY``, деф. 2). Процессный."""
+    global _CV_SEMAPHORE
+    with _CV_SEM_LOCK:
+        if _CV_SEMAPHORE is None:
+            _CV_SEMAPHORE = threading.Semaphore(max(1, get_settings().reframe_api_cv_concurrency))
+        return _CV_SEMAPHORE
+
+
+def _claim_rebake_spawn(job_id: str, clip_id: str, ttl_sec: float) -> bool:
+    """True — этот запрос ИМЕЕТ ПРАВО заспавнить rebake-job для клипа (иначе он уже печётся).
+
+    Best-effort, ПРОЦЕССНЫЙ (см. ``_REBAKE_SPAWNED``): защищает от стампида поллингов ОДНОГО
+    контейнера, а не от дубля между контейнерами. Протухшие записи (> ttl) чистим тут же.
+    """
+    now = time.monotonic()
+    with _REBAKE_LOCK:
+        for k, ts in list(_REBAKE_SPAWNED.items()):
+            if now - ts > ttl_sec:
+                del _REBAKE_SPAWNED[k]
+        key = (job_id, clip_id)
+        if key in _REBAKE_SPAWNED:
+            return False
+        _REBAKE_SPAWNED[key] = now
+        return True
+
+
+def _drop_rebake_claim(job_id: str, clip_id: str) -> None:
+    """Снять заявку на спавн (спавн упал) → следующий поллинг честно попробует снова."""
+    with _REBAKE_LOCK:
+        _REBAKE_SPAWNED.pop((job_id, clip_id), None)
+
+
+@app.get("/jobs/{job_id}/clips/{clip_id}/reframe", response_model=None)
 def get_clip_reframe(
     job_id: str,
     clip_id: str,
+    compute: bool = True,
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Reframe-план клипа (fit/fill/split + центры) для честного превью кадра в редакторе.
+) -> dict[str, Any] | Response:
+    """Reframe-план клипа (fit/fill + центры) для честного превью кадра в редакторе.
 
-    D2: раньше фронт тянул ``media/<job>/reframe_<clip>.json`` напрямую со StaticFiles —
-    на облаке (Modal/R2) этот файл лежит только на scratch-диске batch-контейнера → 404 →
-    превью откатывалось в центр-кроп (≠ рендер). Теперь план считает ЕДИНЫЙ frame-accurate
-    путь ``resolve_regions_accurate`` (тот же, что у рендера; кэш ``analysis/acc_*.json``,
-    источник из R2 через artifacts.ensure_source) для ТЕКУЩИХ интервалов edit-state →
-    превью-план == рендер-план, и в обоих средах, и после сдвига/трима интервала.
+    Контракт (после прод-OOM 2026-07-13 — тяжёлый CV выселен из web-контейнера):
+      • **200** ``{"regions": [...]}`` — fast-path (запечённые регионы дефолтного интервала:
+        мгновенно, без CV и без скачивания source) ИЛИ успешный in-process CV edited-кейса.
+      • **202** ``{"status": "computing"}`` — промах кэша на ДЕФОЛТНОМ интервале: спавним Cloud Run
+        Job ``rebake_regions`` (32Gi, реальный диск) и просим клиента поллить ЭТОТ ЖЕ GET. CV в API
+        НЕ гоняем. Локально/dev (нет ``dispatch.spawn_enabled()``) — прежнее синхронное поведение.
+      • **204** — ``compute=false`` и регионов нет: neighbour-prefetch редактора не платит за CV.
+      • **503** — CV честно упал ИЛИ семафор in-process CV занят (+ ``Retry-After``); молчаливого
+        фолбэка в центр-кроп нет (правило №8) — состояние видно.
+
+    D2 (историческое): фронт когда-то тянул ``media/<job>/reframe_<clip>.json`` со StaticFiles — на
+    облаке этого файла нет (он на scratch batch-контейнера) → превью откатывалось в центр-кроп ≠
+    рендер. План считает ЕДИНЫЙ frame-accurate путь ``resolve_regions_accurate`` (тот же, что у
+    рендера) → превью-план == рендер-план в обеих средах и после трима/сдвига интервала.
     """
     _require_owned_job(job_id, authorization, x_user_id)
     from app import artifacts
@@ -2452,10 +2516,9 @@ def get_clip_reframe(
         raise HTTPException(status_code=404, detail="clip/segment not found") from e
 
     # ── Домен 1: FAST-PATH — реальные границы шотов из persist (без CV, без скачивания source) ──
-    # batch-пайплайн уже посчитал PySceneDetect-границы дефолтного интервала и сохранил их. Если
-    # клип НЕ тримили/не сдвигали (один интервал == дефолт), отдаём их МГНОВЕННО (+ перекрас под
-    # ручные override'ы). Это и есть фикс «полоса шотов = равные чанки»: на холодном контейнере
-    # /reframe больше не гоняет тяжёлый CV (который тормозил/падал 500) для нетронутого клипа.
+    # batch-пайплайн (или rebake-job) уже посчитал PySceneDetect-границы дефолтного интервала и
+    # сохранил их. Если клип НЕ тримили/не сдвигали (один интервал == дефолт), отдаём их МГНОВЕННО
+    # (+ перекрас под ручные override'ы/cut'ы — их накладывает читатель, payload остаётся чистым).
     persisted = db.get_reframe_regions(job_id, clip_id)
     # meta.json — лёгкий JSON-ридер (НЕ скачивание source); нужен fast-path'у для frame-snap
     # границ override-split в нативном fps (инвариант кадровой сетки). Тяжёлый ensure_source
@@ -2483,45 +2546,88 @@ def get_clip_reframe(
             )
         }
 
-    out = artifacts.ensure_source(job_id).parent
-    s = get_settings()
-    try:
-        region_lists = resolve_regions_accurate(
-            out / "source.mp4",
-            edit.source_intervals,
-            edit.reframe_overrides,
-            src_w=meta.width,
-            src_h=meta.height,
-            fps=meta.fps,
-            clip_id=clip_id,
-            out_dir=out,
-            cache_dir=out / "analysis",
-            mode_setting=s.reframe_mode,
-            speaker_crop_scale=s.reframe_speaker_crop_scale,
-            face_fps=s.reframe_face_fps,
-            smoothing=s.reframe_smoothing,
-            lock_per_shot=edit.lock_per_shot,
-            min_hold_sec=s.reframe_min_hold_sec,
-            speak_threshold=s.reframe_speak_threshold,
-            scene_threshold=s.reframe_scene_threshold,
-            min_scene_sec=s.reframe_min_scene_sec,
-            split_enabled=s.reframe_split_enabled,
-            # WYSIWYG: тот же гибрид-порог, что у рендера/батча (render_edit_to_file его передаёт).
-            # Без него превью бралось дефолтом resolve_regions_accurate (0.3) ≠ настройке → широкий
-            # план в гриде показан горизонтально (fit), а в редакторе-превью — кропом (fill).
-            wide_speak_min=s.reframe_wide_speak_min,
-            manual_cuts=edit.manual_cuts,
-            suppressed_cuts=edit.suppressed_cuts,
-        )
-    except Exception as e:  # noqa: BLE001 — тяжёлый CV мог упасть/таймаутнуть на холодном
-        # Явная ошибка вместо непрозрачного 500 (правило №8): фронт отличит «не смогли посчитать»
-        # от «считается». Без тихого фолбэка — состояние видно.
-        raise HTTPException(
-            status_code=503, detail="reframe analysis unavailable (try again shortly)"
-        ) from e
+    # ── Кэш промахнулся. Платить ли за CV — решаем ДО того, как трогать source ──
+    # compute=false (neighbour-prefetch соседних клипов в редакторе): регионов нет → 204, и ни
+    # спавна, ни CV. Клип, который юзер не открыл, не должен стоить ни одного контейнера.
+    if not compute:
+        return Response(status_code=204)
 
-    # Backfill (старые джобы до миграции): только что посчитали реальные регионы on-demand →
-    # сохраним, чтобы следующий (холодный) контейнер взял fast-path. ЖЁСТКИЕ условия безопасности:
+    s = get_settings()
+    seg = segment_bounds(job_id, clip_id)
+    # ДЕФОЛТНЫЙ кейс (клип не тримили, lock): именно его и обслуживает persisted-payload — значит
+    # его можно испечь ОДИН раз в большом контейнере и отдавать fast-path'ом всем следующим
+    # запросам. Считать это в web-контейнере = OOM (инцидент). → спавним Job, отвечаем 202.
+    bakeable = (
+        edit.lock_per_shot
+        and persisted is None
+        and seg is not None
+        and intervals_match_default(edit.source_intervals, seg[0], seg[1])
+    )
+    if bakeable and dispatch.spawn_enabled():
+        if _claim_rebake_spawn(job_id, clip_id, s.reframe_rebake_guard_sec):
+            try:
+                dispatch.spawn("rebake_regions", job_id, clip_id)
+            except Exception as e:  # noqa: BLE001 — сбой диспатча ВИДИМ (правило №8), не молча
+                _drop_rebake_claim(job_id, clip_id)  # следующий поллинг попробует снова
+                raise HTTPException(
+                    status_code=500, detail=f"reframe rebake dispatch failed: {e}"
+                ) from e
+        return JSONResponse(status_code=202, content={"status": "computing"})
+
+    # ── Честный in-process CV: edited-кейс (трим/follow/сдвиг), который persisted обслужить НЕ
+    # может, + локальный/dev-режим без job-бэкенда. Под СЕМАФОРОМ: N параллельных CV складывают
+    # source.mp4 (RAM-FS) + MediaPipe/torch → тот самый OOM. Слот не освободился за
+    # reframe_api_cv_wait_sec → честный 503 + Retry-After (не копим очередь в 300с request-timeout
+    # Cloud Run, где клиент всё равно получит 504).
+    sem = _cv_semaphore()
+    if not sem.acquire(timeout=s.reframe_api_cv_wait_sec):
+        raise HTTPException(
+            status_code=503,
+            detail="reframe analysis busy (too many concurrent computations)",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        out = artifacts.ensure_source(job_id).parent
+        try:
+            region_lists = resolve_regions_accurate(
+                out / "source.mp4",
+                edit.source_intervals,
+                edit.reframe_overrides,
+                src_w=meta.width,
+                src_h=meta.height,
+                fps=meta.fps,
+                clip_id=clip_id,
+                out_dir=out,
+                cache_dir=out / "analysis",
+                mode_setting=s.reframe_mode,
+                speaker_crop_scale=s.reframe_speaker_crop_scale,
+                face_fps=s.reframe_face_fps,
+                smoothing=s.reframe_smoothing,
+                lock_per_shot=edit.lock_per_shot,
+                min_hold_sec=s.reframe_min_hold_sec,
+                speak_threshold=s.reframe_speak_threshold,
+                scene_threshold=s.reframe_scene_threshold,
+                min_scene_sec=s.reframe_min_scene_sec,
+                split_enabled=s.reframe_split_enabled,
+                # WYSIWYG: тот же гибрид-порог, что у рендера/батча (render_edit_to_file его
+                # передаёт). Без него превью бралось дефолтом resolve_regions_accurate (0.3) ≠
+                # настройке → широкий план в гриде показан горизонтально (fit), а в
+                # редакторе-превью — кропом (fill).
+                wide_speak_min=s.reframe_wide_speak_min,
+                manual_cuts=edit.manual_cuts,
+                suppressed_cuts=edit.suppressed_cuts,
+            )
+        except Exception as e:  # noqa: BLE001 — тяжёлый CV мог упасть/таймаутнуть на холодном
+            # Явная ошибка вместо непрозрачного 500 (правило №8): фронт отличит «не смогли
+            # посчитать» от «считается». Без тихого фолбэка — состояние видно.
+            raise HTTPException(
+                status_code=503, detail="reframe analysis unavailable (try again shortly)"
+            ) from e
+    finally:
+        sem.release()
+
+    # Backfill (локальный/dev-путь и старые джобы): только что посчитали реальные регионы on-demand
+    # → сохраним, чтобы следующий (холодный) контейнер взял fast-path. ЖЁСТКИЕ условия безопасности:
     #   • persisted is None — НИКОГДА не перетираем канонический batch-entry (или чужой shift);
     #   • без reframe_overrides — region_lists ЧИСТЫЕ авто-регионы (fast-path наложит override сам);
     #   • один интервал — payload хранит ровно один дефолтный интервал.

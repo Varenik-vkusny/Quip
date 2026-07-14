@@ -30,6 +30,7 @@ def main() -> int:
         agent_edit_job,
         fanout_render_clip_job,
         generate_video_map_job,
+        rebake_reframe_regions_job,
         render_clip_edit_job,
         render_extracted_clip_job,
         run_pipeline_job,
@@ -41,6 +42,9 @@ def main() -> int:
     # (и с прежними Modal-обёртками deploy/modal/worker.py). ``fanout_render_clip`` — контейнерный
     # фан-аут рендера: координатор (``upload_job``/``run_job``) спавнит execution НА КАЖДЫЙ клип
     # (dispatch.map_render_clips_cloudrun), каждый рендерит свой клип и пишет результат в R2.
+    # ``rebake_regions`` — тяжёлый reframe-CV промаха кэша /reframe: раньше он гонялся ВНУТРИ
+    # HTTP-запроса web-Service'а (8Gi, FS=RAM) и убивал контейнер по OOM вместе со всеми соседними
+    # запросами (инцидент 2026-07-13). Аргументы: (job_id, clip_id|null → ВСЕ клипы джоба).
     handlers: dict[str, Callable[..., None]] = {
         "run_job": run_pipeline_job,
         "upload_job": run_upload_job_from_r2,
@@ -50,6 +54,7 @@ def main() -> int:
         "generate_video_map_job": generate_video_map_job,
         "fanout_render_clip": fanout_render_clip_job,
         "render_extracted_clip_job": render_extracted_clip_job,
+        "rebake_regions": rebake_reframe_regions_job,
     }
     fn = handlers.get(kind)
     if fn is None:

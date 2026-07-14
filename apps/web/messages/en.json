@@ -466,9 +466,10 @@
     "shots": {
       "detecting": "Detecting the shots in this clip…",
       "shotPlanUnavailable": "Shot plan unavailable for this clip — framing follows the AI default.",
+      "shotPlanFailed": "We couldn’t detect the shots in this clip. Rather than invent shot boundaries, we’d rather tell you straight.",
+      "retryShotPlan": "Try again",
       "shotsCount": "{count, plural, one {# shot} other {# shots}}",
       "partsCount": "{count, plural, one {# part} other {# parts}}",
-      "manualNoAiPlan": "manual (no AI shot plan)",
       "shotSelected": "Shot {n} selected",
       "partSelected": "Part {n} selected",
       "shotsRangeSelected": "Shots {from}–{to} selected",
