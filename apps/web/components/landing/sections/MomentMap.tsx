@@ -1,4 +1,4 @@
-import { getLocale } from "next-intl/server";
+import { getLocale, getTranslations } from "next-intl/server";
 import { resolveLocale } from "@/i18n/locale";
 import { getLandingContent } from "@/lib/landingContent";
 import { Container, TypeBadge } from "../components/primitives";
@@ -17,6 +17,7 @@ import { Container, TypeBadge } from "../components/primitives";
 */
 export async function MomentMap() {
   const { momentMap, typeLabel } = getLandingContent(resolveLocale(await getLocale()));
+  const t = await getTranslations("landingDemo");
 
   return (
     <section id="map" data-reel-pin className="reel relative overflow-hidden">
@@ -41,9 +42,12 @@ export async function MomentMap() {
                 className="reel-card group overflow-hidden rounded-card bg-surface shadow-card"
               >
                 <div className="relative aspect-[9/12] overflow-hidden bg-surface-3">
+                  {/* NOT decorative: these are stills of real clips and they carry the product's
+                      whole claim. An empty alt hid them from search and from screen readers alike.
+                      card.title is already localized (landingContent), so the alt is too. */}
                   <img
                     src={card.poster}
-                    alt=""
+                    alt={t("clipAlt", { caption: card.title })}
                     width={224}
                     height={298}
                     loading="lazy"

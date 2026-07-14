@@ -14,8 +14,10 @@ import { getLocale, getMessages } from "next-intl/server";
   (metadataBase, icons, og:image). Kept em-dash-free per the house brand rule.
 */
 const TITLE = "Quip: Know why your clips are worth posting";
+// Keep this between ~120 and ~155 chars: Google truncates a meta description around 155-160, and the
+// previous one (166) was being cut mid-sentence in the SERP. Ends on the differentiator, not a clause.
 const DESCRIPTION =
-  "Quip turns long videos into short vertical clips, and tells you why each one will land. Explainable AI clips with a hook, a confidence score, and the reason it works.";
+  "Quip turns long videos into short vertical clips and explains why each one will land: every clip ships with a hook, a confidence score, and a reason.";
 
 export const metadata: Metadata = {
   title: { absolute: TITLE },

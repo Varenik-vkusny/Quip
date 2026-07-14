@@ -1,31 +1,39 @@
 "use client";
 
-import { Link2, Minus, Plus, Scissors, Upload, X } from "lucide-react";
+import { AlertTriangle, Link2, Minus, Plus, Scissors, Upload, X } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/Button";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { IconButton } from "@/components/ui/IconButton";
 import { Numeral } from "@/components/ui/Numeral";
+import { RangeSlider } from "@/components/ui/RangeSlider";
+import { Switch } from "@/components/ui/Switch";
+import {
+  CLIP_GAP,
+  CLIP_PRESETS,
+  clampClipRange,
+  getClipRangeSnapshot,
+  getServerClipRangeSnapshot,
+  MAX_CLIP_SEC,
+  MIN_CLIP_SEC,
+  matchPreset,
+  setClipRange,
+  subscribeClipRange,
+  type ClipRange,
+  type PresetId,
+} from "@/lib/clipLength";
 import { cn } from "@/lib/cn";
 import { isAcceptedVideoFile } from "@/lib/videoFile";
 
 const MIN_CLIPS = 1;
 const MAX_CLIPS = 30; // продуктовый потолок (Auto = «сколько найдётся, до 30»)
 const DEFAULT_CLIPS = 8;
-const DEFAULT_MIN_SEC = 20;
-const DEFAULT_MAX_SEC = 60;
-const LS_KEY_MIN = "quip:clipMinSec";
-const LS_KEY_MAX = "quip:clipMaxSec";
-const storedMin = typeof window !== "undefined" ? Number(window.localStorage.getItem(LS_KEY_MIN)) : null;
-const storedMax = typeof window !== "undefined" ? Number(window.localStorage.getItem(LS_KEY_MAX)) : null;
-const INIT_MIN_SEC = storedMin && storedMin >= 4 && storedMin <= 180 ? storedMin : DEFAULT_MIN_SEC;
-const INIT_MAX_SEC = storedMax && storedMax >= 10 && storedMax <= 180 ? storedMax : DEFAULT_MAX_SEC;
-const MIN_CLIP_SEC = 4;
-const MAX_CLIP_SEC = 180;
-// The worker pins clip_max_sec >= 10 (main.py request models). Keep the stepper from
-// reaching a value the server would 422 on, so "short clips" never breaks the upload.
-const MIN_CLIP_MAX_SEC = 10;
+const PRESET_LABEL: Record<PresetId, "lenShort" | "lenStandard" | "lenLong"> = {
+  short: "lenShort",
+  standard: "lenStandard",
+  long: "lenLong",
+};
 // Quip is for long-form (podcasts, talks). Uploads >100 MB go via R2 multipart (parallel,
 // resumable parts) so the old 5 GB single-PUT ceiling is gone — the REAL limit is length
 // (3 h, worker-side billing.MAX_VIDEO_MINUTES). This MB number is just a sane guard against
@@ -66,16 +74,19 @@ export function SourceForm({
   const [auto, setAuto] = useState(true);
   const [count, setCount] = useState(DEFAULT_CLIPS);
   const [dragging, setDragging] = useState(false);
+  // Транскрипция — РАЗВИЛКА ДВИЖКОВ, не опция: false → Deepgram (авто-детект),
+  // true → "kk" → Groq Whisper. Ошибочно включённый kk на русском = мусорный транскрипт,
+  // поэтому выбор подан сегментной парой + предупреждением, а не тихим тумблером.
   const [kazakh, setKazakh] = useState(false);
   const [removePauses, setRemovePauses] = useState(false);
-  const [clipMinSec, setClipMinSec] = useState(INIT_MIN_SEC);
-  const [clipMaxSec, setClipMaxSec] = useState(INIT_MAX_SEC);
-  // The length fields keep a free-text draft so you can clear the box / delete the
-  // last digit while typing; the numeric value is committed (clamped) on blur, on a
-  // +/- step, and at submit. Without this a controlled number input snaps back and
-  // refuses an empty/partial state.
-  const [minDraft, setMinDraft] = useState(String(INIT_MIN_SEC));
-  const [maxDraft, setMaxDraft] = useState(String(INIT_MAX_SEC));
+  // Диапазон живёт в localStorage, которого сервер не видит → только useSyncExternalStore
+  // (см. комментарий в lib/clipLength.ts): чтение при рендере = hydration mismatch,
+  // чтение в эффекте = каскадный рендер. Здесь React берёт серверный снапшот и на гидратацию,
+  // а сохранённое значение подхватывает сразу после неё.
+  const range = useSyncExternalStore(subscribeClipRange, getClipRangeSnapshot, getServerClipRangeSnapshot);
+  // `custom` = «пользователь раскрыл слайдер вручную». БЕЗ инициализации из хранилища: не-пресетный
+  // диапазон и так откроет слайдер через matchPreset(range) === null. Один факт — один источник.
+  const [custom, setCustom] = useState(false);
   // Duration (seconds) of the picked file, probed client-side, so we can warn BEFORE
   // upload if it's shorter than the minimum clip length. null = unknown / not probable.
   const [fileDuration, setFileDuration] = useState<number | null>(null);
@@ -85,33 +96,19 @@ export function SourceForm({
   // Pre-flight: a video shorter than the minimum clip length is an impossible request
   // (the pipeline would fail deep in select). Catch it here so we never upload+process
   // it. Fail-open when the duration is unknown (null) — the worker still guards it.
-  const videoTooShort = file != null && fileDuration != null && fileDuration < clipMinSec;
+  const videoTooShort = file != null && fileDuration != null && fileDuration < range.min;
   // A file always wins; otherwise a valid YouTube link (only if the link path is wired in).
   const canSubmit = !busy && !videoTooShort && (file != null || (onSubmit != null && urlValid));
   const clamp = (n: number) => Math.max(MIN_CLIPS, Math.min(MAX_CLIPS, n));
   // Auto → шлём потолок (30): воркер вернёт ДО стольких сильных моментов, сколько найдёт.
   const clipsRequested = auto ? MAX_CLIPS : count;
-  // Clip-length clamps for the typed inputs. min stays in [MIN_CLIP_SEC, max-2];
-  // max stays in [max(MIN_CLIP_MAX_SEC, min+2), MAX_CLIP_SEC] (MIN_CLIP_MAX_SEC
-  // mirrors the worker's ge=10, so a typed value can never 422). Applied on blur
-  // and again at submit (Enter-to-submit can skip the input blur).
-  const clampMinSec = (n: number) => Math.min(clipMaxSec - 2, Math.max(MIN_CLIP_SEC, n || MIN_CLIP_SEC));
-  const clampMaxSec = (min: number, n: number) =>
-    Math.min(MAX_CLIP_SEC, Math.max(Math.max(MIN_CLIP_MAX_SEC, min + 2), n || MIN_CLIP_MAX_SEC));
-  // Commit a number to min/max: clamp it, then sync BOTH the numeric state and its
-  // draft string (so a +/- step or a blur snaps the visible field to the clamped value).
-  const applyMin = (n: number) => {
-    const v = clampMinSec(n);
-    setClipMinSec(v);
-    setMinDraft(String(v));
-    window.localStorage.setItem(LS_KEY_MIN, String(v));
-  };
-  const applyMax = (n: number) => {
-    const v = clampMaxSec(clipMinSec, n);
-    setClipMaxSec(v);
-    setMaxDraft(String(v));
-    window.localStorage.setItem(LS_KEY_MAX, String(v));
-  };
+  // Слайдер открыт, если юзер его открыл ИЛИ если диапазон не совпал ни с одним пресетом
+  // (восстановленный из localStorage «свой» диапазон обязан показать свой контрол).
+  const showSlider = custom || matchPreset(range) === null;
+  const activePreset = showSlider ? null : matchPreset(range);
+
+  const applyRange = (next: ClipRange, edited: "min" | "max") =>
+    setClipRange(clampClipRange(next, edited));
 
   function pickFile(f: File | null) {
     setFileError(null);
@@ -152,17 +149,13 @@ export function SourceForm({
     e.preventDefault();
     if (!canSubmit) return;
     // A picked file is the primary path; a YouTube link is the best-effort secondary path.
-    // Parse the drafts too: Enter-to-submit can fire before the input's blur commits.
-    const pMin = parseInt(minDraft, 10);
-    const pMax = parseInt(maxDraft, 10);
-    const safeMin = clampMinSec(Number.isNaN(pMin) ? clipMinSec : pMin);
-    const safeMax = clampMaxSec(safeMin, Number.isNaN(pMax) ? clipMaxSec : pMax);
-    window.localStorage.setItem(LS_KEY_MIN, String(safeMin));
-    window.localStorage.setItem(LS_KEY_MAX, String(safeMax));
+    // `range` is already clamped on every write (applyRange) — the slider can't produce an
+    // out-of-bounds pair, so there's nothing left to parse or re-validate at submit.
+    const { min, max } = range;
     if (file) {
-      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, safeMin, safeMax, removePauses);
+      onSubmitFile(file, clipsRequested, kazakh ? "kk" : null, min, max, removePauses);
     } else if (onSubmit && urlValid) {
-      onSubmit(url.trim(), clipsRequested, safeMin, safeMax);
+      onSubmit(url.trim(), clipsRequested, min, max);
     }
   }
 
@@ -314,9 +307,53 @@ export function SourceForm({
         </div>
       ) : null}
 
-      {/* Both settings are compact, same weight — one grouped row (not two full-width stacked
-          sections) reads as one settings cluster instead of a longer scanning list. */}
+      {/* Order = blast radius. Language goes FIRST: it's the only control that can invalidate the
+          whole job (wrong engine → garbage transcript → garbage clips); no length setting saves it.
+          Then the two cheap choices side by side, then clip length full-width. */}
       <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Eyebrow tone="faint">{t("language")}</Eyebrow>
+          <div
+            role="group"
+            aria-label={t("langAria")}
+            className="mt-2 flex w-max rounded-md border border-line bg-surface p-0.5"
+          >
+            {([false, true] as const).map((isKk) => (
+              <button
+                key={String(isKk)}
+                type="button"
+                onClick={() => setKazakh(isKk)}
+                disabled={busy}
+                aria-pressed={kazakh === isKk}
+                className={cn(
+                  "rounded-sm px-3.5 py-1.5 text-sm font-medium transition disabled:opacity-50",
+                  kazakh === isKk
+                    ? "bg-surface-3 text-ink shadow-[0_0_0_1px_var(--color-line-strong)]"
+                    : "text-muted hover:text-ink",
+                )}
+              >
+                {isKk ? t("langKazakh") : t("langAuto")}
+              </button>
+            ))}
+          </div>
+          {kazakh ? (
+            // Colour lives in the ICON only — a filled amber panel would fight the one gold CTA
+            // (--t-warn #f5b32e is a near-twin of the accent). DESIGN.md: one gold element per fold.
+            <div className="mt-2.5 flex gap-2.5 rounded-md border border-line bg-surface-2 px-3.5 py-3">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden />
+              <div className="space-y-1.5 text-sm leading-relaxed text-muted">
+                <p>{t("langKazakhWarning")}</p>
+                {/* The kk path loses per-word `speaker` (Groq/Whisper has no diarization), so the
+                    "don't cut across a speaker turn" guard in silence.py is dead there. We're not
+                    fixing the worker this round — so we say it out loud. */}
+                {removePauses ? <p>{t("langKazakhPausesWarning")}</p> : null}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs leading-relaxed text-faint">{t("langAutoHint")}</p>
+          )}
+        </div>
+
         <div>
           <Eyebrow tone="faint">{t("clipCount")}</Eyebrow>
           <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -370,59 +407,15 @@ export function SourceForm({
         </div>
 
         <div>
-          <Eyebrow tone="faint">{t("language")}</Eyebrow>
-          <div className="mt-2 flex items-center gap-3">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={kazakh}
-              onClick={() => setKazakh((k) => !k)}
-              disabled={busy}
-              aria-label={t("kazakhAria")}
-              className={cn(
-                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors duration-200 ease-snappy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
-                kazakh ? "bg-accent" : "bg-surface-3",
-                busy && "opacity-50",
-              )}
-            >
-              <span
-                className={cn(
-                  "inline-block size-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-snappy",
-                  kazakh ? "translate-x-4" : "translate-x-0",
-                )}
-              />
-            </button>
-            <span className="text-sm text-ink">{t("kazakh")}</span>
-            <span className="font-mono text-eyebrow uppercase tabular-nums text-faint">
-              {kazakh ? t("kazakhOn") : t("kazakhOff")}
-            </span>
-          </div>
-        </div>
-
-        <div>
           <Eyebrow tone="faint">{t("pauses")}</Eyebrow>
           <div className="mt-2 flex items-center gap-3">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={removePauses}
-              onClick={() => setRemovePauses((r) => !r)}
+            <Switch
+              checked={removePauses}
+              onChange={(e) => setRemovePauses(e.target.checked)}
               disabled={busy}
               aria-label={t("pausesAria")}
-              className={cn(
-                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors duration-200 ease-snappy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
-                removePauses ? "bg-accent" : "bg-surface-3",
-                busy && "opacity-50",
-              )}
-            >
-              <span
-                className={cn(
-                  "inline-block size-5 rounded-full bg-white shadow-sm transition-transform duration-200 ease-snappy",
-                  removePauses ? "translate-x-4" : "translate-x-0",
-                )}
-              />
-            </button>
-            <span className="text-sm text-ink">{t("pausesLabel")}</span>
+              label={<span className="text-ink">{t("pausesLabel")}</span>}
+            />
             <span className="font-mono text-eyebrow uppercase tabular-nums text-faint">
               {removePauses ? t("pausesOn") : t("pausesOff")}
             </span>
@@ -431,87 +424,75 @@ export function SourceForm({
 
         <div className="sm:col-span-2">
           <Eyebrow tone="faint">{t("clipDuration")}</Eyebrow>
-          <div className="mt-2 flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted">{t("minClip")}</span>
-              <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
-                <IconButton
-                  onClick={() => applyMin(clipMinSec - 2)}
-                  disabled={busy || clipMinSec <= MIN_CLIP_SEC}
-                  aria-label={t("shorterMinClip")}
-                  size="sm"
-                  className="size-9 text-ink hover:text-ink sm:size-7"
-                >
-                  <Minus className="size-4" />
-                </IconButton>
-                <div className="flex items-center">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={minDraft}
-                    onChange={(e) => setMinDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
-                    onBlur={() => applyMin(parseInt(minDraft, 10) || clipMinSec)}
-                    disabled={busy}
-                    aria-label={t("minClip")}
-                    className="w-8 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
-                  />
-                  <span className="text-sm text-faint">s</span>
-                </div>
-                <IconButton
-                  onClick={() => applyMin(clipMinSec + 2)}
-                  disabled={busy || clipMinSec >= clipMaxSec - 2}
-                  aria-label={t("longerMinClip")}
-                  size="sm"
-                  className="size-9 text-ink hover:text-ink sm:size-7"
-                >
-                  <Plus className="size-4" />
-                </IconButton>
-              </div>
-            </div>
-            <span className="text-sm text-faint">-</span>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted">{t("maxClip")}</span>
-              <div className="inline-flex items-center gap-1 rounded-md border border-line bg-surface p-1">
-                <IconButton
-                  onClick={() => applyMax(clipMaxSec - 2)}
-                  disabled={busy || clipMaxSec <= Math.max(MIN_CLIP_MAX_SEC, clipMinSec + 2)}
-                  aria-label={t("shorterMaxClip")}
-                  size="sm"
-                  className="size-9 text-ink hover:text-ink sm:size-7"
-                >
-                  <Minus className="size-4" />
-                </IconButton>
-                <div className="flex items-center">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={maxDraft}
-                    onChange={(e) => setMaxDraft(e.target.value.replace(/\D/g, "").slice(0, 3))}
-                    onBlur={() => applyMax(parseInt(maxDraft, 10) || clipMaxSec)}
-                    disabled={busy}
-                    aria-label={t("maxClip")}
-                    className="w-8 bg-transparent text-center font-mono text-sm font-semibold tabular-nums text-ink outline-none disabled:opacity-50"
-                  />
-                  <span className="text-sm text-faint">s</span>
-                </div>
-                <IconButton
-                  onClick={() => applyMax(clipMaxSec + 2)}
-                  disabled={busy || clipMaxSec >= MAX_CLIP_SEC}
-                  aria-label={t("longerMaxClip")}
-                  size="sm"
-                  className="size-9 text-ink hover:text-ink sm:size-7"
-                >
-                  <Plus className="size-4" />
-                </IconButton>
-              </div>
-            </div>
+          {/* One decision, not four widgets. The presets carry the common answers; the slider is
+              for the rare exact one — and it makes the min↔max coupling physical (the handles
+              can't pass each other), which the old pair of steppers left invisible until a typed
+              number silently refused to stick. */}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {CLIP_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => {
+                  setCustom(false);
+                  applyRange({ min: p.min, max: p.max }, "min");
+                }}
+                disabled={busy}
+                aria-pressed={activePreset === p.id}
+                className={cn(
+                  "rounded-md border px-3.5 py-2 text-left transition disabled:opacity-50",
+                  activePreset === p.id
+                    ? "border-line-strong bg-surface-3 text-ink"
+                    : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink",
+                )}
+              >
+                <span className="block text-sm font-medium">{t(PRESET_LABEL[p.id])}</span>
+                <span className="mt-0.5 block font-mono text-eyebrow uppercase tabular-nums text-faint">
+                  {t("lenRange", { min: p.min, max: p.max })}
+                </span>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setCustom(true)}
+              disabled={busy}
+              aria-pressed={showSlider}
+              className={cn(
+                "rounded-md border px-3.5 py-2 text-sm font-medium transition disabled:opacity-50",
+                showSlider
+                  ? "border-line-strong bg-surface-3 text-ink"
+                  : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink",
+              )}
+            >
+              {t("lenCustom")}
+            </button>
           </div>
+
+          {showSlider ? (
+            <RangeSlider
+              className="mt-4"
+              min={MIN_CLIP_SEC}
+              max={MAX_CLIP_SEC}
+              gap={CLIP_GAP}
+              valueMin={range.min}
+              valueMax={range.max}
+              onChange={applyRange}
+              disabled={busy}
+              ariaLabelMin={t("minClipAria")}
+              ariaLabelMax={t("maxClipAria")}
+              format={(n) => t("lenSec", { n })}
+            />
+          ) : null}
+
+          <p className="mt-2.5 text-xs leading-relaxed text-faint">
+            {t("lenHint", { min: range.min, max: range.max })}
+          </p>
         </div>
       </div>
 
       {videoTooShort && (
         <p className="mt-4 text-sm text-warn">
-          {t("videoTooShort", { dur: Math.round(fileDuration ?? 0), min: clipMinSec })}
+          {t("videoTooShort", { dur: Math.round(fileDuration ?? 0), min: range.min })}
         </p>
       )}
 

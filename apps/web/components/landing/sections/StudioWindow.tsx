@@ -1,4 +1,4 @@
-import { getLocale } from "next-intl/server";
+import { getLocale, getTranslations } from "next-intl/server";
 import { resolveLocale } from "@/i18n/locale";
 import { getLandingContent } from "@/lib/landingContent";
 import { Container, TypeBadge } from "../components/primitives";
@@ -16,6 +16,7 @@ export async function StudioWindow() {
   const { studio, howItWorks, heroClip, clips } = getLandingContent(
     resolveLocale(await getLocale()),
   );
+  const t = await getTranslations("landingDemo");
   // clips[2] is the hook-type example: two different badge types side by side
   // read as a system, two identical ones read as a copy-paste.
   const second = clips[2];
@@ -102,7 +103,7 @@ export async function StudioWindow() {
                     <div className="w-[68px] shrink-0 overflow-hidden rounded-sm bg-[#000]">
                       <img
                         src={clip.poster}
-                        alt=""
+                        alt={t("clipAlt", { caption: clip.caption ?? clip.hook })}
                         width={68}
                         height={121}
                         loading="lazy"

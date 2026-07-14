@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus } from "lucide-react";
+import { ResetControl } from "@/components/app/ResetControl";
 import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -206,6 +206,8 @@ function DashboardInner() {
   } | null>(null);
   // Requested clip count (from the form) → drives the reserved skeleton count while processing.
   const [requestedClips, setRequestedClips] = useState(3);
+  // Two-step guard on the ONE destructive control: bailing out mid-upload. See the button below.
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const error = submitError ?? pollError;
   // In-flight upload controller — abort on reset / unmount / new submit. Без этого брошенная
   // загрузка (ушёл со страницы / «Новый проект» / залил второй раз) продолжала XHR: создавала
@@ -271,6 +273,9 @@ function DashboardInner() {
     uploadCtrl.current?.abort(); // отменить прежнюю незавершённую загрузку перед новой
     const ctrl = new AbortController();
     uploadCtrl.current = ctrl;
+    // Иначе «Удалить?», открытый на прошлой загрузке (и не отвеченный — та успела дойти до конца),
+    // остался бы взведён и НОВАЯ загрузка стартовала бы сразу с вопросом об удалении.
+    setConfirmDiscard(false);
     setSubmitError(null);
     setSubmitting(true);
     setRequestedClips(maxClips);
@@ -327,6 +332,7 @@ function DashboardInner() {
     // the same file begins fresh (not resumes) — the deliberate clean-slate path.
     if (pendingUpload) void clearUploadCheckpoint(pendingUpload.file);
     setPendingUpload(null);
+    setConfirmDiscard(false);
     reset();
     setSubmitError(null);
     setSubmitting(false);
@@ -369,13 +375,13 @@ function DashboardInner() {
       <AppHeader />
       <main className="mx-auto max-w-[1200px] px-5 py-10 sm:px-8 sm:py-12">
         {phase !== "idle" && (
-          <button
-            onClick={handleReset}
-            className="mb-6 inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-muted transition hover:border-line-strong hover:text-ink"
-          >
-            <Plus className="size-4" />
-            {t("newProject")}
-          </button>
+          <ResetControl
+            uploadPct={upload?.pct ?? null}
+            confirming={confirmDiscard}
+            onArm={() => setConfirmDiscard(true)}
+            onDisarm={() => setConfirmDiscard(false)}
+            onReset={handleReset}
+          />
         )}
 
         {phase === "idle" ? (

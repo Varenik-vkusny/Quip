@@ -24,6 +24,7 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
   const content = getLandingContent(resolveLocale(await getLocale()));
   const { hero, heroClip, typeLabel, openApp } = content;
   const t = await getTranslations("heroReadout");
+  const tDemo = await getTranslations("landingDemo");
 
   // The river's moments: fixed positions across the "hour", labeled with the
   // localized moment types. Decorative (aria-hidden), so no content coupling.
@@ -101,9 +102,13 @@ export async function Hero({ authed = false }: { authed?: boolean }) {
               data-para="-40"
               className="absolute right-[3%] top-[46px] w-[164px] rotate-[5deg] overflow-hidden rounded-[20px] bg-black shadow-pop sm:w-[188px]"
             >
+              {/* This still is a real product output, not a decorative flourish, so it gets a real
+                  alt. It isn't bound to a content entry (the poster is hardcoded for the stack
+                  effect) — hence its own string rather than borrowing another clip's hook, which
+                  would describe the wrong image. */}
               <img
                 src="/clips/clip-4.webp"
-                alt=""
+                alt={tDemo("clipAltSecond")}
                 width={188}
                 height={334}
                 loading="eager"
