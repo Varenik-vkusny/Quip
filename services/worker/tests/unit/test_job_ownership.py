@@ -83,10 +83,13 @@ def test_media_ticket_scoped_owner_only(monkeypatch, tmp_path):
     assert client.get(f"/jobs/{job}/media-token", headers=_bearer(b)).status_code == 403
 
     # (a) owner A mints a ticket → serves the media
+    from app.media_token import DEFAULT_TTL
+
     tok = client.get(f"/jobs/{job}/media-token", headers=_bearer(a))
     assert tok.status_code == 200
     body = tok.json()
-    assert body["expires_in"] == 1200 and isinstance(body["token"], str)
+    # TTL от константы, не магическое число (хардкод-лимиты рассыхаются с константами).
+    assert body["expires_in"] == DEFAULT_TTL and isinstance(body["token"], str)
     mt = body["token"]
     served = client.get(f"/jobs/{job}/source.mp4", params={"mt": mt}, follow_redirects=False)
     assert served.status_code in (200, 302)
@@ -109,12 +112,20 @@ def test_media_ticket_garbage_and_expired_rejected(monkeypatch, tmp_path):
         f"/jobs/{job}/source.mp4", params={"mt": "not.a.ticket"}, follow_redirects=False
     )
     assert garbage.status_code == 403
-    # (d) real signature but expired → rejected
-    expired = media_token.mint(job, _MEDIA_SECRET.encode(), now=int(time.time()) - 10_000)
+    # (d) real signature but expired → rejected. Минтим старым ОТНОСИТЕЛЬНО DEFAULT_TTL (иначе рост
+    # TTL сделал бы «старый» тикет ещё валидным → ложный тест).
+    old = int(time.time()) - (media_token.DEFAULT_TTL + 3600)
+    expired = media_token.mint(job, _MEDIA_SECRET.encode(), now=old)
     r_exp = client.get(f"/jobs/{job}/source.mp4", params={"mt": expired}, follow_redirects=False)
     assert r_exp.status_code == 403
     # no ticket + no header → 401
     assert client.get(f"/jobs/{job}/source.mp4", follow_redirects=False).status_code == 401
+
+    # ФИКС 2026-07-14: тикет часовой давности ВСЁ ЕЩЁ валиден → прошитый-один-раз <video src>
+    # длинной сессии редактирования работает (ровно это ломал 20-мин TTL).
+    hour_old = media_token.mint(job, _MEDIA_SECRET.encode(), now=int(time.time()) - 3600)
+    r_hour = client.get(f"/jobs/{job}/source.mp4", params={"mt": hour_old}, follow_redirects=False)
+    assert r_hour.status_code in (200, 302)
 
 
 def test_media_header_auth_still_works_and_raw_jwt_rejected(monkeypatch, tmp_path):
