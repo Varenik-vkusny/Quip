@@ -112,16 +112,25 @@ gcloud beta run jobs create quip-render `
 
 # ─────────────────────────── 7. SERVICE (FastAPI API) — знает имя Job'а для триггера ───────────────────────────
 # CLOUDRUN_JOB/REGION → dispatch.spawn триггерит Job. GOOGLE_CLOUD_PROJECT Cloud Run ставит сам.
-# ⚠️ ПАМЯТЬ 4Gi (НЕ 1Gi): main.py импортит app.tasks/stage5_render → транзитивно torch/cv2/mediapipe
-# (~1–1.5Gi baseline на инстанс), а export/captioned.mp4 (on-demand render в FastAPI BackgroundTask,
-# в ЭТОМ же процессе) + export/package.zip (zip в io.BytesIO в памяти) дают пик. На 2Gi словили OOM
-# (2057/2048 MiB, rev 00015) → подняли до 4Gi (2026-07-07, rev 00018). Concurrency=80 ок при 4Gi;
-# правильный долгосрочный фикс — вынести on-demand render в Job + стримить zip (не BytesIO).
+#
+# ⚠️⚠️ НЕ ПОНИЖАТЬ cpu/memory и НЕ УБИРАТЬ --concurrency / том. Прод-инцидент 2026-07-13 (OOM
+# «Memory limit of 8192 MiB exceeded», массовые 503 на /reframe и /export/clean.mp4, 504 на 300s):
+#   • ФС Cloud Run = RAM. БЕЗ тома скачанный source.mp4 и извлечённые JPG-кадры (25 fps!) ели
+#     ПАМЯТЬ контейнера → ephemeral-disk 32Gi на /root/data (= DATA_ROOT, run.py:54) уводит их НА
+#     ДИСК. TMPDIR туда же — иначе tempfile.* снова пишет в RAM (/tmp). У Job'ов том был, у
+#     сервиса — НЕТ (это и был корень).
+#   • concurrency=80 (ДЕФОЛТ Cloud Run, никто не выставлял) = до 80 тяжёлых запросов в ОДНОМ
+#     контейнере; один OOM убивал контейнер ВМЕСТЕ со всеми запросами внутри → «massive 503».
+#   • Значения ниже = ЖИВОЙ прод (8Gi/2CPU выставлены руками 2026-07-10; в скрипте оставались
+#     4Gi/1CPU → перезапуск §7 МОЛЧА откатывал прод вдвое. Это был DRIFT — исправлен 2026-07-14).
+# Долгосрочный фикс (в работе): вынести CV/рендер из API в Job + стримить zip (не io.BytesIO).
 gcloud run deploy quip-api `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=uvicorn --args="app.main:app,--host,0.0.0.0,--port,8080" `
-  --cpu=1 --memory=4Gi --allow-unauthenticated `
-  --set-env-vars="$ENVVARS,CLOUDRUN_JOB=quip-pipeline,CLOUDRUN_REGION=$REGION" `
+  --cpu=2 --memory=8Gi --concurrency=8 --execution-environment=gen2 --allow-unauthenticated `
+  --add-volume=name=data,type=ephemeral-disk,size=32Gi `
+  --add-volume-mount=volume=data,mount-path=/root/data `
+  --set-env-vars="$ENVVARS,CLOUDRUN_JOB=quip-pipeline,CLOUDRUN_REGION=$REGION,TMPDIR=/root/data" `
   --set-secrets="$SECRETS"
 
 # ─────────────────────────── 8. URL сервиса → репойнт фронта + Polar ───────────────────────────

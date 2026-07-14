@@ -68,7 +68,7 @@ class TestSupaEnabled:
 # ─────────────────────────── add_payg_credits: upsert, не теряет оплату ───────────────────────────
 # Money-bug: PostgREST PATCH по несуществующей строке profiles затрагивает 0 строк и при
 # return=minimal МОЛЧА теряет начисление (юзер заплатил → 0 кредитов). SQLite-путь делает
-# upsert; Supabase-путь обязан вести себя так же. Мокаем httpx (без сети).
+# upsert; Supabase-путь обязан вести себя так же. Мокаем пулированный app.http_client (без сети).
 
 
 class _Resp:
@@ -102,8 +102,8 @@ class TestAddPaygCredits:
             # PATCH с return=representation вернул обновлённую строку → строка существовала
             return _Resp([{"id": "u1", "payg_credits": 5}])
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
         supa.add_payg_credits("u1", 2)
         assert calls and calls[0][1]["payg_credits"] == 5  # 3 + 2
 
@@ -123,9 +123,9 @@ class TestAddPaygCredits:
             posts.append(kw.get("json", {}))
             return _Resp(None, status=201)
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
-        monkeypatch.setattr(supa.httpx, "post", fake_post)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "post", fake_post)
         supa.add_payg_credits("u_new", 2)
         assert posts, "оплата должна вставить профиль, а не потеряться"
         assert posts[0]["payg_credits"] == 2 and posts[0]["plan"] == "free"
@@ -144,8 +144,8 @@ class TestDeductPayg:
             patched.append(kw.get("json", {}))
             return _Resp([{"id": "u1", "payg_credits": 3}])
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
         supa.deduct_payg("u1", 2)
         assert patched and patched[0]["payg_credits"] == 3  # 5 - 2
 
@@ -160,8 +160,8 @@ class TestDeductPayg:
             patched.append(kw.get("json", {}))
             return _Resp([{"id": "u1", "payg_credits": 0}])
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
         supa.deduct_payg("u1", 4)
         assert patched and patched[0]["payg_credits"] == 0  # max(0, 1-4)
 
@@ -178,17 +178,17 @@ class TestDeductPayg:
             patched.append(kw.get("json", {}))
             return _Resp([])
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
         supa.deduct_payg("ghost", 2)
         assert patched == []  # нечего списывать
 
     def test_zero_is_noop(self, monkeypatch) -> None:
         _supa_env(monkeypatch)
         patched: list[dict] = []
-        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([{"payg_credits": 5}]))
+        monkeypatch.setattr(supa.http, "get", lambda url, **kw: _Resp([{"payg_credits": 5}]))
         monkeypatch.setattr(
-            supa.httpx, "patch", lambda url, **kw: patched.append(kw.get("json", {}))
+            supa.http, "patch", lambda url, **kw: patched.append(kw.get("json", {}))
         )
         supa.deduct_payg("u1", 0)
         assert patched == []  # n=0 → не дёргаем PATCH
@@ -208,22 +208,22 @@ class TestAddClipCredits:
             patched.append(kw.get("json", {}))
             return _Resp([{"id": "u1", "clip_credits": 2}])
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
         supa.add_clip_credits("u1", 1)
         assert patched and patched[0] == {"clip_credits": 2}  # 1 + 1, PAYG не тронут
 
     def test_inserts_when_profile_missing(self, monkeypatch) -> None:
         _supa_env(monkeypatch)
         posts: list[dict] = []
-        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([]))  # профиля нет
-        monkeypatch.setattr(supa.httpx, "patch", lambda url, **kw: _Resp([]))  # 0 строк
+        monkeypatch.setattr(supa.http, "get", lambda url, **kw: _Resp([]))  # профиля нет
+        monkeypatch.setattr(supa.http, "patch", lambda url, **kw: _Resp([]))  # 0 строк
 
         def fake_post(url, **kw):  # type: ignore[no-untyped-def]
             posts.append(kw.get("json", {}))
             return _Resp(None, status=201)
 
-        monkeypatch.setattr(supa.httpx, "post", fake_post)
+        monkeypatch.setattr(supa.http, "post", fake_post)
         supa.add_clip_credits("u_new", 1)
         assert posts and posts[0]["clip_credits"] == 1 and posts[0]["plan"] == "free"
 
@@ -241,17 +241,17 @@ class TestConsumeClipCredit:
             patched.append(kw.get("json", {}))
             return _Resp([{"id": "u1", "clip_credits": 1}])  # строка обновилась
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "patch", fake_patch)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "patch", fake_patch)
         assert supa.consume_clip_credit("u1") is True
         assert patched and patched[0] == {"clip_credits": 1}  # 2 - 1
 
     def test_returns_false_at_zero_no_patch(self, monkeypatch) -> None:
         _supa_env(monkeypatch)
         patched: list[dict] = []
-        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([{"clip_credits": 0}]))
+        monkeypatch.setattr(supa.http, "get", lambda url, **kw: _Resp([{"clip_credits": 0}]))
         monkeypatch.setattr(
-            supa.httpx, "patch", lambda url, **kw: patched.append(kw.get("json", {}))
+            supa.http, "patch", lambda url, **kw: patched.append(kw.get("json", {}))
         )
         assert supa.consume_clip_credit("u1") is False
         assert patched == []  # баланс 0 → PATCH не дёргаем
@@ -259,8 +259,8 @@ class TestConsumeClipCredit:
     def test_returns_false_when_race_lost(self, monkeypatch) -> None:
         # Прочитали 1, но параллельный запрос уже увёл в 0 → условный PATCH матчит 0 строк ([]).
         _supa_env(monkeypatch)
-        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([{"clip_credits": 1}]))
-        monkeypatch.setattr(supa.httpx, "patch", lambda url, **kw: _Resp([]))  # 0 строк
+        monkeypatch.setattr(supa.http, "get", lambda url, **kw: _Resp([{"clip_credits": 1}]))
+        monkeypatch.setattr(supa.http, "patch", lambda url, **kw: _Resp([]))  # 0 строк
         assert supa.consume_clip_credit("u1") is False
 
 
@@ -269,8 +269,8 @@ class TestRecordUsage:
     def test_skips_insert_when_job_already_recorded(self, monkeypatch) -> None:
         _supa_env(monkeypatch)
         posted: list = []
-        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([{"id": 1}]))  # уже есть
-        monkeypatch.setattr(supa.httpx, "post", lambda url, **kw: posted.append(kw))
+        monkeypatch.setattr(supa.http, "get", lambda url, **kw: _Resp([{"id": 1}]))  # уже есть
+        monkeypatch.setattr(supa.http, "post", lambda url, **kw: posted.append(kw))
         assert supa.record_usage("u", "job_a", 10.0, "2026-06", 1) is False
         assert posted == []  # дубль → POST не делаем
 
@@ -282,8 +282,8 @@ class TestRecordUsage:
             posted.append(kw.get("json", {}))
             return _Resp(None, status=201)
 
-        monkeypatch.setattr(supa.httpx, "get", lambda url, **kw: _Resp([]))  # записи нет
-        monkeypatch.setattr(supa.httpx, "post", fake_post)
+        monkeypatch.setattr(supa.http, "get", lambda url, **kw: _Resp([]))  # записи нет
+        monkeypatch.setattr(supa.http, "post", fake_post)
         assert supa.record_usage("u", "job_b", 10.0, "2026-06", 1) is True
         assert posted and posted[0]["job_id"] == "job_b"
 
@@ -300,8 +300,8 @@ class TestRecordUsage:
             posted.append(kw.get("json", {}))
             return _Resp(None, status=201)
 
-        monkeypatch.setattr(supa.httpx, "get", fake_get)
-        monkeypatch.setattr(supa.httpx, "post", fake_post)
+        monkeypatch.setattr(supa.http, "get", fake_get)
+        monkeypatch.setattr(supa.http, "post", fake_post)
         assert supa.record_usage("u", None, 10.0, "2026-06", 1) is True
         assert gets == []  # job_id=None → проверку дубля не делаем
         assert posted  # вставили
@@ -312,8 +312,8 @@ class TestSetUserPlan:
         _supa_env(monkeypatch)
         posts: list[dict] = []
         _row = [{"id": "u", "plan": "pro"}]
-        monkeypatch.setattr(supa.httpx, "patch", lambda url, **kw: _Resp(_row))
-        monkeypatch.setattr(supa.httpx, "post", lambda url, **kw: posts.append(kw.get("json", {})))
+        monkeypatch.setattr(supa.http, "patch", lambda url, **kw: _Resp(_row))
+        monkeypatch.setattr(supa.http, "post", lambda url, **kw: posts.append(kw.get("json", {})))
         supa.set_user_plan("u", "pro")
         assert posts == []  # строка была → INSERT не нужен
 
@@ -326,7 +326,7 @@ class TestSetUserPlan:
             posts.append(kw.get("json", {}))
             return _Resp(None, status=201)
 
-        monkeypatch.setattr(supa.httpx, "patch", lambda url, **kw: _Resp([]))  # 0 строк
-        monkeypatch.setattr(supa.httpx, "post", fake_post)
+        monkeypatch.setattr(supa.http, "patch", lambda url, **kw: _Resp([]))  # 0 строк
+        monkeypatch.setattr(supa.http, "post", fake_post)
         supa.set_user_plan("u_new", "starter")
         assert posts and posts[0] == {"id": "u_new", "plan": "starter"}

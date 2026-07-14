@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from app import http_client as http
 from app.errors import JobError
 from app.social.models import Platform, PostJob, PostStatus, SocialAccount
 
@@ -85,7 +86,7 @@ class PostgrestSocialRepo:
     """Concrete SocialRepo over Supabase PostgREST (service_role bypasses RLS)."""
 
     def due_posts(self, now: datetime) -> list[PostJob]:
-        r = httpx.get(
+        r = http.get(
             f"{_base()}/post_jobs",
             params={
                 "status": "eq.pending",
@@ -100,7 +101,7 @@ class PostgrestSocialRepo:
         return [row_to_post(x) for x in r.json()]
 
     def get_account(self, account_id: str) -> SocialAccount:
-        r = httpx.get(
+        r = http.get(
             f"{_base()}/social_accounts",
             params={"id": f"eq.{account_id}", "select": "*"},
             headers=_headers(),
@@ -113,7 +114,7 @@ class PostgrestSocialRepo:
         return row_to_account(rows[0])
 
     def published_count_today(self, account_id: str, now: datetime) -> int:
-        r = httpx.get(
+        r = http.get(
             f"{_base()}/post_jobs",
             params={
                 "account_id": f"eq.{account_id}",
@@ -141,7 +142,7 @@ class PostgrestSocialRepo:
             body["remote_id"] = remote_id
         if error is not None:
             body["error"] = error
-        r = httpx.patch(
+        r = http.patch(
             f"{_base()}/post_jobs",
             params={"id": f"eq.{post_id}"},
             headers=_headers({"Prefer": "return=minimal"}),

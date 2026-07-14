@@ -19,6 +19,8 @@ from typing import Any
 
 import httpx
 
+from app import http_client as http
+
 _TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
 
 
@@ -70,7 +72,7 @@ def _profile_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def get_profile(user_id: str) -> dict[str, Any]:
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}", "select": "plan,payg_credits,clip_credits"},
         headers=_headers(),
@@ -87,7 +89,7 @@ def get_user_plan(user_id: str) -> str:
 def set_user_plan(user_id: str, plan: str) -> None:
     # Как add_payg_credits: PATCH по несуществующей строке = 0 строк → upgrade МОЛЧА терялся
     # бы (юзер оплатил подписку, остался free). return=representation + INSERT-фолбэк = upsert.
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}"},
         headers=_headers({"Prefer": "return=representation"}),
@@ -97,7 +99,7 @@ def set_user_plan(user_id: str, plan: str) -> None:
     r.raise_for_status()
     if r.json():
         return
-    ins = httpx.post(
+    ins = http.post(
         f"{_base()}/profiles",
         headers=_headers({"Prefer": "return=minimal"}),
         json={"id": user_id, "plan": plan},
@@ -108,7 +110,7 @@ def set_user_plan(user_id: str, plan: str) -> None:
 
 def get_style_preference(user_id: str) -> dict[str, Any] | None:
     """Сохранённый дефолт-стиль юзера (profiles.style_preferences) или None. Тонкая обёртка."""
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}", "select": "style_preferences"},
         headers=_headers(),
@@ -124,7 +126,7 @@ def get_style_preference(user_id: str) -> dict[str, Any] | None:
 
 def set_style_preference(user_id: str, blob: dict[str, Any]) -> None:
     """Сохранить дефолт-стиль (upsert, как set_user_plan: PATCH → INSERT-фолбэк если строки нет)."""
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}"},
         headers=_headers({"Prefer": "return=representation"}),
@@ -134,7 +136,7 @@ def set_style_preference(user_id: str, blob: dict[str, Any]) -> None:
     r.raise_for_status()
     if r.json():
         return
-    ins = httpx.post(
+    ins = http.post(
         f"{_base()}/profiles",
         headers=_headers({"Prefer": "return=minimal"}),
         json={"id": user_id, "plan": "free", "style_preferences": blob},
@@ -149,7 +151,7 @@ def add_payg_credits(user_id: str, credits: int) -> None:
     # signup не сработал / гонка) — PATCH затрагивает 0 строк, и без фолбэка оплата МОЛЧА
     # терялась бы (правило №8). Тогда INSERT'им профиль (как SQLite-путь = upsert).
     current = int(get_profile(user_id)["payg_credits"])
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}"},
         headers=_headers({"Prefer": "return=representation"}),
@@ -159,7 +161,7 @@ def add_payg_credits(user_id: str, credits: int) -> None:
     r.raise_for_status()
     if r.json():  # строка существовала и обновилась
         return
-    ins = httpx.post(
+    ins = http.post(
         f"{_base()}/profiles",
         headers=_headers({"Prefer": "return=minimal"}),
         json={"id": user_id, "plan": "free", "payg_credits": int(credits)},
@@ -179,7 +181,7 @@ def deduct_payg(user_id: str, credits: int) -> None:
     if current <= 0:
         return  # нет баланса (или профиля) → списывать нечего, PATCH не нужен
     new_balance = max(0, current - int(credits))
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}"},
         headers=_headers({"Prefer": "return=representation"}),
@@ -194,7 +196,7 @@ def add_clip_credits(user_id: str, credits: int) -> None:
     # GET баланс + PATCH; профиля нет → INSERT-фолбэк (иначе оплата МОЛЧА терялась бы, правило №8).
     # ОТДЕЛЬНАЯ колонка clip_credits (не payg_credits) — балансы не путаются.
     current = int(get_profile(user_id).get("clip_credits") or 0)
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}"},
         headers=_headers({"Prefer": "return=representation"}),
@@ -204,7 +206,7 @@ def add_clip_credits(user_id: str, credits: int) -> None:
     r.raise_for_status()
     if r.json():  # строка существовала и обновилась
         return
-    ins = httpx.post(
+    ins = http.post(
         f"{_base()}/profiles",
         headers=_headers({"Prefer": "return=minimal"}),
         json={"id": user_id, "plan": "free", "clip_credits": int(credits)},
@@ -221,7 +223,7 @@ def consume_clip_credit(user_id: str) -> bool:
     current = int(get_profile(user_id).get("clip_credits") or 0)
     if current <= 0:
         return False
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/profiles",
         params={"id": f"eq.{user_id}", "clip_credits": "gte.1"},
         headers=_headers({"Prefer": "return=representation"}),
@@ -240,7 +242,7 @@ def record_usage(
     # даёт UNIQUE-индекс (migrations/0003); check-then-act работает и до его применения
     # (таск последователен → гонка маловероятна). job_id=None (аноним) дедупом не покрыт.
     if job_id is not None:
-        chk = httpx.get(
+        chk = http.get(
             f"{_base()}/usage_events",
             params={"job_id": f"eq.{job_id}", "select": "id", "limit": "1"},
             headers=_headers(),
@@ -249,7 +251,7 @@ def record_usage(
         chk.raise_for_status()
         if chk.json():
             return False
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/usage_events",
         headers=_headers({"Prefer": "return=minimal"}),
         json={
@@ -266,7 +268,7 @@ def record_usage(
 
 
 def get_monthly_usage(user_id: str, month: str) -> dict[str, float]:
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/usage_events",
         params={
             "user_id": f"eq.{user_id}",
@@ -298,7 +300,7 @@ def auth_user_email_confirmed(user_id: str) -> bool:
     confirmed_at). Без тихих фолбэков: HTTP-ошибка всплывает (вызывающий → 5xx, не «молча
     разрешить» абьюзеру). Нет такого юзера / нет даты → False.
     """
-    r = httpx.get(
+    r = http.get(
         f"{_auth_admin_base()}/admin/users/{user_id}",
         headers=_headers(),
         timeout=_TIMEOUT,

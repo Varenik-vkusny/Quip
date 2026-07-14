@@ -31,11 +31,15 @@ def edit_matches_baked(
       • ``aspect == "9:16"`` — baked всегда 9:16; другой аспект = другой кадр.
       • нет ``reframe_overrides`` — ручной кроп меняет регионы → нужен пересчёт.
       • ``lock_per_shot is True`` — baked рендерится LOCKED (дефолт батча); follow (пан) = пиксели.
+      • нет ``suppressed_cuts`` — MERGE склеивает два соседних региона в один, оставляя кадр
+        ПЕРВОГО (apply_cuts_to_regions) → кадр второго шота МЕНЯЕТСЯ ⇒ пиксели ≠ baked.
       • РОВНО один source-интервал — мульти-интервал = пере-монтаж (concat), не один клип.
       • границы интервала совпадают с сегментом (в пределах ``tol``) — клип не тримили/не сдвигали
         (baked рендерился именно из [seg_start, seg_end]; default_clip_edit сидит этот интервал).
-    Субтитры/хук НЕ влияют на геометрию — их и накладываем поверх baked. Любое НЕсовпадение →
-    False → вызыватель идёт полным путём (корректность важнее скорости).
+    ``manual_cuts`` (SPLIT) геометрию НЕ меняют: обе половины наследуют mode+points родителя
+    (_split_region_at) → те же пиксели. Перекраска половины приходит как ``reframe_overrides`` и
+    режется условием выше. Субтитры/хук НЕ влияют на геометрию — их и накладываем поверх baked.
+    Любое НЕсовпадение → False → вызыватель идёт полным путём (корректность важнее скорости).
     """
     if edit.aspect != _BAKED_ASPECT:
         return False
@@ -44,10 +48,46 @@ def edit_matches_baked(
     if not edit.lock_per_shot:
         # baked рендерится LOCKED (дефолт); follow = пан вместо статики = другие пиксели → пересчёт.
         return False
+    if edit.suppressed_cuts:
+        # MERGE навязывает кадр первого региона второму → baked (с ИСХОДНОЙ границей шотов) уже не
+        # совпадает с тем, что показывает превью. Раньше не проверялось → скачанный клип молча
+        # расходился с превью (WYSIWYG); теперь честный полный путь.
+        return False
     if len(edit.source_intervals) != 1:
         return False
     iv = edit.source_intervals[0]
     return abs(iv.source_start - seg_start) <= tol and abs(iv.source_end - seg_end) <= tol
+
+
+def silence_removal_on(edit: ClipEdit) -> bool:
+    """PURE. True ⇔ у клипа ВКЛЮЧЕНО удаление пауз (недеструктивный toggle, см. SilenceConfig).
+
+    Паузы вычитаются из ``source_intervals`` НА РЕНДЕРЕ (доп. дырки), а не в сохранённом edit'е →
+    сравнение интервалов с сегментом их НЕ видит. Значит любой fast-path поверх baked-клипа (в
+    котором паузы ЕСТЬ) обязан проверять этот флаг ОТДЕЛЬНО.
+    """
+    return bool(edit.silence_config and edit.silence_config.enabled)
+
+
+def should_serve_baked_clean(edit: ClipEdit, *, seg_start: float, seg_end: float) -> bool:
+    """PURE. True ⇔ запечённый пайплайном ЧИСТЫЙ клип ``clips/<id>.mp4`` попиксельно равен тому,
+    что дал бы чистый рендер текущего edit'а ⇒ ``/export/clean.mp4`` может отдать 302 на CDN.
+
+    Зачем: ре-рендер clean.mp4 в api-контейнере — ГАРАНТИРОВАННЫЙ отказ на больших источниках
+    (скачивание всего source в RAM-backed FS Cloud Run → OOM/503; энкод > 300s request-timeout →
+    504). Ровно этот отказ уже описан в ``should_serve_cached_captioned``; captioned спасли
+    302-редиректом 2026-07-10, clean остался без него. Запечённый clean-объект (``variant=""``,
+    ``run.render_one_clip``) НИКОГДА не перетирается прожжённым экспортом (storage.upload_clip) →
+    он неизменяем, редирект не может отдать протухшее.
+
+    Гейт СТРОГИЙ (в отличие от captioned, который сознательно допускает устаревание): для clean
+    baked-объект ОДИН — дефолтная геометрия. Отдать его клипу с изменённой геометрией = молча
+    подсунуть НЕ ТО видео. Поэтому любая правка геометрии (``edit_matches_baked``) ИЛИ включённое
+    удаление пауз → False → честный полный рендер.
+    """
+    if silence_removal_on(edit):
+        return False
+    return edit_matches_baked(edit, seg_start=seg_start, seg_end=seg_end)
 
 
 def can_composite_captions(

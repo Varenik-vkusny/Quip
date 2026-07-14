@@ -181,9 +181,25 @@ def test_export_srt_404_for_missing_clip(monkeypatch, tmp_path):
     assert r.status_code == 404
 
 
+def _trim_so_geometry_differs(client, job):
+    """Пробить дырку в клипе → геометрия ≠ baked → clean.mp4 идёт ПОЛНЫМ путём рендера.
+
+    С 2026-07-14 нетронутый клип отдаётся 302-редиректом на запечённый clips/<id>.mp4 (api-бокс
+    больше не качает source и не жжёт CV → не OOM'ит; см. test_clean_export_and_upstream.py).
+    Тесты НИЖЕ покрывают именно полный путь — значит клип должен быть НЕ нетронутым.
+    """
+    v = client.get(f"/jobs/{job}/clips/clip_01/edit").json()["version"]
+    r = client.post(
+        f"/jobs/{job}/clips/clip_01/edit/trim", json={"version": v, "word_indices": [1]}
+    )
+    assert r.status_code == 200 and len(r.json()["source_intervals"]) == 2
+
+
 def test_export_clean_mp4_serves_file(monkeypatch, tmp_path):
     client, job = _client(monkeypatch, tmp_path)
     from app.editor import store as store_mod
+
+    _trim_so_geometry_differs(client, job)
 
     def fake_render(job_id, clip_id, *, with_subtitles, out_rel):
         assert with_subtitles is False  # чистый mp4 = БЕЗ субтитров (экспорт-свобода)
@@ -201,6 +217,8 @@ def test_export_clean_mp4_serves_file(monkeypatch, tmp_path):
 def test_export_clean_mp4_render_error_500(monkeypatch, tmp_path):
     client, job = _client(monkeypatch, tmp_path)
     from app.errors import JobError
+
+    _trim_so_geometry_differs(client, job)
 
     def boom(job_id, clip_id, *, with_subtitles, out_rel):
         raise JobError("render", "ffmpeg сдох")

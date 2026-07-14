@@ -113,7 +113,7 @@ def _finalize_done(
     return ready
 
 
-def _segment_bounds(job_id: str, clip_id: str) -> tuple[float, float] | None:
+def segment_bounds(job_id: str, clip_id: str) -> tuple[float, float] | None:
     """(start, end) сегмента клипа из артефактов (диск/cloud). None если индекс вне диапазона/нет.
 
     Дефолтный интервал клипа сидится из ЭТОГО сегмента (default_clip_edit). Совпадение текущего
@@ -241,9 +241,9 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
 
     # ── FAST PATH: composite-ASS поверх baked-клипа (caption/hook-only, геометрия нетронута) ──
     if with_subtitles:
-        seg = _segment_bounds(job_id, clip_id)
+        seg = segment_bounds(job_id, clip_id)
         # Пауза-рез меняет тайминг → composite-fast-path (субтитры поверх baked С ПАУЗАМИ) неверен.
-        silence_on = bool(edit.silence_config and edit.silence_config.enabled)
+        silence_on = fast_export.silence_removal_on(edit)
         if (
             not silence_on
             and seg is not None

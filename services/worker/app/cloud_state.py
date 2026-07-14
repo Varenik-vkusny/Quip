@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from app import http_client as http
+
 _TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
 
 
@@ -72,7 +74,7 @@ def insert_job(
     user_id: str | None = None,
     remove_pauses: bool = False,
 ) -> None:
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/jobs",
         headers=_headers({"Prefer": "return=minimal"}),
         json={
@@ -98,7 +100,7 @@ def insert_job(
 
 
 def update_status(job_id: str, status: str, progress: int) -> None:
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -115,7 +117,7 @@ def set_done(
     duration_sec: float,
     elapsed_sec: float,
 ) -> None:
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -146,7 +148,7 @@ def set_clips_pending(
     СРАЗУ после select → "selecting" (клипы видны на ~60%, статус честный, грид встаёт по
     наличию клипов, не по статусу). Дефолт "rendering" = старое поведение.
     """
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -177,7 +179,7 @@ def set_progress_detail(
     if not fields:
         return
     try:
-        r = httpx.patch(
+        r = http.patch(
             f"{_base()}/jobs",
             params={"id": f"eq.{job_id}"},
             headers=_headers({"Prefer": "return=minimal"}),
@@ -191,7 +193,7 @@ def set_progress_detail(
 
 def patch_clip_analysis(job_id: str, clip_id: str, fields: dict[str, Any]) -> None:
     """Update analysis fields for one clip (read-modify-write; safe post-pipeline)."""
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}", "select": "clips"},
         headers=_headers(),
@@ -206,7 +208,7 @@ def patch_clip_analysis(job_id: str, clip_id: str, fields: dict[str, Any]) -> No
         if clip.get("id") == clip_id:
             clip.update(fields)
             break
-    p = httpx.patch(
+    p = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -225,11 +227,12 @@ def set_clip_ready(job_id: str, idx: int, url: str) -> None:
     колонки (read-modify-write → гонка). ``idx`` 0-based (позиция в массиве). RPC возвращает
     число обновлённых строк; 0 → джоба/индекса нет (логируем, не глотаем — правило №8).
     """
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/rpc/set_clip_video_url",
         headers=_headers(),
         json={"p_job_id": job_id, "p_idx": idx, "p_url": url},
         timeout=_TIMEOUT,
+        idempotent=True,  # jsonb_set ФИКСИРОВАННОГО url → повтор даёт тот же результат
     )
     r.raise_for_status()
     updated = r.json()
@@ -247,7 +250,7 @@ def append_pending_clip(job_id: str, clip: dict[str, Any]) -> int:
     """
     from app.errors import JobError
 
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}", "select": "clips"},
         headers=_headers(),
@@ -259,7 +262,7 @@ def append_pending_clip(job_id: str, clip: dict[str, Any]) -> int:
         raise JobError("persist", f"append_pending_clip: no job row {job_id}")
     clips = list(row.get("clips") or [])
     clips.append(clip)
-    p = httpx.patch(
+    p = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -271,7 +274,7 @@ def append_pending_clip(job_id: str, clip: dict[str, Any]) -> int:
 
 
 def set_failed(job_id: str, error: str) -> None:
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -283,7 +286,7 @@ def set_failed(job_id: str, error: str) -> None:
 
 def set_function_call_id(job_id: str, fc_id: str) -> None:
     """Сохранить id Modal-``FunctionCall`` (для отмены джоба). Только эта колонка."""
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -295,7 +298,7 @@ def set_function_call_id(job_id: str, fc_id: str) -> None:
 
 def set_cancellable(job_id: str, value: bool) -> None:
     """Переключить флаг отмены (воркер гасит в False при входе в платную стадию)."""
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -310,7 +313,7 @@ def set_cancelled(job_id: str) -> None:
     перетираем завершённый джоб (гонка отмены с финишем пайплайна)."""
     # Дублирующийся ключ ``status`` (neq.done И neq.failed) — httpx сериализует список
     # значений в повторённые query-параметры, что PostgREST трактует как AND по колонке.
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}", "status": ["neq.done", "neq.failed"]},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -321,7 +324,7 @@ def set_cancelled(job_id: str) -> None:
 
 
 def get_job_row(job_id: str) -> dict[str, Any] | None:
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}", "select": "*"},
         headers=_headers(),
@@ -342,7 +345,7 @@ def list_jobs_by_user(user_id: str | None, limit: int = 50) -> list[dict[str, An
     }
     if user_id is not None:
         params["user_id"] = f"eq.{user_id}"
-    r = httpx.get(f"{_base()}/jobs", params=params, headers=_headers(), timeout=_TIMEOUT)
+    r = http.get(f"{_base()}/jobs", params=params, headers=_headers(), timeout=_TIMEOUT)
     r.raise_for_status()
     return list(r.json())
 
@@ -357,7 +360,7 @@ def find_duplicate_source(user_id: str, fingerprint: str) -> str | None:
     выбор чистой ``dedup.pick_duplicate_candidate`` (тай-брейк по id → детерминизм)."""
     from app import dedup
 
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/jobs",
         params={
             "user_id": f"eq.{user_id}",
@@ -375,7 +378,7 @@ def find_duplicate_source(user_id: str, fingerprint: str) -> str | None:
 
 def set_source_fingerprint(job_id: str, fingerprint: str) -> None:
     """Записать отпечаток source джобы (для будущего per-user дедупа). Только эта колонка."""
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}"},
         headers=_headers({"Prefer": "return=minimal"}),
@@ -391,17 +394,18 @@ def set_source_fingerprint(job_id: str, fingerprint: str) -> None:
 def put_job_artifacts(
     job_id: str, meta: dict[str, Any], segments: list[Any], transcript: dict[str, Any]
 ) -> None:
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/job_artifacts",
         headers=_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
         json={"job_id": job_id, "meta": meta, "segments": segments, "transcript": transcript},
         timeout=_TIMEOUT,
+        idempotent=True,  # merge-duplicates = upsert по PK job_id → повтор безопасен
     )
     r.raise_for_status()
 
 
 def get_job_artifacts(job_id: str) -> dict[str, Any] | None:
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/job_artifacts",
         params={"job_id": f"eq.{job_id}", "select": "meta,segments,transcript"},
         headers=_headers(),
@@ -419,18 +423,19 @@ def put_job_artifact(job_id: str, key: str, value: Any) -> None:
     Modal-контейнер) пишет сюда, а /video-map (web-контейнер) читает get_job_artifact.
     Требует колонку job_artifacts.<key> (jsonb) в Postgres.
     """
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/job_artifacts",
         headers=_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
         json={"job_id": job_id, key: value},
         timeout=_TIMEOUT,
+        idempotent=True,  # merge-duplicates = upsert по PK job_id → повтор безопасен
     )
     r.raise_for_status()
 
 
 def get_job_artifact(job_id: str, key: str) -> Any:
     """Прочитать ОДНУ jsonb-колонку job_artifacts[key]; None если строки/значения нет."""
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/job_artifacts",
         params={"job_id": f"eq.{job_id}", "select": key},
         headers=_headers(),
@@ -448,11 +453,12 @@ def merge_reframe_regions(job_id: str, clip_id: str, value: dict[str, Any]) -> i
     сериализуется блокировкой строки → параллельные фан-аут-контейнеры, пишущие РАЗНЫЕ clip_id,
     не теряют запись друг друга (как set_clip_video_url). Возвращает число обновлённых строк
     (0 = строки артефактов нет → вызыватель логирует, не глотает, правило №8)."""
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/rpc/merge_reframe_regions",
         headers=_headers(),
         json={"p_job_id": job_id, "p_clip_id": clip_id, "p_value": value},
         timeout=_TIMEOUT,
+        idempotent=True,  # server-side ``||``-merge ТОГО ЖЕ значения → повтор = no-op
     )
     r.raise_for_status()
     return int(r.json())
@@ -461,7 +467,7 @@ def merge_reframe_regions(job_id: str, clip_id: str, value: dict[str, Any]) -> i
 def get_reframe_regions(job_id: str, clip_id: str) -> dict[str, Any] | None:
     """Персистнутый reframe-payload ОДНОГО клипа (или None). Читает job_artifacts.reframe_regions
     (словарь {clip_id: payload}) и достаёт запись клипа."""
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/job_artifacts",
         params={"job_id": f"eq.{job_id}", "select": "reframe_regions"},
         headers=_headers(),
@@ -480,7 +486,7 @@ def get_reframe_regions(job_id: str, clip_id: str) -> dict[str, Any] | None:
 
 
 def get_cached_transcript(audio_sha: str, provider: str, model: str) -> dict[str, Any] | None:
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/transcript_cache",
         params={
             "audio_sha": f"eq.{audio_sha}",
@@ -499,7 +505,7 @@ def get_cached_transcript(audio_sha: str, provider: str, model: str) -> dict[str
 def put_cached_transcript(
     audio_sha: str, provider: str, model: str, transcript: dict[str, Any]
 ) -> None:
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/transcript_cache",
         headers=_headers({"Prefer": "resolution=ignore-duplicates,return=minimal"}),
         json={
@@ -509,6 +515,7 @@ def put_cached_transcript(
             "transcript": transcript,
         },
         timeout=_TIMEOUT,
+        idempotent=True,  # ignore-duplicates = on-conflict-do-nothing → повтор безопасен
     )
     r.raise_for_status()
 
@@ -517,7 +524,7 @@ def put_cached_transcript(
 
 
 def get_clip_edit_row(job_id: str, clip_id: str) -> dict[str, Any] | None:
-    r = httpx.get(
+    r = http.get(
         f"{_base()}/clip_edits",
         params={"job_id": f"eq.{job_id}", "clip_id": f"eq.{clip_id}", "select": "*"},
         headers=_headers(),
@@ -529,11 +536,12 @@ def get_clip_edit_row(job_id: str, clip_id: str) -> dict[str, Any] | None:
 
 def insert_clip_edit(job_id: str, clip_id: str, edit: dict[str, Any], version: int) -> None:
     """Первичная вставка edit-state. on conflict do nothing (ignore-duplicates)."""
-    r = httpx.post(
+    r = http.post(
         f"{_base()}/clip_edits",
         headers=_headers({"Prefer": "resolution=ignore-duplicates,return=minimal"}),
         json={"job_id": job_id, "clip_id": clip_id, "version": version, "edit": edit},
         timeout=_TIMEOUT,
+        idempotent=True,  # ignore-duplicates = on-conflict-do-nothing → повтор безопасен
     )
     r.raise_for_status()
 
@@ -542,7 +550,7 @@ def update_clip_edit_if_version(
     job_id: str, clip_id: str, edit: dict[str, Any], *, expected_version: int, new_version: int
 ) -> bool:
     """Атомарный optimistic-lock: PATCH ...&version=eq.expected. True если строка обновилась."""
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/clip_edits",
         params={
             "job_id": f"eq.{job_id}",
@@ -560,7 +568,7 @@ def update_clip_edit_if_version(
 def set_render_status(
     job_id: str, clip_id: str, status: str, url: str | None, error: str | None
 ) -> None:
-    r = httpx.patch(
+    r = http.patch(
         f"{_base()}/clip_edits",
         params={"job_id": f"eq.{job_id}", "clip_id": f"eq.{clip_id}"},
         headers=_headers({"Prefer": "return=minimal"}),

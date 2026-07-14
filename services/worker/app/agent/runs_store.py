@@ -12,9 +12,8 @@ import time
 import uuid
 from typing import Any
 
-import httpx
-
 from app import cloud_state as cs
+from app import http_client as http
 from app.db import _conn
 
 _TERMINAL = ("done", "failed", "cancelled")
@@ -47,7 +46,7 @@ def _normalize(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cloud_get(run_id: str) -> dict[str, Any] | None:
-    r = httpx.get(
+    r = http.get(
         f"{cs._base()}/agent_runs",
         params={"run_id": f"eq.{run_id}", "select": "*"},
         headers=cs._headers(),
@@ -63,7 +62,7 @@ def _cloud_get(run_id: str) -> dict[str, Any] | None:
 def create_run(run_id: str, job_id: str, clip_id: str, user_id: str | None) -> None:
     now = time.time()
     if cs.cloud_enabled():
-        r = httpx.post(
+        r = http.post(
             f"{cs._base()}/agent_runs",
             headers=cs._headers({"Prefer": "return=minimal"}),
             json={
@@ -103,7 +102,7 @@ def append_event(run_id: str, event: dict[str, Any]) -> None:
         row = _cloud_get(run_id)
         events = (row.get("events") if row else None) or []
         events.append(event)
-        r = httpx.patch(
+        r = http.patch(
             f"{cs._base()}/agent_runs",
             params={"run_id": f"eq.{run_id}"},
             headers=cs._headers({"Prefer": "return=minimal"}),
@@ -125,7 +124,7 @@ def append_event(run_id: str, event: dict[str, Any]) -> None:
 def set_status(run_id: str, status: str, error: str | None = None) -> None:
     cancellable = status not in _TERMINAL
     if cs.cloud_enabled():
-        r = httpx.patch(
+        r = http.patch(
             f"{cs._base()}/agent_runs",
             params={"run_id": f"eq.{run_id}"},
             headers=cs._headers({"Prefer": "return=minimal"}),
@@ -148,7 +147,7 @@ def set_status(run_id: str, status: str, error: str | None = None) -> None:
 
 def set_function_call_id(run_id: str, fc_id: str) -> None:
     if cs.cloud_enabled():
-        r = httpx.patch(
+        r = http.patch(
             f"{cs._base()}/agent_runs",
             params={"run_id": f"eq.{run_id}"},
             headers=cs._headers({"Prefer": "return=minimal"}),
@@ -164,7 +163,7 @@ def set_function_call_id(run_id: str, fc_id: str) -> None:
 def set_cancelled(run_id: str) -> bool:
     """Пометить cancelled, ТОЛЬКО если ещё не в терминале. True если применилось (guard)."""
     if cs.cloud_enabled():
-        r = httpx.patch(
+        r = http.patch(
             f"{cs._base()}/agent_runs",
             params={"run_id": f"eq.{run_id}", "status": "eq.running"},
             headers=cs._headers({"Prefer": "return=representation"}),
@@ -186,7 +185,7 @@ def latest_run(job_id: str, clip_id: str) -> dict[str, Any] | None:
     """Самый недавний прогон клипа (ЛЮБОЙ статус) — для подсева прошлой беседы в новый run
     (история чата, #1). None если прогонов ещё не было."""
     if cs.cloud_enabled():
-        r = httpx.get(
+        r = http.get(
             f"{cs._base()}/agent_runs",
             params={
                 "job_id": f"eq.{job_id}",
@@ -213,7 +212,7 @@ def latest_run(job_id: str, clip_id: str) -> dict[str, Any] | None:
 def running_run(job_id: str, clip_id: str) -> dict[str, Any] | None:
     """Активный (running) прогон для клипа → идемпотентность старта (один run на клип)."""
     if cs.cloud_enabled():
-        r = httpx.get(
+        r = http.get(
             f"{cs._base()}/agent_runs",
             params={
                 "job_id": f"eq.{job_id}",

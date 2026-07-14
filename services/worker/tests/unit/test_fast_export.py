@@ -9,6 +9,7 @@ from app.fast_export import (
     build_composite_ass_cmd,
     can_composite_captions,
     edit_matches_baked,
+    should_serve_baked_clean,
     should_serve_cached_captioned,
 )
 from app.models import (
@@ -16,6 +17,7 @@ from app.models import (
     CaptionTrack,
     ClipEdit,
     CropOverride,
+    SilenceConfig,
     SourceInterval,
 )
 
@@ -28,6 +30,9 @@ def _edit(
     overrides: list[CropOverride] | None = None,
     aspect: str = "9:16",
     lock_per_shot: bool = True,
+    manual_cuts: list[float] | None = None,
+    suppressed_cuts: list[float] | None = None,
+    silence: SilenceConfig | None = None,
 ) -> ClipEdit:
     return ClipEdit(
         id="clip_01",
@@ -37,6 +42,9 @@ def _edit(
         reframe_overrides=overrides or [],
         aspect=aspect,
         lock_per_shot=lock_per_shot,
+        manual_cuts=manual_cuts or [],
+        suppressed_cuts=suppressed_cuts or [],
+        silence_config=silence,
     )
 
 
@@ -83,6 +91,67 @@ def test_follow_motion_does_not_match() -> None:
     # ПИКСЕЛИ (пан вместо статики) → дешёвый композит субтитров поверх locked-базы НЕВЕРЕН → полный
     # ре-рендер. lock_per_shot=True (дефолт) совпадает с baked → fast-path остаётся.
     assert not edit_matches_baked(_edit(lock_per_shot=False), seg_start=SEG_START, seg_end=SEG_END)
+
+
+def test_suppressed_cut_merge_does_not_match() -> None:
+    # MERGE (suppressed_cuts) СКЛЕИВАЕТ два соседних региона в один [prev.t0, next.t1], оставляя
+    # кадрирование ПЕРВОГО (apply_cuts_to_regions) → кадр второго шота МЕНЯЕТСЯ → пиксели уже не
+    # те, что в baked. Без этого гейта юзер, склеивший шоты, молча качал бы baked со СТАРЫМ
+    # кадрированием, хотя превью показывает склеенное (WYSIWYG сломан, без единой ошибки).
+    assert not edit_matches_baked(
+        _edit(suppressed_cuts=[42.0]), seg_start=SEG_START, seg_end=SEG_END
+    )
+
+
+def test_manual_split_cut_still_matches() -> None:
+    # SPLIT (manual_cuts) — обе половины НАСЛЕДУЮТ mode+points родителя (_split_region_at) →
+    # кадрирование НЕ меняется → пиксели идентичны baked → fast-path остаётся валиден. (Если юзер
+    # потом перекрасит одну половину, это придёт как reframe_overrides → гейт выше их уже режет.)
+    assert edit_matches_baked(_edit(manual_cuts=[42.0]), seg_start=SEG_START, seg_end=SEG_END)
+
+
+# ─────────────────────────── should_serve_baked_clean (302-редирект clean.mp4) ───────────────
+
+
+def test_baked_clean_served_for_pristine_edit() -> None:
+    # Нетронутый клип: чистый рендер edit'а == запечённый clips/<id>.mp4 (reframe+watermark, 9:16,
+    # БЕЗ субтитров) → /export/clean.mp4 отдаёт 302 на CDN, api не качает source и не жжёт CV.
+    assert should_serve_baked_clean(_edit(), seg_start=SEG_START, seg_end=SEG_END)
+
+
+def test_baked_clean_not_served_when_silence_removal_on() -> None:
+    # Удаление пауз вычитается из интервалов НА РЕНДЕРЕ → тайминг baked (С паузами) не тот →
+    # редирект отдал бы клип с паузами. Честный полный путь.
+    assert not should_serve_baked_clean(
+        _edit(silence=SilenceConfig(enabled=True)), seg_start=SEG_START, seg_end=SEG_END
+    )
+
+
+def test_baked_clean_not_served_when_silence_config_present_but_off() -> None:
+    # Toggle выключен → дырок нет → baked валиден (недеструктивный флип, см. SilenceConfig).
+    assert should_serve_baked_clean(
+        _edit(silence=SilenceConfig(enabled=False)), seg_start=SEG_START, seg_end=SEG_END
+    )
+
+
+@pytest.mark.parametrize(
+    "edit_kwargs",
+    [
+        {"intervals": [SourceInterval(source_start=SEG_START + 5.0, source_end=SEG_END)]},  # трим
+        {"overrides": [CropOverride(source_start=SEG_START, source_end=SEG_END, mode="fit")]},
+        {"aspect": "1:1"},
+        {"lock_per_shot": False},  # follow = пан вместо статики
+        {"suppressed_cuts": [42.0]},  # merge меняет кадр второго шота
+    ],
+)
+def test_baked_clean_not_served_when_geometry_changed(edit_kwargs: dict[str, object]) -> None:
+    # Любая правка ГЕОМЕТРИИ → baked-пиксели ≠ рендер edit'а → редирект молча отдал бы НЕ ТО видео.
+    # Лучше медленно и верно, чем быстро и неверно (правило №8: без тихих подмен).
+    assert not should_serve_baked_clean(
+        _edit(**edit_kwargs),  # type: ignore[arg-type]
+        seg_start=SEG_START,
+        seg_end=SEG_END,
+    )
 
 
 # ─────────────────────────── can_composite_captions (полный гейт) ───────────────────────────

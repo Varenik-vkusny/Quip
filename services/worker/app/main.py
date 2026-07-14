@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import (
     BackgroundTasks,
     FastAPI,
@@ -30,7 +31,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -93,6 +94,7 @@ from app.tasks import (
     run_pipeline_job,
     run_upload_job,
     run_upload_job_from_r2,
+    segment_bounds,
 )
 
 _UPLOAD_CHUNK = 1024 * 1024  # 1 МБ потоковой записи (не держим весь файл в памяти)
@@ -115,6 +117,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(httpx.TransportError)
+def _upstream_transport_error(_request: Request, exc: httpx.TransportError) -> JSONResponse:
+    """Сетевой сбой К UPSTREAM'у (Supabase/PostgREST) → 503 «попробуй ещё», а НЕ 500.
+
+    Прод-инцидент 2026-07-13: под нагрузкой (concurrency=80 на 2 vCPU, занятых CV) TLS-handshake к
+    Supabase не укладывался в connect-бюджет → ``httpcore.ConnectTimeout: SSL handshake timed out``
+    / ``ReadTimeout``. Ни один модуль их не ловил и глобального обработчика не было → любой блип
+    БД становился жёстким 500 у пользователя. 500 = «сервер сломан» (клиент не ретраит); 503 +
+    Retry-After = «занят, повтори» — честная семантика transient-сбоя.
+
+    Это BACKSTOP, а не глушилка: транспорт уже ретраится с backoff'ом в app.http_client. Сюда
+    доходит только ИСЧЕРПАВШИЙ ретраи сбой — и он остаётся ВИДИМЫМ (лог + явный 503, правило №8:
+    без тихих фолбэков). Ловим httpx.TransportError — базовый класс Connect/Read/Write/Pool-
+    таймаутов и сетевых/протокольных ошибок; HTTPStatusError (4xx/5xx) НЕ ловим — это не транспорт.
+    """
+    print(f"[upstream] transport error → 503: {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "upstream temporarily unavailable (try again shortly)"},
+        headers={"Retry-After": "2"},
+    )
+
 
 # Раздача артефактов: data/<job_id>/clips/<clip>.mp4 → /media/<job_id>/clips/<clip>.mp4
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1473,16 +1499,36 @@ def export_clip_clean_mp4(
 ) -> Response:
     """Чистый mp4 БЕЗ прожжённых субтитров (экспорт-свобода: пере-монтаж где угодно).
 
-    Рендерит текущий edit-state с ass_name=None в clips/{clip}_clean.mp4 и отдаёт файл.
-    Синхронно: рендер ~секунды (FastAPI крутит sync-эндпоинт в threadpool). Очередь/статус —
-    на этапе масштаба (infra-план §2.3). Сбой рендера → HTTP 500 (правило №8, не тихо).
+    FAST PATH (Level 1, 2026-07-14): геометрия нетронута → 302-РЕДИРЕКТ на запечённый чистый клип
+    ``clips/{clip}.mp4`` на CDN. api-бокс НЕ гоняет байты и НЕ считает CV. Это тот же фикс, что
+    captioned получил 2026-07-10 — clean по недосмотру остался на полном пути и был
+    ГАРАНТИРОВАННЫМ отказом: он ВСЕГДА качал весь source в RAM-backed FS Cloud Run (ФС=RAM → OOM,
+    503) и ВСЕГДА пересчитывал CV + энкодил (> 300s request-timeout → 504). Composite-fast-path
+    его не спасал — тот закрыт условием ``if with_subtitles:`` (tasks.render_edit_to_file).
+    Гейт СТРОГИЙ (fast_export.should_serve_baked_clean): любая правка геометрии / удаление пауз →
+    полный рендер, иначе молча отдали бы НЕ ТО видео (правило №8).
+
+    Иначе рендерит текущий edit-state с ass_name=None в clips/{clip}_clean.mp4 и отдаёт файл.
+    Синхронно (FastAPI крутит sync-эндпоинт в threadpool). Сбой рендера → HTTP 500 (правило №8).
     Owner-only (IDOR): header ЛИБО scoped-тикет ``?mt=`` (нативный download).
     """
     _require_media_access(job_id, authorization, x_user_id, mt)
     try:
-        store.ensure_edit(job_id, clip_id)  # из грида (без открытия редактора) тоже работает
+        edit = store.ensure_edit(job_id, clip_id)  # из грида (без редактора) тоже работает
     except (FileNotFoundError, KeyError, JobError) as e:
         raise HTTPException(status_code=404, detail="clip/segment not found") from e
+    # Запечённый clean (variant="") пишет пайплайн (run.render_one_clip) и НИКОГДА не перетирает
+    # прожжённый экспорт (storage.upload_clip) → объект неизменяем, протухшее отдать нельзя.
+    _seg = segment_bounds(job_id, clip_id)
+    if _seg is not None and fast_export.should_serve_baked_clean(
+        edit, seg_start=_seg[0], seg_end=_seg[1]
+    ):
+        try:
+            return _no_referrer(
+                RedirectResponse(storage.clip_read_url(job_id, clip_id), status_code=302)
+            )
+        except Exception as e:  # noqa: BLE001 — редирект best-effort; падаем в честный рендер
+            print(f"[export] baked clean redirect failed {job_id}/{clip_id}: {e}")
     out_rel = f"clips/{clip_id}_clean.mp4"
     try:
         render_edit_to_file(job_id, clip_id, with_subtitles=False, out_rel=out_rel)
