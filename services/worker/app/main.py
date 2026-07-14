@@ -2428,10 +2428,11 @@ def get_render(
 # 8192 MiB exceeded» → контейнер убит ВМЕСТЕ со всеми in-flight запросами (массовые 503). CV теперь
 # уезжает в Cloud Run Job (32Gi, 8 CPU, реальный диск), а здесь остаются два предохранителя.
 
-# Гвардия от стампида спавнов: (job, clip) → monotonic-время последнего спавна rebake-job'а. Фронт
-# поллит тот же GET, и БЕЗ этого каждый поллинг спавнил бы новый Job. ⚠️ ПРОЦЕССНАЯ и best-effort:
-# Cloud Run держит N контейнеров, у каждого свой дикт → дубль-спавн между контейнерами возможен
-# (безвреден — rebake идемпотентен, перепечёт тот же payload). Фронт дедупит со своей стороны.
+# Гвардия от стампида спавнов: (job, ключ-варианта) → monotonic-время последнего спавна rebake-job'а
+# (ключ РАЗЛИЧАЕТ locked/follow — это два разных CV-прогона, заявка на один не должна глушить
+# другой). Фронт поллит тот же GET, и БЕЗ этого каждый поллинг спавнил бы новый Job. ⚠️ ПРОЦЕССНАЯ
+# и best-effort: Cloud Run держит N контейнеров, у каждого свой дикт → дубль-спавн между
+# контейнерами возможен (безвреден — rebake идемпотентен, перепечёт тот же payload). Фронт дедупит.
 _REBAKE_SPAWNED: dict[tuple[str, str], float] = {}
 _REBAKE_LOCK = threading.Lock()
 
@@ -2451,8 +2452,14 @@ def _cv_semaphore() -> threading.Semaphore:
         return _CV_SEMAPHORE
 
 
-def _claim_rebake_spawn(job_id: str, clip_id: str, ttl_sec: float) -> bool:
-    """True — этот запрос ИМЕЕТ ПРАВО заспавнить rebake-job для клипа (иначе он уже печётся).
+def _claim_rebake_spawn(
+    job_id: str, clip_id: str, ttl_sec: float, *, lock_per_shot: bool = True
+) -> bool:
+    """True — этот запрос ИМЕЕТ ПРАВО заспавнить rebake-job для ВАРИАНТА клипа (иначе он печётся).
+
+    Заявка — на (job, вариант-плана): locked и follow — РАЗНЫЕ CV-прогоны и разные записи в
+    персисте, поэтому заявка на один вариант не должна блокировать спавн другого (иначе юзер,
+    переключивший «слежение», ждал бы TTL впустую).
 
     Best-effort, ПРОЦЕССНЫЙ (см. ``_REBAKE_SPAWNED``): защищает от стампида поллингов ОДНОГО
     контейнера, а не от дубля между контейнерами. Протухшие записи (> ttl) чистим тут же.
@@ -2462,17 +2469,19 @@ def _claim_rebake_spawn(job_id: str, clip_id: str, ttl_sec: float) -> bool:
         for k, ts in list(_REBAKE_SPAWNED.items()):
             if now - ts > ttl_sec:
                 del _REBAKE_SPAWNED[k]
-        key = (job_id, clip_id)
+        key = (job_id, db.reframe_regions_key(clip_id, lock_per_shot=lock_per_shot))
         if key in _REBAKE_SPAWNED:
             return False
         _REBAKE_SPAWNED[key] = now
         return True
 
 
-def _drop_rebake_claim(job_id: str, clip_id: str) -> None:
-    """Снять заявку на спавн (спавн упал) → следующий поллинг честно попробует снова."""
+def _drop_rebake_claim(job_id: str, clip_id: str, *, lock_per_shot: bool = True) -> None:
+    """Снять заявку на спавн ВАРИАНТА (спавн упал) → следующий поллинг честно попробует снова."""
     with _REBAKE_LOCK:
-        _REBAKE_SPAWNED.pop((job_id, clip_id), None)
+        _REBAKE_SPAWNED.pop(
+            (job_id, db.reframe_regions_key(clip_id, lock_per_shot=lock_per_shot)), None
+        )
 
 
 @app.get("/jobs/{job_id}/clips/{clip_id}/reframe", response_model=None)
@@ -2519,20 +2528,19 @@ def get_clip_reframe(
     # batch-пайплайн (или rebake-job) уже посчитал PySceneDetect-границы дефолтного интервала и
     # сохранил их. Если клип НЕ тримили/не сдвигали (один интервал == дефолт), отдаём их МГНОВЕННО
     # (+ перекрас под ручные override'ы/cut'ы — их накладывает читатель, payload остаётся чистым).
-    persisted = db.get_reframe_regions(job_id, clip_id)
+    # Читаем ВАРИАНТ, соответствующий наведению клипа: locked (канонический ключ) / follow
+    # (``clip_id#follow``). Раньше персиста follow не было вовсе → follow-клип НИКОГДА не попадал
+    # в fast-path и гонял полный CV на КАЖДОЕ открытие редактора (прод-инцидент 2026-07-13: все
+    # клипы, убившие web-контейнер, были lock_per_shot=False).
+    persisted = db.get_reframe_regions(job_id, clip_id, lock_per_shot=edit.lock_per_shot)
     # meta.json — лёгкий JSON-ридер (НЕ скачивание source); нужен fast-path'у для frame-snap
     # границ override-split в нативном fps (инвариант кадровой сетки). Тяжёлый ensure_source
     # остаётся ниже, на slow-path.
     meta = artifacts.load_meta(job_id)
-    # follow (lock_per_shot=False) НЕ может брать запечённые регионы (они LOCKED) → пересчёт ниже.
-    if (
-        edit.lock_per_shot
-        and persisted
-        and intervals_match_default(
-            edit.source_intervals,
-            persisted.get("default_start", -1),
-            persisted.get("default_end", -1),
-        )
+    if persisted and intervals_match_default(
+        edit.source_intervals,
+        persisted.get("default_start", -1),
+        persisted.get("default_end", -1),
     ):
         iv = edit.source_intervals[0]
         return {
@@ -2554,21 +2562,24 @@ def get_clip_reframe(
 
     s = get_settings()
     seg = segment_bounds(job_id, clip_id)
-    # ДЕФОЛТНЫЙ кейс (клип не тримили, lock): именно его и обслуживает persisted-payload — значит
-    # его можно испечь ОДИН раз в большом контейнере и отдавать fast-path'ом всем следующим
-    # запросам. Считать это в web-контейнере = OOM (инцидент). → спавним Job, отвечаем 202.
+    # ДЕФОЛТНЫЙ кейс (клип не тримили) — В ЛЮБОМ РЕЖИМЕ наведения: именно его обслуживает
+    # persisted-payload (свой ключ на вариант) → его можно испечь ОДИН раз в большом контейнере и
+    # отдавать fast-path'ом всем следующим запросам. Считать это в web-контейнере = OOM (инцидент).
+    # → спавним Job (тот же вариант, что просят), отвечаем 202.
     bakeable = (
-        edit.lock_per_shot
-        and persisted is None
+        persisted is None
         and seg is not None
         and intervals_match_default(edit.source_intervals, seg[0], seg[1])
     )
     if bakeable and dispatch.spawn_enabled():
-        if _claim_rebake_spawn(job_id, clip_id, s.reframe_rebake_guard_sec):
+        if _claim_rebake_spawn(
+            job_id, clip_id, s.reframe_rebake_guard_sec, lock_per_shot=edit.lock_per_shot
+        ):
             try:
-                dispatch.spawn("rebake_regions", job_id, clip_id)
+                dispatch.spawn("rebake_regions", job_id, clip_id, edit.lock_per_shot)
             except Exception as e:  # noqa: BLE001 — сбой диспатча ВИДИМ (правило №8), не молча
-                _drop_rebake_claim(job_id, clip_id)  # следующий поллинг попробует снова
+                # следующий поллинг попробует снова
+                _drop_rebake_claim(job_id, clip_id, lock_per_shot=edit.lock_per_shot)
                 raise HTTPException(
                     status_code=500, detail=f"reframe rebake dispatch failed: {e}"
                 ) from e
@@ -2628,16 +2639,12 @@ def get_clip_reframe(
 
     # Backfill (локальный/dev-путь и старые джобы): только что посчитали реальные регионы on-demand
     # → сохраним, чтобы следующий (холодный) контейнер взял fast-path. ЖЁСТКИЕ условия безопасности:
-    #   • persisted is None — НИКОГДА не перетираем канонический batch-entry (или чужой shift);
+    #   • persisted is None — НИКОГДА не перетираем УЖЕ ИСПЕЧЁННУЮ запись ЭТОГО ВАРИАНТА;
     #   • без reframe_overrides — region_lists ЧИСТЫЕ авто-регионы (fast-path наложит override сам);
     #   • один интервал — payload хранит ровно один дефолтный интервал.
-    # Персистим как канонические ТОЛЬКО locked-регионы (follow НЕ перетирает baked-дефолт).
-    if (
-        edit.lock_per_shot
-        and persisted is None
-        and not edit.reframe_overrides
-        and len(region_lists) == 1
-    ):
+    # Пишем ПОД КЛЮЧОМ СВОЕГО ВАРИАНТА (follow → ``clip_id#follow``) → follow-план физически не
+    # может затереть канонический locked-entry (и наоборот) — это разные ключи в одном jsonb.
+    if persisted is None and not edit.reframe_overrides and len(region_lists) == 1:
         iv = edit.source_intervals[0]
         try:
             db.put_reframe_regions(
@@ -2646,6 +2653,7 @@ def get_clip_reframe(
                 build_persist_payload(
                     region_lists[0], iv.source_start, iv.source_end, fps=meta.fps
                 ),
+                lock_per_shot=edit.lock_per_shot,
             )
         except Exception as e:  # noqa: BLE001 — backfill best-effort, ответ важнее
             print(

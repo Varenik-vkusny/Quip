@@ -44,7 +44,9 @@ def main() -> int:
     # (dispatch.map_render_clips_cloudrun), каждый рендерит свой клип и пишет результат в R2.
     # ``rebake_regions`` — тяжёлый reframe-CV промаха кэша /reframe: раньше он гонялся ВНУТРИ
     # HTTP-запроса web-Service'а (8Gi, FS=RAM) и убивал контейнер по OOM вместе со всеми соседними
-    # запросами (инцидент 2026-07-13). Аргументы: (job_id, clip_id|null → ВСЕ клипы джоба).
+    # запросами (инцидент 2026-07-13). Аргументы (JOB_ARGS — ПОЗИЦИОННЫЙ JSON-список):
+    # (job_id, clip_id|null → ВСЕ клипы джоба, lock_per_shot: true=locked (деф.) / false=follow —
+    # ДВА разных CV-плана, каждый со своим ключом персиста; печём ТОЛЬКО запрошенный).
     handlers: dict[str, Callable[..., None]] = {
         "run_job": run_pipeline_job,
         "upload_job": run_upload_job_from_r2,

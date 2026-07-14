@@ -614,22 +614,40 @@ def get_job_artifact(job_id: str, key: str) -> Any:
     return None
 
 
-def put_reframe_regions(job_id: str, clip_id: str, value: dict[str, Any]) -> None:
+def reframe_regions_key(clip_id: str, *, lock_per_shot: bool = True) -> str:
+    """Ключ варианта плана в ``job_artifacts.reframe_regions`` (см. ``cs.reframe_regions_key``).
+
+    Реэкспорт ЕДИНОГО источника правды (правило «дублируется логика → выноси в ОДНУ функцию»):
+    locked → ``clip_id`` (канонический ключ, НЕ менялся), follow → ``clip_id#follow``.
+    """
+    return cs.reframe_regions_key(clip_id, lock_per_shot=lock_per_shot)
+
+
+def put_reframe_regions(
+    job_id: str, clip_id: str, value: dict[str, Any], *, lock_per_shot: bool = True
+) -> None:
     """Персистнуть reframe-регионы дефолтного интервала клипа (домен 1, cloud-only).
 
     Cross-container: batch-фан-аут (render_one_clip) считает реальные границы шотов, а /reframe
     (web-контейнер) их читает → редактор показывает РЕАЛЬНЫЕ склейки мгновенно, без пересчёта CV.
+    ``lock_per_shot`` выбирает ВАРИАНТ плана (locked-статика / follow-пан) → свой ключ в jsonb
+    (``reframe_regions_key``), поэтому follow НЕ перетирает канонический batch-entry.
     Best-effort: 0 обновлённых строк логируем (не глотаем). Локально — no-op (диск analysis/*)."""
     if cs.cloud_enabled():
-        n = cs.merge_reframe_regions(job_id, clip_id, value)
+        n = cs.merge_reframe_regions(job_id, clip_id, value, lock_per_shot=lock_per_shot)
         if not n:
             print(f"[put_reframe_regions] WARN: no artifacts row for job={job_id} clip={clip_id}")
 
 
-def get_reframe_regions(job_id: str, clip_id: str) -> dict[str, Any] | None:
-    """Персистнутый reframe-payload клипа из Postgres (cloud); локально → None (диск)."""
+def get_reframe_regions(
+    job_id: str, clip_id: str, *, lock_per_shot: bool = True
+) -> dict[str, Any] | None:
+    """Персистнутый reframe-payload клипа из Postgres (cloud); локально → None (диск).
+
+    Читает ИМЕННО тот вариант, который просят (locked / follow — ``reframe_regions_key``): планы
+    геометрически разные, подмешивать их друг другу нельзя."""
     if cs.cloud_enabled():
-        return cs.get_reframe_regions(job_id, clip_id)
+        return cs.get_reframe_regions(job_id, clip_id, lock_per_shot=lock_per_shot)
     return None
 
 

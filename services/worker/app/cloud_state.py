@@ -63,6 +63,25 @@ def lock_applied(rows: list[dict[str, Any]]) -> bool:
     return len(rows) == 1
 
 
+# Суффикс follow-варианта плана в ключе jsonb-словаря job_artifacts.reframe_regions.
+_FOLLOW_KEY_SUFFIX = "#follow"
+
+
+def reframe_regions_key(clip_id: str, *, lock_per_shot: bool = True) -> str:
+    """Ключ плана клипа в jsonb-словаре ``job_artifacts.reframe_regions``. PURE, ЕДИНЫЙ источник.
+
+    Locked и follow — ДВА РАЗНЫХ CV-плана одного клипа (статичный кроп на шот vs следящий пан).
+    Раньше персистился только locked, поэтому follow-клип НИКОГДА не попадал в fast-path → полный
+    CV на КАЖДОЕ открытие редактора (прод: все OOM-клипы были follow). Теперь оба живут в ТОЙ ЖЕ
+    колонке под РАЗНЫМИ ключами: RPC ``merge_reframe_regions`` пишет ``jsonb_build_object(p_clip_id,
+    …)`` — ключ = что передали, миграция не нужна.
+
+    ⚠️ Locked-ключ = ГОЛЫЙ ``clip_id`` (байт-в-байт как раньше) — уже запечённые прод-данные и
+    batch-персист (``run.py``) обязаны продолжать читаться. Follow — ``<clip_id>#follow``.
+    """
+    return clip_id if lock_per_shot else f"{clip_id}{_FOLLOW_KEY_SUFFIX}"
+
+
 # ─────────────────────────── jobs ───────────────────────────
 
 
@@ -446,17 +465,27 @@ def get_job_artifact(job_id: str, key: str) -> Any:
     return row.get(key) if row else None
 
 
-def merge_reframe_regions(job_id: str, clip_id: str, value: dict[str, Any]) -> int:
+def merge_reframe_regions(
+    job_id: str, clip_id: str, value: dict[str, Any], *, lock_per_shot: bool = True
+) -> int:
     """Атомарно вписать reframe-регионы ОДНОГО клипа в job_artifacts.reframe_regions (домен 1).
 
     RPC ``merge_reframe_regions`` (migrations/0013): server-side ``||``-merge внутри одного UPDATE
     сериализуется блокировкой строки → параллельные фан-аут-контейнеры, пишущие РАЗНЫЕ clip_id,
     не теряют запись друг друга (как set_clip_video_url). Возвращает число обновлённых строк
-    (0 = строки артефактов нет → вызыватель логирует, не глотает, правило №8)."""
+    (0 = строки артефактов нет → вызыватель логирует, не глотает, правило №8).
+
+    ``lock_per_shot`` выбирает КЛЮЧ записи (``reframe_regions_key``): locked → ``clip_id``
+    (канонический batch-entry), follow → ``clip_id#follow``. Разные ключи ⇒ ``||``-merge их НЕ
+    перетирает — оба плана живут в одной колонке."""
     r = http.post(
         f"{_base()}/rpc/merge_reframe_regions",
         headers=_headers(),
-        json={"p_job_id": job_id, "p_clip_id": clip_id, "p_value": value},
+        json={
+            "p_job_id": job_id,
+            "p_clip_id": reframe_regions_key(clip_id, lock_per_shot=lock_per_shot),
+            "p_value": value,
+        },
         timeout=_TIMEOUT,
         idempotent=True,  # server-side ``||``-merge ТОГО ЖЕ значения → повтор = no-op
     )
@@ -464,9 +493,13 @@ def merge_reframe_regions(job_id: str, clip_id: str, value: dict[str, Any]) -> i
     return int(r.json())
 
 
-def get_reframe_regions(job_id: str, clip_id: str) -> dict[str, Any] | None:
+def get_reframe_regions(
+    job_id: str, clip_id: str, *, lock_per_shot: bool = True
+) -> dict[str, Any] | None:
     """Персистнутый reframe-payload ОДНОГО клипа (или None). Читает job_artifacts.reframe_regions
-    (словарь {clip_id: payload}) и достаёт запись клипа."""
+    (словарь {key: payload}) и достаёт запись ВАРИАНТА (locked → clip_id, follow → clip_id#follow —
+    ``reframe_regions_key``). Locked-план НИКОГДА не отдаётся follow-читателю и наоборот: это
+    РАЗНЫЕ геометрии (статика vs пан), подмешивание = «то залипло, то поехало» на одном клипе."""
     r = http.get(
         f"{_base()}/job_artifacts",
         params={"job_id": f"eq.{job_id}", "select": "reframe_regions"},
@@ -478,7 +511,7 @@ def get_reframe_regions(job_id: str, clip_id: str) -> dict[str, Any] | None:
     blob = row.get("reframe_regions") if row else None
     if not isinstance(blob, dict):
         return None
-    entry = blob.get(clip_id)
+    entry = blob.get(reframe_regions_key(clip_id, lock_per_shot=lock_per_shot))
     return entry if isinstance(entry, dict) else None
 
 

@@ -311,17 +311,19 @@ def render_edit_to_file(job_id: str, clip_id: str, *, with_subtitles: bool, out_
         ass_path.parent.mkdir(parents=True, exist_ok=True)
         write_caption_ass(edit.captions, words, cmap, ass_path, play_w=out_w, play_h=out_h)
 
-    # ЕДИНЫЙ источник плана: сперва пробуем ПРОЧИТАТЬ запечённый batch-план (без CV) — детерминизм
-    # превью==рендер + быстрый ре-рендер. Авторитетен ТОЛЬКО для locked+untrimmed+fps-match
-    # (зеркало preview fast-path get_clip_reframe). Иначе — честный CV-пересчёт (правило №8).
+    # ЕДИНЫЙ источник плана: сперва пробуем ПРОЧИТАТЬ запечённый план СВОЕГО ВАРИАНТА наведения
+    # (locked → clip_id, follow → clip_id#follow) — без CV, детерминизм превью==рендер + быстрый
+    # ре-рендер. Авторитетен ТОЛЬКО для untrimmed+fps-match (plan_to_regions сам проверяет и вернёт
+    # None иначе). ⚠️ ЗЕРКАЛО preview fast-path (get_clip_reframe): читатели ОБЯЗАНЫ ходить за одним
+    # и тем же вариантом, иначе превью показывало бы baked-план, а скачанный файл — CV-пересчёт
+    # (WYSIWYG-дрейф). Промах → честный CV-пересчёт (правило №8, без тихого фолбэка).
     regions: list[list[TrackRegion]] | None = None
-    if edit.lock_per_shot:
-        persisted = db.get_reframe_regions(job_id, clip_id)
-        if persisted:
-            regions = plan_to_regions(
-                persisted, edit.source_intervals, edit.reframe_overrides, fps=src_fps,
-                manual_cuts=edit.manual_cuts, suppressed_cuts=edit.suppressed_cuts,
-            )  # fmt: skip
+    persisted = db.get_reframe_regions(job_id, clip_id, lock_per_shot=edit.lock_per_shot)
+    if persisted:
+        regions = plan_to_regions(
+            persisted, edit.source_intervals, edit.reframe_overrides, fps=src_fps,
+            manual_cuts=edit.manual_cuts, suppressed_cuts=edit.suppressed_cuts,
+        )  # fmt: skip
     if regions is None:
         _rlog.info(
             "render: plan-read miss -> CV recompute (follow/trim/fps/no-plan) job=%s clip=%s",
@@ -399,8 +401,10 @@ def render_clip_edit_job(job_id: str, clip_id: str) -> None:
         db.set_render_status(job_id, clip_id, "failed", None, f"unexpected: {e}")
 
 
-def rebake_reframe_regions_job(job_id: str, clip_id: str | None = None) -> None:
-    """Пере-испечь КАНОНИЧЕСКИЕ reframe-регионы клипа (домен 1) в БОЛЬШОМ контейнере Cloud Run Job.
+def rebake_reframe_regions_job(
+    job_id: str, clip_id: str | None = None, lock_per_shot: bool = True
+) -> None:
+    """Пере-испечь reframe-регионы клипа (домен 1) в БОЛЬШОМ контейнере Cloud Run Job.
 
     ЗАЧЕМ (прод-инцидент 2026-07-13): при промахе кэша ``GET …/reframe`` раньше качал source.mp4 в
     RAM-FS web-Service'а (8Gi, filesystem=RAM) и гонял PySceneDetect+MediaPipe+torch-ASD ВНУТРИ
@@ -410,10 +414,16 @@ def rebake_reframe_regions_job(job_id: str, clip_id: str | None = None) -> None:
 
     ЧТО ПЕЧЁМ: РОВНО тот payload, который читает fast-path ``/reframe`` и plan-read рендера —
     ДЕФОЛТНЫЙ интервал клипа (границы сегмента из ``segment_bounds``, НЕ пользовательский трим),
-    ``lock_per_shot=True``, БЕЗ override'ов/ручных cut'ов: persisted-запись = каноническая batch-
-    геометрия, поверх которой читатель сам накладывает override'ы юзера. Тот же вызов
-    ``resolve_regions_accurate`` + ``build_persist_payload(..., fps=meta.fps)``, что делал API →
-    считаем ТО ЖЕ, просто в другом контейнере (кадровая сетка не трогается, Δ=0).
+    БЕЗ override'ов/ручных cut'ов: persisted-запись = чистая batch-геометрия, поверх которой
+    читатель сам накладывает override'ы юзера. Тот же вызов ``resolve_regions_accurate`` +
+    ``build_persist_payload(..., fps=meta.fps)``, что делал API → считаем ТО ЖЕ, просто в другом
+    контейнере (кадровая сетка не трогается, Δ=0).
+
+    ``lock_per_shot`` — КАКОЙ ВАРИАНТ наведения печём: ``True`` (дефолт) = канонический locked
+    (статичный кроп на шот, ключ ``clip_id``), ``False`` = follow (следящий пан, ключ
+    ``clip_id#follow``). Это ДВА РАЗНЫХ CV-прогона → печём ТОЛЬКО запрошенный (печь оба = 2×
+    стоимость и латентность на клип). Follow раньше не персистился вовсе → полный CV на каждое
+    открытие редактора follow-клипа (прод-инцидент).
 
     ``clip_id=None`` → печём ВСЕ клипы джоба (это же и инструмент ремедиации для юзеров, у кого
     ``job_artifacts.reframe_regions`` вычищен/пуст). Ошибка любого клипа НЕ глотается: логируем и
@@ -456,7 +466,7 @@ def rebake_reframe_regions_job(job_id: str, clip_id: str | None = None) -> None:
                 speaker_crop_scale=s.reframe_speaker_crop_scale,
                 face_fps=s.reframe_face_fps,
                 smoothing=s.reframe_smoothing,
-                lock_per_shot=True,  # persisted-регионы ВСЕГДА locked (follow пересчитывается)
+                lock_per_shot=lock_per_shot,  # печём ИМЕННО запрошенный вариант (locked/follow)
                 min_hold_sec=s.reframe_min_hold_sec,
                 speak_threshold=s.reframe_speak_threshold,
                 scene_threshold=s.reframe_scene_threshold,
@@ -470,14 +480,16 @@ def rebake_reframe_regions_job(job_id: str, clip_id: str | None = None) -> None:
                 reframe_cache.build_persist_payload(
                     region_lists[0], iv.source_start, iv.source_end, fps=meta.fps
                 ),
+                lock_per_shot=lock_per_shot,  # свой ключ на вариант → locked/follow не перетираются
             )
         except Exception as e:  # noqa: BLE001 — падение ОДНОГО клипа не должно съесть остальные…
             failed.append(cid)
             _rlog.exception("rebake: FAILED job=%s clip=%s: %s", job_id, cid, e)
             continue  # …но и не глотается: JobError ниже (правило №8)
         _rlog.info(
-            "rebake: baked job=%s clip=%s [%.2f..%.2f] in %.1fs",
-            job_id, cid, iv.source_start, iv.source_end, time.perf_counter() - t0,
+            "rebake: baked job=%s clip=%s [%.2f..%.2f] %s in %.1fs",
+            job_id, cid, iv.source_start, iv.source_end,
+            "locked" if lock_per_shot else "follow", time.perf_counter() - t0,
         )  # fmt: skip
     if failed:
         raise JobError("reframe", f"rebake failed for {job_id}: {', '.join(failed)}")
