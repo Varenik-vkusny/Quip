@@ -5,10 +5,15 @@
 > history, and what you must NOT break. If a doc contradicts this file, **this file wins** for
 > "current reality"; the older doc is kept only for the *why*/history.
 >
-> Last reality check: **2026-07-10** (instant captioned download L1+L2 + api 8Gi/2CPU shipped — see
-> Current reality §). Docs were reorganized on 2026-06-24 — see **§"Documentation
-> system"** below for where everything lives and how it stays current. All point-in-time history moved
-> to **`docs/archive/`**; this index + the living docs in `docs/` root are the source of truth.
+> Last reality check: **2026-07-14** (прод-инцидент OOM/503/504 на `quip-api` — ПОЧИНЕН и проверен на
+> бою; тяжёлый CV уехал из веб-сервиса в Cloud Run Job; конфиг `quip-api` изменён — см. Current reality §
+> ПЕРВЫМ пунктом). Docs были реорганизованы 2026-06-24 — см. **§"Documentation system"** ниже.
+> Вся точечная история — в **`docs/archive/`**; этот индекс + живые доки в корне `docs/` = источник правды.
+>
+> ⏳ **НЕ ЗАДЕПЛОЕНО на 2026-07-14:** образ `sha256:dc6f0c5f` (собран, гейт зелёный) — удаление
+> `POST /presets` (единственный write-эндпоинт БЕЗ авторизации), ретрай `/usage` (платящий юзер
+> выглядел как Free), сужение SELECT в `load_meta` (тащил ВЕСЬ транскрипт ради `fps`). Плюс фронт
+> Vercel. Миграций не требует, контракт API не менялся.
 
 ---
 
@@ -70,6 +75,32 @@
 ## 🟢 Current reality (the baseline — many older docs predate this)
 
 - **It's LIVE in production.** Not a local prototype anymore.
+- **☠️ 2026-07-14 — ПРОД-ИНЦИДЕНТ `quip-api` (OOM/503/504) ПОЧИНЕН. Читай это ПЕРЕД любой правкой
+  `/reframe`, `/export/*`, `http_client` или конфига Cloud Run.** Полный разбор + уроки →
+  `docs/archive/2026-07-14-api-oom-incident.md`.
+  **Корень:** `quip-api` — это веб-СЕРВИС, но редакторные эндпоинты делали в нём работу рендер-фермы
+  (качали весь `source.mp4` В ОПЕРАТИВКУ — ФС Cloud Run = RAM, тома у сервиса НЕ БЫЛО — и гоняли CV
+  по 80–195 с). Один такой запрос убивал контейнер ВМЕСТЕ со всеми чужими запросами внутри.
+  **Настоящий убийца — режим FOLLOW** (`lock_per_shot=false`): запечённый план ВСЕГДА locked, значит
+  follow-клип **не мог взять кэш в принципе** → полный CV на КАЖДОЕ открытие, навсегда.
+  **ЖИВАЯ КОНФИГУРАЦИЯ `quip-api` (НЕ ПОНИЖАТЬ, это не «на всякий случай»):**
+  `--concurrency=8` (был дефолт 80 → один OOM убивал 79 чужих запросов) · `--timeout=900`
+  (был дефолт 300 → замеренный экспорт занимает 175 с, запаса не было) ·
+  `--add-volume=ephemeral-disk,size=32Gi` на **`/root/data`** + `TMPDIR` (ФС=RAM — у Job'ов том был,
+  у сервиса НЕТ; **ЭТО И БЫЛ КОРЕНЬ OOM**) · `--execution-environment=gen2` · 8Gi / 2 CPU.
+  Всё это прописано в `deploy/cloudrun/deploy.ps1` §7 — раньше скрипт держал `4Gi/1CPU` и **молча
+  откатывал бы прод вдвое**.
+  **Тяжёлый CV уехал из API в Cloud Run Job** (`rebake_regions`): промах кэша `/reframe` → **202
+  `{"status":"computing"}`** + диспатч Job'а, клиент поллит; `?compute=0` → **204** (префетч соседей
+  НИКОГДА не платит за CV); провал бэйка → **маркер провала → 503** (иначе клиент поллил бы вечно, а
+  Job спавнился каждые 5 минут). Изменённый интервал (трим/сдвиг) — CV остаётся в API, но **за
+  семафором** (`_cv_permit`, общий бюджет контейнера на ВСЕ тяжёлые пути) + кламп окна CV.
+  **Миграция 0019** (`job_artifacts.baked_policy`) — 302 на baked-клип отдаётся ТОЛЬКО если тариф
+  владельца не менялся с момента запекания (иначе Free→Pro качал бы С вотермаркой, Pro→Free — БЕЗ).
+  **⚠️ ПРАВИЛО, КОТОРОЕ СТОИЛО ДЕНЕГ:** PATCH к PostgREST безопасно ретраить **⇔ его фильтр НЕ ЧИТАЕТ
+  колонку, которую этот же PATCH ПИШЕТ**. `consume_clip_credit` — это CAS (`clip_credits=gte.1`);
+  повтор после потерянного ответа матчил 0 строк → `False` → **402 «заплати ещё», хотя кредит уже
+  списан**. См. `app/http_client.py` + `tests/unit/test_retry_cas_safety.py`.
 - **Frontend:** Vercel project **`quip-app`** — **deployed by CLI `vercel deploy --prod`** (⚠️ GitHub
   auto-deploy DEAD since 2026-06-25 — the `akybaevtimur1` GitHub account is blocked).
   (The old note "apps/web isn't deployed / the `quip` Vercel project is the landing repo" is
@@ -294,9 +325,14 @@
   `quip-pipeline` (**8 vCPU / 32Gi**, task-timeout 10800s) + `quip-render` (**4 vCPU / 16Gi** per clip)
   now mount a **32Gi `ephemeral-disk`** at `TMPDIR=/root/data/tmp` (Part C) → source+temp live on DISK,
   not tmpfs=RAM (OOM ceiling removed; >10Gi needed a Cloud Run ephemeral-storage quota bump). The
-  **`quip-api` service = 4Gi** (bumped from 2Gi after an OOM: it transitively imports torch/cv2/mediapipe
-  and runs `export/captioned.mp4` on-demand render + `export/package.zip` BytesIO **in-process** — future
-  fix = move those to a Job). R2 CORS must allow the web origin + **expose `ETag`** (multipart).
+  ⚠️ **УСТАРЕЛО (2026-07-14): «`quip-api` service = 4Gi» — НЕВЕРНО.** Живой конфиг: **8Gi / 2 CPU,
+  `--concurrency=8`, `--timeout=900`, `gen2` + СВОЙ `ephemeral-disk 32Gi` на `/root/data` (= `DATA_ROOT`)
+  с `TMPDIR` туда же.** У сервиса тома НЕ БЫЛО ВООБЩЕ — это и был корень прод-OOM 2026-07-13 (ФС=RAM:
+  скачанный `source.mp4` и извлечённые кадры ели ПАМЯТЬ). Тяжёлый CV/рендер уехал в Cloud Run Job; то,
+  что осталось в API, ходит через общий семафор `_cv_permit`. Замер: базовый RSS процесса = **64 МБ**
+  (torch/cv2/mediapipe **НЕ импортируются при старте** — старое утверждение про «1–1.5Gi baseline» было
+  легендой). Разбор → `docs/archive/2026-07-14-api-oom-incident.md`.
+  R2 CORS must allow the web origin + **expose `ETag`** (multipart).
 - **R2 retention:** daily Modal Cron `cleanup_stale_sources` deletes `source.mp4`/`preview.mp4`
   older than **60 days** (clips kept forever) — source is 70–90 % of storage; without this R2 grows
   unbounded (one-time payment, perpetual storage). Egress is free; only GB-month bills (>10 GB tier).
