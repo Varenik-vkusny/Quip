@@ -130,16 +130,19 @@ def test_crop_invalid_mode_422(monkeypatch, tmp_path):
 
 
 def test_preset_save_and_apply(monkeypatch, tmp_path):
+    # Тест проверяет /apply-preset (она авторизована и живёт). Пресет теперь СЕЕТСЯ БИБЛИОТЕКОЙ, а
+    # не через `POST /presets`: ту ручку удалили 2026-07-14 — единственный write-эндпоинт БЕЗ
+    # авторизации (см. test_presets_write_closed.py). Тот же приём — у соседнего теста
+    # test_user_override_of_seed_id_keeps_seed_position.
     from app.editor import presets
+    from app.editor.presets import save_preset
+    from app.models import CaptionPreset, CaptionStyle
 
     monkeypatch.setattr(presets, "DATA_ROOT", tmp_path / "data")
     client, job = _client(monkeypatch, tmp_path)
-    saved = client.post(
-        "/presets",
-        json={"name": "Bold", "style": {"color": "#00FF00"}, "highlight": None},
-    )
-    assert saved.status_code == 200
-    pid = saved.json()["id"]
+    pid = save_preset(
+        CaptionPreset(id="preset_bold", name="Bold", style=CaptionStyle(color="#00FF00"))
+    ).id
     v = client.get(f"/jobs/{job}/clips/clip_01/edit").json()["version"]
     r = client.post(
         f"/jobs/{job}/clips/clip_01/apply-preset", json={"version": v, "preset_id": pid}

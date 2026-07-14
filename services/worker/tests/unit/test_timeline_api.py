@@ -176,12 +176,16 @@ def test_presets_include_seeds_by_default(monkeypatch, tmp_path):
 
 
 def test_user_preset_appended_after_seeds_and_no_dup(monkeypatch, tmp_path):
+    # Сеем БИБЛИОТЕКОЙ: `POST /presets` удалён 2026-07-14 (единственный write без авторизации, см.
+    # test_presets_write_closed.py). Проверяемое поведение — порядок «сиды, затем пользовательский,
+    # без дублей» — не изменилось.
+    from app.editor.presets import save_preset
+    from app.models import CaptionPreset, CaptionStyle
+
     client, _ = _client(monkeypatch, tmp_path)
-    saved = client.post(
-        "/presets", json={"name": "Mine", "style": {"color": "#00FF00"}, "highlight": None}
-    )
-    assert saved.status_code == 200
-    pid = saved.json()["id"]
+    pid = save_preset(
+        CaptionPreset(id="preset_mine", name="Mine", style=CaptionStyle(color="#00FF00"))
+    ).id
     ids = [p["id"] for p in client.get("/presets").json()]
     assert ids[:4] == ["preset_a", "preset_b", "preset_c", "preset_d"]
     assert pid in ids

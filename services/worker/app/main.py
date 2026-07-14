@@ -78,7 +78,6 @@ from app.errors import JobError
 from app.models import (
     AgentEvent,
     AgentRun,
-    CaptionPreset,
     CaptionStyle,
     CaptionTrack,
     ClipOut,
@@ -2923,12 +2922,6 @@ def refresh_clip_analysis(
 # ──────────────────────────── Preset endpoints ────────────────────────────
 
 
-class SavePresetBody(BaseModel):
-    name: str
-    style: CaptionStyle
-    highlight: HighlightStyle | None = None
-
-
 class ApplyPresetBody(BaseModel):
     version: int
     preset_id: str
@@ -2936,18 +2929,19 @@ class ApplyPresetBody(BaseModel):
 
 @app.get("/presets")
 def get_presets() -> list[dict[str, Any]]:
+    """Список стилевых пресетов (читает PresetStrip во фронте).
+
+    ⚠️ ЗАПИСЬ (`POST /presets`) УДАЛЕНА 2026-07-14 (аудит). Она была ЕДИНСТВЕННЫМ write-эндпоинтом
+    БЕЗ АВТОРИЗАЦИИ (ни `authorization`, ни `x_user_id`, ни `_require_*`), а Cloud Run поднят с
+    `--allow-unauthenticated` → писать мог ЛЮБОЙ ИЗ ИНТЕРНЕТА, в ГЛОБАЛЬНЫЙ `presets.json`, который
+    эта ручка отдаёт ВСЕМ юзерам (вандализм + безлимитный рост файла). Фронт её НИКОГДА не вызывал,
+    живая фича «Мои шаблоны» = per-user `profiles.style_preferences`, а в облаке запись всё равно
+    уходила на ЭФЕМЕРНЫЙ диск и терялась при перезапуске. Мёртвый код с дырой → удалён, а не
+    «прикрыт токеном»: авторизовывать нечего, если ручку никто не зовёт. Понадобится снова —
+    делай per-user (как style_preferences), НЕ глобальный файл. Пиннится
+    tests/unit/test_presets_write_closed.py.
+    """
     return [p.model_dump() for p in presets_mod.list_presets()]
-
-
-@app.post("/presets")
-def create_preset(body: SavePresetBody) -> dict[str, Any]:
-    preset = CaptionPreset(
-        id=f"preset_{uuid.uuid4().hex[:8]}",
-        name=body.name,
-        style=body.style,
-        highlight=body.highlight,
-    )
-    return presets_mod.save_preset(preset).model_dump()
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/apply-preset")
