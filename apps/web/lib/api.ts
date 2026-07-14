@@ -1392,10 +1392,17 @@ async function fetchClipReframe(
   jobId: string,
   clipId: string,
   compute: boolean,
+  retry: boolean,
   signal?: AbortSignal,
 ): Promise<ReframeResult> {
   // compute=0 → «отдай кэш, но НЕ запускай расчёт» (префетч соседей: юзер их даже не открыл).
-  const query = compute ? "" : "?compute=0";
+  // retry=true → СБРОСИТЬ серверный маркер провала и пересчитать. Без него кнопка «Повторить»
+  // вечно получала бы тот же 503: провалившийся бэйк пишет маркер в БД, и /reframe отдаёт по нему
+  // 503 (а не 202) — иначе клиент поллил бы бесконечно, а сервер спавнил Job каждые 5 минут.
+  const params = new URLSearchParams();
+  if (!compute) params.set("compute", "0");
+  if (retry) params.set("retry", "true");
+  const query = params.size ? `?${params}` : "";
   const res = await fetch(`${BASE}/jobs/${jobId}/clips/${clipId}/reframe${query}`, {
     cache: "no-store",
     headers: await authHeaders(),
@@ -1426,18 +1433,25 @@ async function fetchClipReframe(
 export function getClipReframe(
   jobId: string,
   clipId: string,
-  opts: { compute?: boolean; signal?: AbortSignal } = {},
+  opts: { compute?: boolean; retry?: boolean; signal?: AbortSignal } = {},
 ): Promise<ReframeResult> {
   const compute = opts.compute !== false;
-  const key = `${jobId}/${clipId}/${compute}`;
+  const retry = opts.retry === true;
+  // ⚠️ retry ВХОДИТ в ключ: иначе «Повторить» присоединился бы к УЖЕ ЛЕТЯЩЕМУ обычному запросу,
+  // серверный маркер провала не сбросился бы, и кнопка молча ничего не делала.
+  const key = `${jobId}/${clipId}/${compute}/${retry}`;
   const existing = reframeInFlight.get(key);
   if (existing) return existing;
-  const p: Promise<ReframeResult> = fetchClipReframe(jobId, clipId, compute, opts.signal).finally(
-    () => {
-      // Снимаем ТОЛЬКО свою запись (за время полёта ключ мог быть перезанят новым промисом).
-      if (reframeInFlight.get(key) === p) reframeInFlight.delete(key);
-    },
-  );
+  const p: Promise<ReframeResult> = fetchClipReframe(
+    jobId,
+    clipId,
+    compute,
+    retry,
+    opts.signal,
+  ).finally(() => {
+    // Снимаем ТОЛЬКО свою запись (за время полёта ключ мог быть перезанят новым промисом).
+    if (reframeInFlight.get(key) === p) reframeInFlight.delete(key);
+  });
   // ⚠️ ГОНКА: abort роняет промис АСИНХРОННО, а .finally снимает запись ещё позже. Без этого
   // слушателя вызов сразу ПОСЛЕ abort (перезагрузка плана: stopReframe → loadReframe; StrictMode)
   // подхватывал бы УЖЕ ОТМЕНЁННЫЙ промис и получал AbortError как «ошибку расчёта». Слушатель

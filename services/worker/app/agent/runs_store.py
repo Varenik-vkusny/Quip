@@ -161,7 +161,13 @@ def set_function_call_id(run_id: str, fc_id: str) -> None:
 
 
 def set_cancelled(run_id: str) -> bool:
-    """Пометить cancelled, ТОЛЬКО если ещё не в терминале. True если применилось (guard)."""
+    """Пометить cancelled, ТОЛЬКО если ещё не в терминале. True если применилось (guard).
+
+    ``idempotent=False`` — CAS: ФИЛЬТР (``status=eq.running``) читает ту самую колонку, которую
+    этот PATCH пишет (``status='cancelled'``), т.е. успешная попытка САМА его обесценивает.
+    Повтор после ПОТЕРЯННОГО ответа (ReadTimeout/5xx) матчил бы 0 строк → False → «не удалось
+    отменить» на РЕАЛЬНО отменённом прогоне. Не ретраим — ошибка транспорта всплывает честно.
+    """
     if cs.cloud_enabled():
         r = http.patch(
             f"{cs._base()}/agent_runs",
@@ -169,6 +175,7 @@ def set_cancelled(run_id: str) -> bool:
             headers=cs._headers({"Prefer": "return=representation"}),
             json={"status": "cancelled", "cancellable": False, "updated_at": "now()"},
             timeout=cs._TIMEOUT,
+            idempotent=False,
         )
         r.raise_for_status()
         return cs.lock_applied(r.json())

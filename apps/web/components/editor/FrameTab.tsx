@@ -7,6 +7,7 @@ import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import type { Aspect } from "@/lib/api";
 import { mmss } from "@/lib/format";
+import type { ReframeFailure } from "@/lib/reframePoll";
 import type { ClipEdit, CropOverride, SourceInterval } from "@/lib/types";
 import { FitTimeline, type FitRegion, type ForceMode, type SelectedShot } from "./FitTimeline";
 
@@ -86,8 +87,9 @@ export function FrameTab({
   shotOverrides?: CropOverride[];
   nowSec?: number;
   shotLoading?: boolean;
-  /** Расчёт плана шотов упал → FitTimeline рисует честную ошибку + «Повторить». */
-  shotFailed?: boolean;
+  /** Расчёт плана шотов кончился ничем → FitTimeline рисует честную ошибку + «Повторить».
+   *  "error" — сервер сказал «упало»; "timeout" — бесконечный 202, бюджет поллинга исчерпан. */
+  shotFailed?: ReframeFailure | null;
   onRetryShots?: () => void;
   onApplyShotRange: (sourceStart: number, sourceEnd: number, mode: ForceMode) => void;
   // ── P1: per-shot binding — the mode/crop/bg controls act on the SELECTED shot when one is picked ──

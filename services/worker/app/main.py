@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import sys
 import threading
 import time
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -88,7 +89,7 @@ from app.models import (
     SourceInterval,
 )
 from app.pipeline.stage5_render import aspect_to_dims
-from app.run import DATA_ROOT
+from app.run import DATA_ROOT, render_policy_fingerprint, resolve_clip_render_policy
 from app.tasks import (
     render_clip_edit_job,
     render_edit_to_file,
@@ -318,6 +319,57 @@ def _enforce_quota(user_id: str | None) -> None:
                 f"Upgrade your plan or top up to keep creating clips."
             ),
         )
+
+
+# ──────────────── ОБЩИЙ БЮДЖЕТ ТЯЖЁЛОЙ РАБОТЫ КОНТЕЙНЕРА (RAM-предохранитель) ────────────────
+# Прод-OOM 2026-07-13/14: `quip-api` — 8 GiB / 2 vCPU / containerConcurrency=8. Базовый RSS
+# процесса мизерный (64 МиБ холодный, 240 МиБ после первого CV — torch/cv2/mediapipe грузятся
+# ЛЕНИВО), т.е. почти все 8 GiB съедают ПОР-ЗАПРОСНЫЕ аллокации. Замерено:
+#   • extract_loudness            — 0.288 ГБ на КАЖДЫЙ ЧАС источника (весь waveform в RAM);
+#   • ASD score_tracks_in_segment — 3.76 МБ на СЕКУНДУ дорожки (×2–3 на копиях кропов);
+#   • render_edit_to_file         — 0.7–1.0 ГБ (60с клип) … 2.0–2.9 ГБ (180с) + RSS ffmpeg.
+# Любой из них ×8 одновременных = смерть контейнера ВМЕСТЕ со всеми in-flight запросами.
+# Поэтому семафор ОДИН на процесс (общий бюджет, а не по семафору на эндпоинт — иначе 4 пути
+# сложат свои потолки и снова переберут RAM). Ленивая инициализация: размер из settings в рантайме
+# (тест подменяет сам объект). Занят дольше REFRAME_API_CV_WAIT_SEC → ЧЕСТНЫЙ 503 + Retry-After:
+# копить очередь бессмысленно — она упрётся в 300с request-timeout Cloud Run и клиент получит 504.
+_CV_SEMAPHORE: threading.Semaphore | None = None
+_CV_SEM_LOCK = threading.Lock()
+
+
+def _cv_semaphore() -> threading.Semaphore:
+    """Семафор тяжёлых in-process путей (``REFRAME_API_CV_CONCURRENCY``, деф. 2). Процессный."""
+    global _CV_SEMAPHORE
+    with _CV_SEM_LOCK:
+        if _CV_SEMAPHORE is None:
+            _CV_SEMAPHORE = threading.Semaphore(max(1, get_settings().reframe_api_cv_concurrency))
+        return _CV_SEMAPHORE
+
+
+@contextmanager
+def _cv_permit(what: str) -> Iterator[None]:
+    """Взять пермит общего бюджета контейнера на время ТЯЖЁЛОГО тела (CV / декод / энкод).
+
+    ЕДИНСТВЕННАЯ точка acquire/release (правило «дублируется логика → выноси в ОДНУ функцию»):
+    её обязаны оборачивать ВСЕ пути, аллоцирующие сотни МБ+ внутри HTTP-запроса — /reframe (CV),
+    POST /jobs/{id}/clips (extract_loudness), POST /edit/crop (ASD), GET /export/*.mp4 (полный
+    рендер). Пермит возвращается на ЛЮБОМ выходе (исключение / ранний return) — ``finally``:
+    утёкший пермит навсегда съедает слот, и через N провалов контейнер отвечает 503 ВСЕМ.
+
+    Слот не освободился за ``reframe_api_cv_wait_sec`` → HTTPException 503 + ``Retry-After``
+    (тело НЕ выполняется — RAM не растёт, правило №8: отказ честный и видимый).
+    """
+    sem = _cv_semaphore()
+    if not sem.acquire(timeout=get_settings().reframe_api_cv_wait_sec):
+        raise HTTPException(
+            status_code=503,
+            detail=f"{what} busy (too many concurrent heavy requests)",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 @app.get("/usage")
@@ -1283,11 +1335,16 @@ def extract_clip(
     # Кривую громкости пересчитываем best-effort (уточняет снап краёв к вдоху/обрезку филлеров).
     # Сбой ТОЛЬКО пересчёта loudness → None (клип всё равно чисто снапнут по словам); НЕ глотаем
     # посторонние ошибки — ловим узко вокруг extract_loudness.
-    try:
-        loudness = extract_loudness(str(src_path)) or None
-    except Exception as e:  # noqa: BLE001 — только пересчёт loudness опционален (правило №8: лог)
-        print(f"[extract_clip] WARN loudness recompute failed job={job_id}: {e}")
-        loudness = None
+    # ⚠️ ПОД ПЕРМИТОМ: extract_loudness держит ВЕСЬ декодированный waveform в RAM — 0.288 ГБ на ЧАС
+    # источника (замер: 415 МБ на 5193с). При containerConcurrency=8 и ≥4ч источнике 8 таких
+    # запросов = 9+ ГБ → OOM всего контейнера. Пермит берём СНАРУЖИ try (иначе его 503 съел бы
+    # `except Exception` ниже и мы бы всё равно полезли считать).
+    with _cv_permit("clip extraction"):
+        try:
+            loudness = extract_loudness(str(src_path)) or None
+        except Exception as e:  # noqa: BLE001 — только пересчёт loudness опционален (правило №8)
+            print(f"[extract_clip] WARN loudness recompute failed job={job_id}: {e}")
+            loudness = None
 
     # 5. Чистый Segment (тот же снап, что selection-path) + посев объяснимости из момента карты.
     seed = _extract_seed_from_map(job_id, body.start, body.end)
@@ -1491,6 +1548,28 @@ def export_clip_srt(
     )
 
 
+def _baked_policy_matches(job_id: str) -> bool:
+    """True ⇔ ``clips/<id>.mp4`` был запечён под ТОЙ ЖЕ политикой рендера, что положена владельцу
+    СЕЙЧАС ⇒ 302 на запечённый объект отдаст РОВНО тот файл, который дал бы полный рендер.
+
+    ДЕНЬГИ (ревью 2026-07-14). Пайплайн печёт клип под тарифом владельца НА МОМЕНТ ВЫПЕЧКИ
+    (``run.resolve_clip_render_policy`` → watermark / crf / preset), а полный рендер резолвит тариф
+    НА МОМЕНТ ЗАПРОСА. Сменился тариф — и 302 молча отдаёт НЕ ТОТ файл: **Free→Pro скачивает клип С
+    ВОТЕРМАРКОЙ** (заплатил — и всё равно с логотипом), **Pro→Free — БЕЗ вотермарки** (обход
+    монетизации). Ни один из них не увидит ошибки: файл ведь отдан.
+
+    Отпечаток политики выпечки пишет координатор рендера (``run.persist_baked_policy`` →
+    ``job_artifacts.baked_policy``, миграция 0019). НЕТ записи (все джобы до миграции; локальный
+    SQLite, где ``get_job_artifact`` — no-op) → False → ЧЕСТНЫЙ ПОЛНЫЙ РЕНДЕР. Fail-safe по
+    построению: худший случай — сегодняшняя медленная скачка, НИКОГДА — чужой файл.
+    """
+    recorded = db.get_job_artifact(job_id, "baked_policy")
+    if not isinstance(recorded, dict):
+        return False
+    owner_id = db.get_job_owner(job_id)
+    return recorded == render_policy_fingerprint(resolve_clip_render_policy(owner_id))
+
+
 @app.get("/jobs/{job_id}/clips/{clip_id}/export/clean.mp4")
 def export_clip_clean_mp4(
     job_id: str,
@@ -1510,7 +1589,10 @@ def export_clip_clean_mp4(
     Гейт СТРОГИЙ (fast_export.should_serve_baked_clean): любая правка геометрии / удаление пауз →
     полный рендер, иначе молча отдали бы НЕ ТО видео (правило №8).
 
-    Иначе рендерит текущий edit-state с ass_name=None в clips/{clip}_clean.mp4 и отдаёт файл.
+    Иначе рендерит текущий edit-state с ass_name=None в clips/{clip}_clean.mp4 и отдаёт файл — ПОД
+    ПЕРМИТОМ общего бюджета контейнера (``_cv_permit``): полный путь стоит 0.7–2.9 ГБ RAM, а
+    глобальный тумблер «убирать паузы» гонит СЮДА КАЖДУЮ скачку джоба (удаление пауз закрывает
+    fast-path) → без пермита 8 параллельных скачек = OOM.
     Синхронно (FastAPI крутит sync-эндпоинт в threadpool). Сбой рендера → HTTP 500 (правило №8).
     Owner-only (IDOR): header ЛИБО scoped-тикет ``?mt=`` (нативный download).
     """
@@ -1521,9 +1603,18 @@ def export_clip_clean_mp4(
         raise HTTPException(status_code=404, detail="clip/segment not found") from e
     # Запечённый clean (variant="") пишет пайплайн (run.render_one_clip) и НИКОГДА не перетирает
     # прожжённый экспорт (storage.upload_clip) → объект неизменяем, протухшее отдать нельзя.
+    # ДВА условия резолвит ВЫЗЫВАТЕЛЬ (гейт остаётся PURE — fast_export.should_serve_baked_clean):
+    #   • объект РЕАЛЬНО есть (непустой video_url клипа) — clip_read_url лишь СКЛЕИВАЕТ строку, и
+    #     302 на несуществующий ключ = 404 в браузере БЕЗ единой ошибки у нас;
+    #   • политика выпечки == политика владельца СЕЙЧАС — иначе отдали бы файл ЧУЖОГО тарифа
+    #     (Free→Pro: с вотермаркой, хотя заплатил; Pro→Free: без неё — обход монетизации).
     _seg = segment_bounds(job_id, clip_id)
     if _seg is not None and fast_export.should_serve_baked_clean(
-        edit, seg_start=_seg[0], seg_end=_seg[1]
+        edit,
+        seg_start=_seg[0],
+        seg_end=_seg[1],
+        baked_clip_exists=db.clip_has_baked_video(job_id, clip_id),
+        baked_policy_matches=_baked_policy_matches(job_id),
     ):
         try:
             return _no_referrer(
@@ -1533,7 +1624,8 @@ def export_clip_clean_mp4(
             print(f"[export] baked clean redirect failed {job_id}/{clip_id}: {e}")
     out_rel = f"clips/{clip_id}_clean.mp4"
     try:
-        render_edit_to_file(job_id, clip_id, with_subtitles=False, out_rel=out_rel)
+        with _cv_permit("clip export"):
+            render_edit_to_file(job_id, clip_id, with_subtitles=False, out_rel=out_rel)
     except JobError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     path = store.data_root() / job_id / out_rel
@@ -1585,8 +1677,12 @@ def export_clip_captioned_mp4(
             return _no_referrer(RedirectResponse(url, status_code=302))
         except Exception as e:  # noqa: BLE001 — cache best-effort; fall through to full render
             print(f"[export] cached captioned redirect failed {job_id}/{clip_id}: {e}")
+    # ПОД ПЕРМИТОМ: fall-through — это ПОЛНЫЙ путь (source + CV + энкод, 0.7–2.9 ГБ). Он не
+    # экзотика: клип с включённым удалением пауз (глобальный тумблер аплоада ставит его КАЖДОМУ
+    # клипу джоба) НИКОГДА не попадает ни в 302, ни в composite-fast-path → каждая скачка сюда.
     try:
-        render_edit_to_file(job_id, clip_id, with_subtitles=True, out_rel=out_rel)
+        with _cv_permit("clip export"):
+            render_edit_to_file(job_id, clip_id, with_subtitles=True, out_rel=out_rel)
     except JobError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
     if not dst.exists():
@@ -1751,37 +1847,68 @@ def _build_package_zip(job_id: str, include_clips: bool) -> bytes:
 
     include_clips=True добавляет УЖЕ ОТРЕНДЕРЕННЫЕ клипы С ДИСКА (captioned → clean), НЕ рендерит
     заново (эндпоинт дешёвый, денег/пайплайна не тратит; отсутствующие на диске клипы просто
-    пропускаются — в облаке они в R2, скачивание тут не делаем)."""
+    пропускаются — в облаке они в R2, скачивание тут не делаем).
+
+    ⚠️ ЖЁСТКИЙ ПОТОЛОК БАЙТОВ (``export_package_max_mb``, деф. 200 МБ) → HTTPException 413.
+    Зип строится в ``io.BytesIO``, а ``Response(content=...)`` буферизует ВТОРУЮ копию → расход
+    RAM ДВОЙНОЙ. Сегодня пакет 1–5 МБ только потому, что на api-контейнере
+    ``store.data_root()/<job>/clips`` ПУСТ. Но тот же контейнер, только что отрендеривший клипы на
+    диск (см. ``/export/*.mp4``), с ``include_clips=true`` (owner-authenticated, URL собирается
+    руками) зипанул бы их: до ~2.4 ГБ × 2. Перебор = ЯВНАЯ ошибка, а не тихая усечка (правило №8)
+    и не OOM всего контейнера.
+    """
     meta, meta_d, clips, edits_by_id, markers_all, chapters, moment_markers = _build_handoff(job_id)
     fps = meta.fps
     words = store.load_transcript_words(job_id)
+    cap_bytes = max(1, get_settings().export_package_max_mb) * 1024 * 1024
+    total = 0
+
+    def _guard(n_bytes: int, what: str) -> int:
+        """Учесть добавляемые байты; перебор потолка → 413 ДО того, как они попали в буфер."""
+        nonlocal total
+        total += n_bytes
+        if total > cap_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "package_too_large",
+                    "limit_mb": get_settings().export_package_max_mb,
+                    "hint": f"package exceeds the limit at {what} — export clips individually",
+                },
+            )
+        return n_bytes
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(
+
+        def _put(name: str, text: str) -> None:
+            _guard(len(text.encode("utf-8")), name)
+            z.writestr(name, text)
+
+        _put(
             "manifest.json",
             build_manifest_json({"id": job_id}, clips, markers_all, meta_d, chapters=chapters),
         )
-        z.writestr("timeline.edl", build_edl(clips, fps, meta.title))
+        _put("timeline.edl", build_edl(clips, fps, meta.title))
         # FCPXML: hook-маркеры идут ИЗ клипов, поэтому в аргумент markers кладём только моменты
         # (иначе clip-старт-маркеры продублировали бы hook-маркеры). Главы → chapter-marker.
-        z.writestr(
-            "timeline.fcpxml", build_fcpxml(clips, moment_markers, meta_d, chapters=chapters)
-        )
-        z.writestr("markers.csv", build_markers_csv(markers_all, fps))
+        _put("timeline.fcpxml", build_fcpxml(clips, moment_markers, meta_d, chapters=chapters))
+        _put("markers.csv", build_markers_csv(markers_all, fps))
         for c in clips:
             edit = edits_by_id[c.name]
             cmap = ClipTimeMap(edit.source_intervals)
-            z.writestr(f"captions/{c.name}.srt", compile_srt(edit.captions, words, cmap))
-            z.writestr(f"captions/{c.name}.vtt", build_vtt(edit.captions, words, cmap))
+            _put(f"captions/{c.name}.srt", compile_srt(edit.captions, words, cmap))
+            _put(f"captions/{c.name}.vtt", build_vtt(edit.captions, words, cmap))
         if include_clips:
             clips_dir = store.data_root() / job_id / "clips"
             for c in clips:
                 for cand in (f"{c.name}_captioned.mp4", f"{c.name}.mp4"):
                     p = clips_dir / cand
                     if p.exists():
+                        _guard(p.stat().st_size, f"clips/{c.name}.mp4")  # 413 ДО чтения файла
                         z.write(str(p), f"clips/{c.name}.mp4")
                         break
-        z.writestr("README.txt", _handoff_readme(meta, len(clips), include_clips))
+        _put("README.txt", _handoff_readme(meta, len(clips), include_clips))
     return buf.getvalue()
 
 
@@ -1959,20 +2086,52 @@ def op_extend(
     return _save_or_409(job_id, clip_id, new, body.version)
 
 
+def _validate_source_range(start: float, end: float) -> None:
+    """Гейт 400 на НЕВАЛИДНОМ source-диапазоне из тела запроса (правило №8 — явно, не молча).
+
+    Пустой/перевёрнутый/отрицательный/не-конечный диапазон — ошибка КЛИЕНТА: молча «поправив» его,
+    мы бы записали в edit бессмысленный override и/или послали CV анализировать чушь. Сам ПОТОЛОК
+    длины тут НЕ применяется (override законно накрывает весь клип) — клампится только окно, которое
+    мы соглашаемся ДЕКОДИРОВАТЬ (см. ``_tight_lock_cx``).
+    """
+    if not (math.isfinite(start) and math.isfinite(end)):
+        raise HTTPException(status_code=400, detail="source range must be finite")
+    if start < 0:
+        raise HTTPException(status_code=400, detail="source_start must be >= 0")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="source_end must be greater than source_start")
+
+
 def _tight_lock_cx(job_id: str, start: float, end: float) -> float | None:
     """Лок-центр лица для ручного tight-override: анализ лиц диапазона source → cx говорящего.
     Best-effort: сбой CV / нет лиц → None (вызывающий оставит 0.5). НЕ трогает кадровую сетку
-    (только значение cx). Тяжёлый путь (ensure_source + ASD); фронт показывает «пересчитываю»."""
+    (только значение cx). Тяжёлый путь (ensure_source + ASD); фронт показывает «пересчитываю».
+    ⚠️ Зовётся ПОД ``_cv_permit`` (op_crop) — сам пермит не берёт.
+
+    ОКНО АНАЛИЗА КЛАМПИТСЯ до ``reframe_api_cv_max_window_sec`` (деф. 180с). Диапазон приходит ИЗ
+    ТЕЛА ЗАПРОСА (``CropBody``) и НЕ ограничен ничем: ``/edit/extend`` не капит длину клипа, а
+    руками можно прислать любой. ASD держит ~3.76 МБ на СЕКУНДУ дорожки (×2–3 на копиях) → 10 минут
+    = 4.5–6.8 ГБ, 6 часов ≈ 81 ГБ: ОДИН такой запрос убивает контейнер, и семафор (он ограничивает
+    ЧИСЛО, а не РАЗМЕР) тут не спасает. Лок берём с НАЧАЛА диапазона (спикер там же) — override
+    всё равно применяется ко ВСЕМУ диапазону, меняется лишь сколько секунд мы декодируем ради cx.
+    """
     from app import artifacts
     from app.pipeline.asd_reframe import score_tracks_in_segment
     from app.pipeline.stage3_reframe import locked_cx_for_tracks
 
     s = get_settings()
+    window_end = min(end, start + max(1.0, s.reframe_api_cv_max_window_sec))
+    if window_end < end:
+        print(
+            f"[op_crop] tight face-lock window clamped job={job_id} "
+            f"[{start:.2f},{end:.2f}] → [{start:.2f},{window_end:.2f}] "
+            f"(max {s.reframe_api_cv_max_window_sec:.0f}s)"
+        )
     try:
         meta = artifacts.load_meta(job_id)
         out = artifacts.ensure_source(job_id).parent
         tracks = score_tracks_in_segment(
-            out / "source.mp4", meta.width, meta.height, start, end, s.reframe_face_fps,
+            out / "source.mp4", meta.width, meta.height, start, window_end, s.reframe_face_fps,
             crop_scale=s.reframe_speaker_crop_scale,
         )  # fmt: skip
         return locked_cx_for_tracks(
@@ -1993,15 +2152,19 @@ def op_crop(
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_owned_job(job_id, authorization, x_user_id)
+    _validate_source_range(body.source_start, body.source_end)  # 400 на мусорном диапазоне
     edit = _load_or_404(job_id, clip_id)
     if body.mode == "auto":
         new = clear_crop_overrides(edit, body.source_start, body.source_end)
         return _save_or_409(job_id, clip_id, new, body.version)
     # Ручной tight (fill) БЕЗ явного центра → лочим кроп на ЛИЦО говорящего (иначе 0.5 = пол-лица
     # на off-center субъекте). Анализ best-effort; нет лиц/сбой → None (честный 0.5-фолбэк).
+    # ⚠️ ПОД ПЕРМИТОМ: это ASD (torch+кропы, 3.76 МБ/с дорожки) — тот же бюджет RAM, что у /reframe.
+    # Центр задан клиентом → CV не нужен → пермит НЕ берём (не отбиваем 503 на дешёвом запросе).
     center = body.center
     if body.mode == "fill" and center is None:
-        center = _tight_lock_cx(job_id, body.source_start, body.source_end)
+        with _cv_permit("crop analysis"):
+            center = _tight_lock_cx(job_id, body.source_start, body.source_end)
     ov = CropOverride(
         source_start=body.source_start,
         source_end=body.source_end,
@@ -2436,21 +2599,6 @@ def get_render(
 _REBAKE_SPAWNED: dict[tuple[str, str], float] = {}
 _REBAKE_LOCK = threading.Lock()
 
-# Потолок ОДНОВРЕМЕННЫХ in-process CV (остался только edited-кейс: трим/follow — его persisted
-# payload обслужить не может). Ленивая инициализация — размер из settings в рантайме (тест может
-# подменить сам объект).
-_CV_SEMAPHORE: threading.Semaphore | None = None
-_CV_SEM_LOCK = threading.Lock()
-
-
-def _cv_semaphore() -> threading.Semaphore:
-    """Семафор in-process reframe-CV (``REFRAME_API_CV_CONCURRENCY``, деф. 2). Процессный."""
-    global _CV_SEMAPHORE
-    with _CV_SEM_LOCK:
-        if _CV_SEMAPHORE is None:
-            _CV_SEMAPHORE = threading.Semaphore(max(1, get_settings().reframe_api_cv_concurrency))
-        return _CV_SEMAPHORE
-
 
 def _claim_rebake_spawn(
     job_id: str, clip_id: str, ttl_sec: float, *, lock_per_shot: bool = True
@@ -2489,6 +2637,7 @@ def get_clip_reframe(
     job_id: str,
     clip_id: str,
     compute: bool = True,
+    retry: bool = False,
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any] | Response:
@@ -2501,8 +2650,14 @@ def get_clip_reframe(
         Job ``rebake_regions`` (32Gi, реальный диск) и просим клиента поллить ЭТОТ ЖЕ GET. CV в API
         НЕ гоняем. Локально/dev (нет ``dispatch.spawn_enabled()``) — прежнее синхронное поведение.
       • **204** — ``compute=false`` и регионов нет: neighbour-prefetch редактора не платит за CV.
-      • **503** — CV честно упал ИЛИ семафор in-process CV занят (+ ``Retry-After``); молчаливого
-        фолбэка в центр-кроп нет (правило №8) — состояние видно.
+      • **503** — CV честно упал ИЛИ семафор занят ИЛИ выпечка ПРОВАЛИЛАСЬ (persisted-МАРКЕР,
+        ``db.is_reframe_failure``) (+ ``Retry-After``); молчаливого фолбэка в центр-кроп нет
+        (правило №8) — состояние видно.
+
+    ``retry=true`` — пользовательская кнопка «Повторить»: СНИМАЕТ маркер провала и заново спавнит
+    выпечку. Без этого один transient-сбой (спот-эвикшн / сетевой блип) делал бы клип НАВСЕГДА
+    непересчитываемым, а без САМОГО маркера упавший Job давал ВЕЧНЫЙ 202 и ре-спавн 32-GiB Job'а
+    каждые 5 минут на КАЖДУЮ открытую вкладку (см. tasks.rebake_reframe_regions_job).
 
     D2 (историческое): фронт когда-то тянул ``media/<job>/reframe_<clip>.json`` со StaticFiles — на
     облаке этого файла нет (он на scratch batch-контейнера) → превью откатывалось в центр-кроп ≠
@@ -2533,6 +2688,26 @@ def get_clip_reframe(
     # в fast-path и гонял полный CV на КАЖДОЕ открытие редактора (прод-инцидент 2026-07-13: все
     # клипы, убившие web-контейнер, были lock_per_shot=False).
     persisted = db.get_reframe_regions(job_id, clip_id, lock_per_shot=edit.lock_per_shot)
+
+    # ── Домен 0: ПРОВАЛ ВЫПЕЧКИ уже записан? (маркер под ключом ЭТОГО варианта) ──
+    # Retry (кнопка юзера) — снимаем маркер И заявку на спавн, дальше идём обычным путём (ниже
+    # persisted=None → bakeable → спавн). Иначе — ЧЕСТНЫЙ 503 с причиной вместо 202: без этого
+    # упавший Job = вечный «computing» + новый 8-vCPU/32-GiB Job каждые 5 минут с каждой вкладки.
+    if db.is_reframe_failure(persisted):
+        if retry:
+            db.clear_reframe_regions(job_id, clip_id, lock_per_shot=edit.lock_per_shot)
+            _drop_rebake_claim(job_id, clip_id, lock_per_shot=edit.lock_per_shot)
+            persisted = None
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "reframe_failed",
+                    "reason": str((persisted or {}).get("error") or "shot plan computation failed"),
+                },
+                headers={"Retry-After": "30"},
+            )
+
     # meta.json — лёгкий JSON-ридер (НЕ скачивание source); нужен fast-path'у для frame-snap
     # границ override-split в нативном fps (инвариант кадровой сетки). Тяжёлый ensure_source
     # остаётся ниже, на slow-path.
@@ -2586,18 +2761,10 @@ def get_clip_reframe(
         return JSONResponse(status_code=202, content={"status": "computing"})
 
     # ── Честный in-process CV: edited-кейс (трим/follow/сдвиг), который persisted обслужить НЕ
-    # может, + локальный/dev-режим без job-бэкенда. Под СЕМАФОРОМ: N параллельных CV складывают
-    # source.mp4 (RAM-FS) + MediaPipe/torch → тот самый OOM. Слот не освободился за
-    # reframe_api_cv_wait_sec → честный 503 + Retry-After (не копим очередь в 300с request-timeout
-    # Cloud Run, где клиент всё равно получит 504).
-    sem = _cv_semaphore()
-    if not sem.acquire(timeout=s.reframe_api_cv_wait_sec):
-        raise HTTPException(
-            status_code=503,
-            detail="reframe analysis busy (too many concurrent computations)",
-            headers={"Retry-After": "5"},
-        )
-    try:
+    # может, + локальный/dev-режим без job-бэкенда. Под ПЕРМИТОМ (общий бюджет контейнера, тот же,
+    # что у extract/crop/export — см. _cv_permit): N параллельных CV складывают source.mp4 (RAM-FS)
+    # + MediaPipe/torch → тот самый OOM. Слот не освободился → честный 503 + Retry-After.
+    with _cv_permit("reframe analysis"):
         out = artifacts.ensure_source(job_id).parent
         try:
             region_lists = resolve_regions_accurate(
@@ -2634,8 +2801,6 @@ def get_clip_reframe(
             raise HTTPException(
                 status_code=503, detail="reframe analysis unavailable (try again shortly)"
             ) from e
-    finally:
-        sem.release()
 
     # Backfill (локальный/dev-путь и старые джобы): только что посчитали реальные регионы on-demand
     # → сохраним, чтобы следующий (холодный) контейнер взял fast-path. ЖЁСТКИЕ условия безопасности:

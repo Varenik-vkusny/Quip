@@ -19,12 +19,28 @@ handshake → connect-бюджет (``supa._TIMEOUT``: connect=5s) не выде
 
 БЕЗОПАСНОСТЬ ПОВТОРА (важно — деньги/дубли):
 * connect-фаза (``ConnectTimeout`` / ``ConnectError``) — соединение не встало, запрос ТОЧНО не
-  доехал до сервера → повтор безопасен для ЛЮБОГО метода, включая POST.
+  доехал до сервера → повтор безопасен для ЛЮБОГО метода, включая POST и CAS-PATCH.
 * потерянный ОТВЕТ (``ReadTimeout`` / ``RemoteProtocolError``) и 5xx — сервер МОГ применить
   запрос → повторяем только идемпотентное (GET/PATCH/PUT/DELETE), иначе POST /usage_events мог
   бы записать расход ДВАЖДЫ. Неидемпотентный POST можно явно пометить ``idempotent=True``
   (PostgREST-upsert: ``Prefer: resolution=merge-duplicates|ignore-duplicates``; merge-RPC).
 * 429 — сервер ЯВНО не обработал запрос (rate-limit) → повтор безопасен и для POST.
+
+⚠️ PATCH ИДЕМПОТЕНТЕН НЕ ВСЕГДА — УСЛОВНЫЙ (CAS) PATCH ОБЯЗАН НЕСТИ ``idempotent=False``:
+Абсолютное тело (значение посчитано в Python, не ``+= n``) делает безвредным САМ ПОВТОР ЗАПИСИ —
+но НЕ делает верным ВОЗВРАЩАЕМОЕ ЗНАЧЕНИЕ compare-and-swap'а. У CAS-PATCH'а от изменяемого
+состояния зависит ФИЛЬТР (``params``), и первая же УСПЕШНАЯ попытка этот фильтр ОБЕСЦЕНИВАЕТ:
+
+    consume_clip_credit: params={"clip_credits": "gte.1"}, json={"clip_credits": 0}
+    попытка №1 доехала (1 → 0), ответ ПОТЕРЯН → replay: gte.1 матчит 0 строк → [] → False.
+    Кредит СПИСАН, а вызыватель (main.extract_clip) отдаёт 402 «заплатите» → ДВОЙНАЯ оплата.
+
+Т.е. ретрай, который эта политика должна была предотвратить, пролез через ФИЛЬТР, а не через
+тело. Правило: **PATCH ретраится ⇔ его фильтр НЕ читает колонок, которые он же пишет**
+(``id=eq.<uuid>`` — читается; ``version=eq.N`` / ``status=eq.running`` / ``clip_credits=gte.1``
+— нет). Для второго класса → ``idempotent=False``: потерянный ответ ПОДНИМЕТ ошибку транспорта
+(вызыватель отдаст 5xx — честно), вместо тихого ЛОЖНОГО «не применилось». Список таких
+call-site'ов и гейт на них: ``tests/unit/test_retry_cas_safety.py``.
 
 НИКАКИХ ТИХИХ ФОЛБЭКОВ (правило репо №8): ретраи ограничены ``MAX_ATTEMPTS``; исчерпали —
 исходное исключение ПОДНИМАЕТСЯ. Ответ с плохим статусом возвращается КАК ЕСТЬ (не глотается),
@@ -176,9 +192,16 @@ def request(
 ) -> httpx.Response:
     """Выполнить запрос через ПУЛИРОВАННЫЙ клиент с ограниченным retry/backoff.
 
-    ``idempotent=None`` → выводится из метода (GET/PATCH/PUT/DELETE — да; POST — нет). Явный
-    ``idempotent=True`` для POST'ов, которые на самом деле upsert'ы (``Prefer:
-    resolution=merge-duplicates|ignore-duplicates``) или merge-RPC — их повтор не даёт дубля.
+    ``idempotent`` — ЯВНОЕ переопределение политики повтора (в обе стороны); ``None`` → выводится
+    из метода (GET/PATCH/PUT/DELETE — да; POST — нет):
+    * ``True`` для POST'ов, которые на самом деле upsert'ы (``Prefer:
+      resolution=merge-duplicates|ignore-duplicates``) или merge-RPC — их повтор не даёт дубля;
+    * ``False`` (opt-OUT) для УСЛОВНОГО (CAS) PATCH'а, чей ФИЛЬТР зависит от изменяемого
+      состояния — повтор после потерянного ответа вернул бы ЛОЖНОЕ «0 строк» (см. шапку модуля).
+
+    Влияет ТОЛЬКО на потерянный ответ (ReadTimeout/RemoteProtocolError) и 5xx. Connect-фаза и 429
+    ретраятся всегда: запрос ТОЧНО не применился, состояние сервера не менялось → ложного
+    «не применилось» быть не может.
 
     Возвращает ``httpx.Response`` (в т.ч. с плохим статусом, если ретраи исчерпаны) — вызыватель
     как и раньше зовёт ``raise_for_status()``. Транзиентное исключение после всех попыток
@@ -233,20 +256,26 @@ def post(url: str, *, idempotent: bool = False, **kwargs: Any) -> httpx.Response
     return request("POST", url, idempotent=idempotent, **kwargs)
 
 
-def patch(url: str, **kwargs: Any) -> httpx.Response:
-    """PATCH через пул (идемпотентен: PostgREST-PATCH пишет АБСОЛЮТНЫЕ значения → повтор = no-op).
+def patch(url: str, *, idempotent: bool | None = None, **kwargs: Any) -> httpx.Response:
+    """PATCH через пул. По умолчанию ПОВТОРЯЕТСЯ: PostgREST-PATCH пишет АБСОЛЮТНЫЕ значения
+    (``add_payg_credits``/``add_clip_credits`` считают новый баланс в Python и PATCH'ат его
+    целиком, не ``+= n``) → сама ПЕРЕЗАПИСЬ при повторе безвредна, дважды не начислит.
 
-    Важно для денег: ``add_payg_credits``/``consume_clip_credit`` считают новое значение в
-    Python и PATCH'ат его целиком (не ``+= n``), поэтому повтор НЕ начислит/не спишет дважды.
+    ⚠️ ``idempotent=False`` ОБЯЗАТЕЛЕН для УСЛОВНОГО (CAS) PATCH'а — где ФИЛЬТР читает колонку,
+    которую этот же PATCH пишет (``clip_credits=gte.1`` / ``version=eq.N`` / ``status=eq.running``).
+    Абсолютное тело делает безвредным ПОВТОР ЗАПИСИ, но НЕ делает верным ВОЗВРАЩАЕМОЕ ЗНАЧЕНИЕ:
+    успешная-но-потерянная попытка №1 обесценивает фильтр → replay матчит 0 строк → вызыватель
+    читает это как «не применилось» и врёт юзеру (402 «оплатите ещё раз» / 409 «перезагрузите»).
+    Подробности и список call-site'ов — в шапке модуля и ``tests/unit/test_retry_cas_safety.py``.
     """
-    return request("PATCH", url, **kwargs)
+    return request("PATCH", url, idempotent=idempotent, **kwargs)
 
 
-def put(url: str, **kwargs: Any) -> httpx.Response:
-    """PUT через пул (идемпотентен)."""
-    return request("PUT", url, **kwargs)
+def put(url: str, *, idempotent: bool | None = None, **kwargs: Any) -> httpx.Response:
+    """PUT через пул (по умолчанию идемпотентен; ``idempotent=False`` — opt-out, см. ``patch``)."""
+    return request("PUT", url, idempotent=idempotent, **kwargs)
 
 
-def delete(url: str, **kwargs: Any) -> httpx.Response:
-    """DELETE через пул (идемпотентен)."""
-    return request("DELETE", url, **kwargs)
+def delete(url: str, *, idempotent: bool | None = None, **kwargs: Any) -> httpx.Response:
+    """DELETE через пул (идемпотентен; ``idempotent=False`` — opt-out, как в ``patch``)."""
+    return request("DELETE", url, idempotent=idempotent, **kwargs)

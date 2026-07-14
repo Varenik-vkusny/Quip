@@ -220,6 +220,14 @@ def consume_clip_credit(user_id: str) -> bool:
     # Оптимистичный concurrency-guard: PATCH с фильтром clip_credits=gte.1 → если параллельный
     # запрос уже увёл баланс в 0, фильтр матчит 0 строк, return=representation отдаёт [] → False
     # (двойного списания при балансе 1 нет). Зеркалит SQLite consume_clip_credit (условный UPDATE).
+    #
+    # idempotent=False — CAS: ФИЛЬТР (clip_credits=gte.1) читает ту самую колонку, которую этот
+    # PATCH пишет, т.е. успешная попытка САМА его обесценивает. Повтор после ПОТЕРЯННОГО ответа
+    # (ReadTimeout/5xx) увидел бы уже списанный баланс (0) → 0 строк → [] → False, хотя кредит
+    # СПИСАН. Вызыватель (main.extract_clip) превращает False в 402 «payment_required» → юзер
+    # платит ВТОРОЙ раз и остаётся без клипа. Абсолютное тело от этого НЕ спасает: безвредна
+    # перезапись, а врёт ВОЗВРАЩАЕМОЕ значение. Потому: не ретраим — пусть ошибка транспорта
+    # всплывёт (5xx, честно), правило «никаких тихих фолбэков».
     current = int(get_profile(user_id).get("clip_credits") or 0)
     if current <= 0:
         return False
@@ -229,6 +237,7 @@ def consume_clip_credit(user_id: str) -> bool:
         headers=_headers({"Prefer": "return=representation"}),
         json={"clip_credits": current - 1},
         timeout=_TIMEOUT,
+        idempotent=False,
     )
     r.raise_for_status()
     return bool(r.json())

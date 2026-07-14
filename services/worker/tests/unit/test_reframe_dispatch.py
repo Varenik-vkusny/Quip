@@ -119,8 +119,12 @@ def _baked_store(monkeypatch) -> dict[tuple[str, str, bool], dict[str, Any]]:
     def _get(j: str, c: str, *, lock_per_shot: bool = True) -> dict[str, Any] | None:
         return baked.get((j, c, lock_per_shot))
 
+    def _clear(j: str, c: str, *, lock_per_shot: bool = True) -> None:
+        baked.pop((j, c, lock_per_shot), None)
+
     monkeypatch.setattr(db, "put_reframe_regions", _put)
     monkeypatch.setattr(db, "get_reframe_regions", _get)
+    monkeypatch.setattr(db, "clear_reframe_regions", _clear)
     return baked
 
 
@@ -565,3 +569,118 @@ def test_cloudrun_job_threads_lock_per_shot_arg() -> None:
         mp.setattr(tasks, "rebake_reframe_regions_job", lambda *a: calls.append(a))
         assert cj.main() == 0
     assert calls == [("job1", "clip_01", False)]
+
+
+# ══════ УПАВШИЙ rebake-Job: МАРКЕР ПРОВАЛА вместо ВЕЧНОГО 202 + ре-спавна (ревью 2026-07-14) ══════
+# Было: Job падает → JobError → execution exit≠0 и НИЧЕГО не пишет → get_reframe_regions=None →
+# bakeable=True → /reframe отвечает 202 НА КАЖДЫЙ ПОЛЛИНГ, ВЕЧНО. Клиент поллит каждые 2.5с без
+# лимита, TTL заявки на спавн = 300с → КАЖДЫЕ 5 МИНУТ КАЖДАЯ ОТКРЫТАЯ ВКЛАДКА спавнит новый Job
+# (8 vCPU / 32 GiB): качает source, жжёт 80–195с CV, падает, повторяет. Неограниченные деньги на
+# одном плохом клипе. Стало: провал ПЕРСИСТИТСЯ маркером → 503 с причиной (Retry-UI уже есть).
+
+
+def test_failed_rebake_job_persists_a_failure_marker(monkeypatch, tmp_path):
+    """Провал CV → пишем маркер ПОД ТЕМ ЖЕ ключом варианта (и всё равно падаем видимо: JobError)."""
+    _client(monkeypatch, tmp_path)
+    from app import tasks
+    from app.errors import JobError
+
+    job = "jobRB"
+    baked = _baked_store(monkeypatch)
+    src = tmp_path / "data" / job / "source.mp4"
+    src.write_bytes(b"\x00")
+    monkeypatch.setattr(artifacts, "ensure_source", lambda jid: src)
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("mediapipe exploded")
+
+    monkeypatch.setattr(reframe_cache, "resolve_regions_accurate", boom)
+
+    with pytest.raises(JobError):
+        tasks.rebake_reframe_regions_job(job, "clip_01")
+
+    marker = baked[(job, "clip_01", True)]
+    assert db.is_reframe_failure(marker)
+    assert "mediapipe exploded" in str(marker["error"])
+
+
+def test_failure_marker_returns_503_and_never_respawns_the_job(monkeypatch, tmp_path):
+    """Маркер есть → 503 с причиной (НЕ 202): клиент видит честную ошибку + Retry, а мы НЕ спавним
+    Job на каждый поллинг и НЕ гоним CV в web-контейнере."""
+    client, job = _client(monkeypatch, tmp_path)
+    spawned = _spawns(monkeypatch)
+    baked = _baked_store(monkeypatch)
+    baked[(job, "clip_01", True)] = db.reframe_failure_marker("mediapipe exploded")
+    cv = _no_cv(monkeypatch)
+
+    first = client.get(f"/jobs/{job}/clips/clip_01/reframe")
+    second = client.get(f"/jobs/{job}/clips/clip_01/reframe")
+
+    assert [first.status_code, second.status_code] == [503, 503]
+    assert spawned == []  # ← иначе: новый 8-vCPU/32-GiB Job КАЖДЫЕ 5 минут, вечно
+    assert cv == []
+
+
+def test_retry_clears_the_marker_and_redispatches(monkeypatch, tmp_path):
+    """Иначе ЛЮБОЙ transient-провал (спот-эвикшн, сеть) становился бы ВЕЧНЫМ для клипа."""
+    client, job = _client(monkeypatch, tmp_path)
+    spawned = _spawns(monkeypatch)
+    baked = _baked_store(monkeypatch)
+    baked[(job, "clip_01", True)] = db.reframe_failure_marker("transient")
+    cv = _no_cv(monkeypatch)
+
+    r = client.get(f"/jobs/{job}/clips/clip_01/reframe", params={"retry": "true"})
+
+    assert r.status_code == 202  # снова печём
+    assert r.json() == {"status": "computing"}
+    assert spawned == [("rebake_regions", job, "clip_01", True)]
+    assert (job, "clip_01", True) not in baked  # маркер снят
+    assert cv == []
+
+
+def test_failed_rebake_never_overwrites_an_already_baked_plan(monkeypatch, tmp_path):
+    """Маркер НЕ ЗАТИРАЕТ рабочий план. Ремедиационный прогон (``clip_id=None`` — «перепечь ВСЁ»)
+    идёт и по клипам, У КОТОРЫХ ПЛАН УЖЕ ЕСТЬ. Если CV упадёт на таком клипе, слепая запись маркера
+    ПОДМЕНИЛА БЫ исправный план ошибкой → редактор начал бы отдавать 503 там, где всё работало.
+    Провал перепечки = «оставь как было», а не «сломай»."""
+    _client(monkeypatch, tmp_path)
+    from app import tasks
+    from app.errors import JobError
+
+    job = "jobRB"
+    baked = _baked_store(monkeypatch)
+    good = _payload(cx=0.4)
+    baked[(job, "clip_01", True)] = good  # план уже испечён и рабочий
+    src = tmp_path / "data" / job / "source.mp4"
+    src.write_bytes(b"\x00")
+    monkeypatch.setattr(artifacts, "ensure_source", lambda jid: src)
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("transient CV blip")
+
+    monkeypatch.setattr(reframe_cache, "resolve_regions_accurate", boom)
+
+    with pytest.raises(JobError):
+        tasks.rebake_reframe_regions_job(job, "clip_01")
+
+    assert baked[(job, "clip_01", True)] == good  # план цел, маркера НЕТ
+    assert not db.is_reframe_failure(baked[(job, "clip_01", True)])
+
+
+def test_follow_failure_marker_does_not_poison_the_locked_variant(monkeypatch, tmp_path):
+    """Маркер живёт ПОД КЛЮЧОМ ВАРИАНТА: упавший follow не ломает исправный locked-план."""
+    client, job = _client(monkeypatch, tmp_path)
+    _spawns(monkeypatch)
+    baked = _baked_store(monkeypatch)
+    baked[(job, "clip_01", True)] = _payload(cx=0.4)  # locked испечён
+    baked[(job, "clip_01", False)] = db.reframe_failure_marker("boom")  # follow упал
+    cv = _no_cv(monkeypatch)
+
+    locked = client.get(f"/jobs/{job}/clips/clip_01/reframe")
+    assert locked.status_code == 200
+    assert locked.json()["regions"][0]["points"][0]["cx"] == 0.4
+
+    _set_follow(client, job)
+    follow = client.get(f"/jobs/{job}/clips/clip_01/reframe")
+    assert follow.status_code == 503
+    assert cv == []

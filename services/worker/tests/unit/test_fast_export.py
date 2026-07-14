@@ -103,35 +103,56 @@ def test_suppressed_cut_merge_does_not_match() -> None:
     )
 
 
-def test_manual_split_cut_still_matches() -> None:
-    # SPLIT (manual_cuts) — обе половины НАСЛЕДУЮТ mode+points родителя (_split_region_at) →
-    # кадрирование НЕ меняется → пиксели идентичны baked → fast-path остаётся валиден. (Если юзер
-    # потом перекрасит одну половину, это придёт как reframe_overrides → гейт выше их уже режет.)
-    assert edit_matches_baked(_edit(manual_cuts=[42.0]), seg_start=SEG_START, seg_end=SEG_END)
+def test_manual_split_cut_does_not_match() -> None:
+    # РЕГРЕССИЯ РЕВЬЮ 2026-07-14. Здесь СНАЧАЛА стоял тест, утверждавший ОБРАТНОЕ («split пиксель-
+    # нейтрален») — он ЗАКРЕПЛЯЛ БАГ. Правда в _split_region_at (reframe_cache.py): у fill-региона
+    # ЛЕВАЯ половина сохраняет r.points, а ПРАВАЯ ПЕРЕ-ЯКОРИТСЯ в ОДНУ статичную точку на cx
+    # ПОСЛЕДНЕЙ точки родителя. Если у родителя была ТРАЕКТОРИЯ (locked-регион её имеет, когда
+    # compute_locked_cx вернул None — лицо не влезло в бюджет кропа → _track_trajectory), правая
+    # половина из ПАНОРАМЫ становится СТАТИКОЙ ⇒ пиксели ≠ baked.
+    assert not edit_matches_baked(_edit(manual_cuts=[42.0]), seg_start=SEG_START, seg_end=SEG_END)
 
 
 # ─────────────────────────── should_serve_baked_clean (302-редирект clean.mp4) ───────────────
 
 
+def _clean(edit: ClipEdit, **kw: object) -> bool:
+    """should_serve_baked_clean с «всё в порядке» по умолчанию → тест меняет ОДНУ переменную."""
+    return should_serve_baked_clean(
+        edit,
+        seg_start=SEG_START,
+        seg_end=SEG_END,
+        baked_clip_exists=bool(kw.get("baked_clip_exists", True)),
+        baked_policy_matches=bool(kw.get("baked_policy_matches", True)),
+    )
+
+
 def test_baked_clean_served_for_pristine_edit() -> None:
-    # Нетронутый клип: чистый рендер edit'а == запечённый clips/<id>.mp4 (reframe+watermark, 9:16,
-    # БЕЗ субтитров) → /export/clean.mp4 отдаёт 302 на CDN, api не качает source и не жжёт CV.
-    assert should_serve_baked_clean(_edit(), seg_start=SEG_START, seg_end=SEG_END)
+    # Нетронутый клип + объект есть + политика та же → 302 на CDN: api не качает source, не жжёт CV.
+    assert _clean(_edit())
+
+
+def test_baked_clean_not_served_when_baked_object_missing() -> None:
+    # Клип с УПАВШИМ рендером (failed_clip_result → пустой video_url) или ещё не отрендеренный
+    # extracted-клип: объекта в R2 НЕТ. 302 туда = 404 в браузере, БЕЗ ошибки на нашей стороне.
+    assert not _clean(_edit(), baked_clip_exists=False)
+
+
+def test_baked_clean_not_served_when_render_policy_changed() -> None:
+    # ДЕНЬГИ. baked рендерился под тарифом владельца НА МОМЕНТ ЗАПЕКАНИЯ (watermark/crf/preset).
+    # Тариф сменился → Free→Pro скачал бы файл С ВОТЕРМАРКОЙ (заплатил — и всё равно с логотипом),
+    # Pro→Free — БЕЗ ВОТЕРМАРКИ (обход монетизации). Политика неизвестна → тоже False (fail-safe).
+    assert not _clean(_edit(), baked_policy_matches=False)
 
 
 def test_baked_clean_not_served_when_silence_removal_on() -> None:
-    # Удаление пауз вычитается из интервалов НА РЕНДЕРЕ → тайминг baked (С паузами) не тот →
-    # редирект отдал бы клип с паузами. Честный полный путь.
-    assert not should_serve_baked_clean(
-        _edit(silence=SilenceConfig(enabled=True)), seg_start=SEG_START, seg_end=SEG_END
-    )
+    # Удаление пауз вычитается из интервалов НА РЕНДЕРЕ → тайминг baked (С паузами) не тот.
+    assert not _clean(_edit(silence=SilenceConfig(enabled=True)))
 
 
 def test_baked_clean_not_served_when_silence_config_present_but_off() -> None:
     # Toggle выключен → дырок нет → baked валиден (недеструктивный флип, см. SilenceConfig).
-    assert should_serve_baked_clean(
-        _edit(silence=SilenceConfig(enabled=False)), seg_start=SEG_START, seg_end=SEG_END
-    )
+    assert _clean(_edit(silence=SilenceConfig(enabled=False)))
 
 
 @pytest.mark.parametrize(
@@ -141,17 +162,14 @@ def test_baked_clean_not_served_when_silence_config_present_but_off() -> None:
         {"overrides": [CropOverride(source_start=SEG_START, source_end=SEG_END, mode="fit")]},
         {"aspect": "1:1"},
         {"lock_per_shot": False},  # follow = пан вместо статики
-        {"suppressed_cuts": [42.0]},  # merge меняет кадр второго шота
+        {"suppressed_cuts": [42.0]},  # MERGE навязывает кадр первого шота второму
+        {"manual_cuts": [42.0]},  # SPLIT схлопывает траекторию правой половины в статику
     ],
 )
 def test_baked_clean_not_served_when_geometry_changed(edit_kwargs: dict[str, object]) -> None:
     # Любая правка ГЕОМЕТРИИ → baked-пиксели ≠ рендер edit'а → редирект молча отдал бы НЕ ТО видео.
     # Лучше медленно и верно, чем быстро и неверно (правило №8: без тихих подмен).
-    assert not should_serve_baked_clean(
-        _edit(**edit_kwargs),  # type: ignore[arg-type]
-        seg_start=SEG_START,
-        seg_end=SEG_END,
-    )
+    assert not _clean(_edit(**edit_kwargs))  # type: ignore[arg-type]
 
 
 # ─────────────────────────── can_composite_captions (полный гейт) ───────────────────────────

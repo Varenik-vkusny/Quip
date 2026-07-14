@@ -109,6 +109,40 @@ describe("getClipReframe — compute flag", () => {
   });
 });
 
+describe("getClipReframe — retry flag (clears the server-side failure marker)", () => {
+  // A failed bake persists a FAILURE MARKER server-side, and /reframe answers 503 on it (not 202 —
+  // otherwise the client would poll forever and the server would re-spawn a 32 GiB Job every 5 min).
+  // So "Retry" MUST ask the server to clear that marker, or the button silently does nothing.
+  it("no ?retry by default", async () => {
+    fetchMock.mockResolvedValue(res(200, { regions: REGIONS }));
+    await getClipReframe(JOB, CLIP);
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain("retry");
+  });
+
+  it("retry:true sends ?retry=true", async () => {
+    fetchMock.mockResolvedValue(res(202));
+    await getClipReframe(JOB, CLIP, { retry: true });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("retry=true");
+  });
+
+  it("a retry is NOT deduped onto an in-flight normal request (else the marker is never cleared)", async () => {
+    const d = deferred<Response>();
+    fetchMock.mockReturnValue(d.promise);
+
+    const normal = getClipReframe(JOB, CLIP);
+    const retried = getClipReframe(JOB, CLIP, { retry: true });
+    expect(normal).not.toBe(retried); // retry is part of the dedupe key → two REAL requests
+
+    await flush(); // fetch is reached only after `await authHeaders()`
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain("retry");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("retry=true");
+
+    d.resolve(res(200, { regions: REGIONS }));
+    await Promise.all([normal, retried]);
+  });
+});
+
 describe("getClipReframe — in-flight dedupe (this is what killed the API container)", () => {
   it("concurrent identical calls share ONE promise and ONE fetch", async () => {
     const d = deferred<Response>();

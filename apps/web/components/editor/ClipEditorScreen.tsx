@@ -39,6 +39,11 @@ import {
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { patchAssStyles } from "@/lib/assStyle";
 import { findShotOverride, pickActiveOverride, upsertShotOverride } from "@/lib/reframeFrame";
+import {
+  type ReframeFailure,
+  type ReframePollHandle,
+  runReframePoll,
+} from "@/lib/reframePoll";
 import { type ClipCache, createClipCache } from "@/lib/clipCache";
 import type {
   CaptionReply,
@@ -119,9 +124,6 @@ const PausesTab = dynamic(() => import("./PausesTab").then((m) => m.PausesTab), 
 // ────────────────────────────────────────────────────────────────────────────
 
 type Phase = "loading" | "ready" | "saving" | "error";
-
-/** Интервал поллинга /reframe, когда сервер ответил 202 «computing» (как chapters/render-поллинг). */
-const REFRAME_POLL_MS = 2500;
 
 /** Регион reframe-плана пайплайна (reframe_<clip>.json), клип-время. */
 interface RawRegion {
@@ -287,9 +289,12 @@ export default function ClipEditorScreen({
   // Грузится ли план шотов (/reframe) → полоса показывает скелетон «Detecting shots…».
   // Тот же флаг покрывает ПОЛЛИНГ 202 (сервер считает в фоне) — для юзера это одно состояние.
   const [reframeLoading, setReframeLoading] = useState(true);
-  // Расчёт плана шотов упал (503 / битый контракт / сеть) → ЧЕСТНАЯ ошибка + «Повторить».
-  // Раньше тут молча рисовалась фейковая полоса равных кусков (правило «никаких тихих фолбэков»).
-  const [reframeFailed, setReframeFailed] = useState(false);
+  // Расчёт плана шотов кончился ничем → ЧЕСТНАЯ ошибка + «Повторить». Два повода, одно состояние:
+  //   "error"   — сервер сказал «упало» (503 / битый контракт / сеть);
+  //   "timeout" — сервер бесконечно отвечал 202 и мы исчерпали бюджет поллинга (см. lib/reframePoll).
+  // Раньше тут молча рисовалась фейковая полоса равных кусков (правило «никаких тихих фолбэков»),
+  // а до фикса 2026-07-14 бесконечный 202 вообще НЕ приводил сюда — полоса вечно «Detecting shots…».
+  const [reframeFailed, setReframeFailed] = useState<ReframeFailure | null>(null);
   // Показывает оверлей «Recomputing framing…» пока идёт setCropOverride + loadReframe
   // (Tight-режим гоняет face-detection — может занять несколько секунд на cold-start).
   const [recomputingFrame, setRecomputingFrame] = useState(false);
@@ -412,14 +417,14 @@ export default function ClipEditorScreen({
   // (раньше `cancelled` глушил только setState — HTTP-запрос продолжал жечь сервер).
   const reframeSeq = useRef(0);
   const reframeAbortRef = useRef<AbortController | null>(null);
-  const reframePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Хэндл ТЕКУЩЕГО цикла поллинга (lib/reframePoll): stop() снимает отложенный таймер,
+  // pollNow() — переспрашивает немедленно (вкладку вернули на передний план).
+  const reframePollRef = useRef<ReframePollHandle | null>(null);
   // Останов всего reframe-цикла: инвалидируем поколение, гасим поллинг, ОТМЕНЯЕМ HTTP.
   const stopReframe = useCallback(() => {
     reframeSeq.current++;
-    if (reframePollRef.current) {
-      clearTimeout(reframePollRef.current);
-      reframePollRef.current = null;
-    }
+    reframePollRef.current?.stop(); // снимает pending setTimeout ЛЮБОГО такта (202 / abort-ретрай)
+    reframePollRef.current = null;
     reframeAbortRef.current?.abort();
     reframeAbortRef.current = null;
   }, []);
@@ -427,74 +432,88 @@ export default function ClipEditorScreen({
   // ── план кадра (/reframe) для превью + полосы шотов ──
   // Контракт: 200 ready · 202 computing (сервер считает в фоне → ПОЛЛИМ тот же GET) · 503 → fail.
   // НИКАКИХ тихих фолбэков: не удалось — reframeFailed → честная ошибка + «Повторить».
+  //
+  // ⚠️ Поллинг 202 ОГРАНИЧЕН БЮДЖЕТОМ (lib/reframePoll — там же обоснование чисел): лестница пауз
+  // 2.5с→5с→10с (15с на скрытой вкладке), лимит попыток и стенной дедлайн 300с = серверный TTL
+  // гарда пере-запуска. Без него сервер, вечно отвечающий 202 (реально упавшее запекание), навсегда
+  // залипал в «Detecting shots…» И каждые 5 минут заказывал новый Cloud Run Job (8 vCPU / 32 GiB) —
+  // на КАЖДУЮ открытую вкладку. Исчерпали бюджет → то же честное failed-состояние («timeout»).
+  //
   // `silent` — фоновая ревалидация поверх УЖЕ отрисованного из кэша плана (switch по соседям):
   // не гасим полосу в скелетон, просто тихо обновим регионы, когда приедут.
   const loadReframe = useCallback(
-    async (opts: { silent?: boolean } = {}) => {
+    (opts: { silent?: boolean; retry?: boolean } = {}) => {
       stopReframe(); // сносим предыдущий цикл (его seq уже инвалидирован)
       const seq = reframeSeq.current;
       const ctl = new AbortController();
       reframeAbortRef.current = ctl;
       const targetClip = clipId;
       // Актуален ли ещё этот цикл: не пришёл ли НОВЫЙ loadReframe и не сменился ли клип.
+      // (Свой же abort тоже сюда: stopReframe бампает seq ДО .abort() → результат не применится.)
       const alive = () => seq === reframeSeq.current && clipIdRef.current === targetClip;
 
-      setReframeFailed(false);
+      setReframeFailed(null); // «Повторить» = новый цикл: сбрасывается и ошибка, и бюджет поллинга
       if (!opts.silent) setReframeLoading(true);
 
-      const attempt = async (): Promise<void> => {
-        try {
-          const res = await getClipReframe(jobId, targetClip, { signal: ctl.signal });
-          if (!alive()) return;
-          if (res.status === "computing") {
-            // Сервер поставил фоновый расчёт → тот же GET через ~2.5с (как chapters/render-поллинг).
-            reframePollRef.current = setTimeout(() => {
-              if (alive()) void attempt();
-            }, REFRAME_POLL_MS);
-            return;
-          }
-          if (res.status === "absent") {
-            // compute=1 не должен возвращать 204 — если вернул, это НЕ «пустой план», а сломанный
-            // контракт: показываем ошибку, а не выдуманные шоты.
-            setRawRegions(null);
-            setReframeLoading(false);
-            setReframeFailed(true);
-            return;
-          }
-          const regions = res.regions as RawRegion[];
-          setRawRegions(regions);
+      // Новый бюджет на каждый вызов → ретрай НИКОГДА не наследует исчерпанный счётчик/дедлайн.
+      // retry шлём ТОЛЬКО в ПЕРВОМ запросе цикла: он сбрасывает серверный маркер провала и
+      // пере-диспатчит бэйк. В последующих тактах поллинга он не нужен (маркера уже нет) и был бы
+      // ВРЕДЕН — каждый такт снимал бы claim и спавнил ЕЩЁ ОДИН Job на 8 vCPU / 32 GiB.
+      let firstFetch = true;
+      const handle = runReframePoll({
+        fetchPlan: () => {
+          const retry = firstFetch && opts.retry === true;
+          firstFetch = false;
+          return getClipReframe(jobId, targetClip, { retry, signal: ctl.signal });
+        },
+        alive,
+        hidden: () => typeof document !== "undefined" && document.hidden,
+        onReady: (regions) => {
+          setRawRegions(regions as RawRegion[]);
           setReframeLoading(false);
           // Догоняем кэш клипа свежими регионами (запись создаёт load-эффект ещё до плана).
           const cached = clipCacheRef.current?.get(targetClip);
-          if (cached) clipCacheRef.current?.set(targetClip, { ...cached, regions });
-        } catch (e) {
-          if (!alive() || ctl.signal.aborted) return; // отменили/сменили клип — это не ошибка
-          if ((e as { name?: string })?.name === "AbortError") {
-            // Дедуплицированный запрос отменил ДРУГОЙ потребитель (наш signal цел) — это не сбой
-            // расчёта: переспрашиваем, а не врём юзеру про ошибку и не виснем в скелетоне.
-            reframePollRef.current = setTimeout(() => {
-              if (alive()) void attempt();
-            }, REFRAME_POLL_MS);
-            return;
-          }
-          console.warn(`[editor] reframe plan failed for ${targetClip}:`, e);
+          if (cached)
+            clipCacheRef.current?.set(targetClip, { ...cached, regions: regions as RawRegion[] });
+        },
+        onFailed: (kind, err) => {
+          // Явный лог обеих причин (никаких тихих фолбэков): "error" = сервер сказал «упало»,
+          // "timeout" = бесконечный 202 (запекание не сходится) → бюджет исчерпан.
+          console.warn(`[editor] reframe plan ${kind} for ${targetClip}:`, err);
           setRawRegions(null);
           setReframeLoading(false);
-          setReframeFailed(true);
-        }
-      };
-      await attempt();
+          setReframeFailed(kind);
+        },
+      });
+      reframePollRef.current = handle;
+      // Ждём только ПЕРВЫЙ ответ (как раньше ждали первый fetch): вызывающие с оверлеем
+      // «Recomputing framing…» снимают его по нему. Досиживать весь 202-поллинг они НЕ должны.
+      return handle.firstAttempt;
     },
     [jobId, clipId, stopReframe],
   );
 
-  // Кнопка «Повторить» в полосе шотов (failed-состояние) — перезапуск расчёта плана.
+  // Кнопка «Повторить» в полосе шотов (failed-состояние) — перезапуск расчёта плана с нуля.
+  // retry:true ОБЯЗАТЕЛЕН: провалившийся бэйк оставил на сервере МАРКЕР ПРОВАЛА, по которому
+  // /reframe отдаёт 503 (а не 202 — иначе клиент поллил бы вечно, а сервер спавнил Job каждые
+  // 5 минут). Без ?retry=true кнопка молча получала бы тот же 503 и не делала НИЧЕГО.
   const retryReframe = useCallback(() => {
-    void loadReframe();
+    void loadReframe({ retry: true });
   }, [loadReframe]);
 
   // Unmount: гасим поллинг + отменяем HTTP (иначе сервер продолжает считать «в никуда»).
   useEffect(() => stopReframe, [stopReframe]);
+
+  // Вкладку вернули на передний план → не досиживаем медленный (15с) такт скрытой вкладки, а
+  // спрашиваем статус сразу: юзер смотрит на полосу и ждёт план (тот же приём, что «online»/
+  // visibilitychange в lib/useJob). Пока цикла нет (план готов/упал) — no-op.
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden) reframePollRef.current?.pollNow();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   // Idle-prefetch the ±1 neighbors of `centerId` into the cache (best-effort). Logs
   // failures — NO silent swallow (a warming miss just falls back to the loading path).
@@ -644,7 +663,7 @@ export default function ClipEditorScreen({
         setPixelDirty(false); // fresh clip — no pending pixel edits
         setRawRegions(null);
         setReframeLoading(true);
-        setReframeFailed(false);
+        setReframeFailed(null);
       }
       // Switch-race guard (Task 7, IMPORTANT): on the instant-paint (cache-hit) path this
       // fetch is a BACKGROUND revalidation — the user already sees painted state and CAN edit
@@ -943,7 +962,7 @@ export default function ClipEditorScreen({
         setAssText(cached.ass);
         setRawRegions(cached.regions);
         setReframeLoading(cached.regions === null); // нет регионов в кэше → ждём ревалидацию
-        setReframeFailed(false); // новый клип — прошлая ошибка плана к нему не относится
+        setReframeFailed(null); // новый клип — прошлая ошибка плана к нему не относится
         setEditingReply(null);
         setActivePresetId(null);
         setLibassFailed(false);

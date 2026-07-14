@@ -187,6 +187,40 @@ def resolve_clip_render_policy(user_id: str | None) -> billing.RenderPolicy:
     return billing.resolve_render_policy(plan_id, local_dev=False)
 
 
+def render_policy_fingerprint(policy: billing.RenderPolicy) -> dict[str, Any]:
+    """PURE. Сериализуемый отпечаток политики рендера (jsonb ``job_artifacts.baked_policy``).
+
+    Все поля, влияющие на БАЙТЫ запечённого клипа: вотермарка, потолок разрешения, crf, preset.
+    Сравнение отпечатка «под чем испекли» с «что положено владельцу СЕЙЧАС» — единственный способ
+    узнать, можно ли отдавать 302 на запечённый объект (см. fast_export.should_serve_baked_clean).
+    """
+    return {
+        "watermark": policy.watermark,
+        "max_resolution": policy.max_resolution,
+        "video_crf": policy.video_crf,
+        "video_preset": policy.video_preset,
+    }
+
+
+def persist_baked_policy(job_id: str, user_id: str | None) -> None:
+    """Записать политику, ПОД КОТОРОЙ печём ``clips/<id>.mp4`` этого джоба (миграция 0019).
+
+    Зовётся КООРДИНАТОРОМ (``_render_all_clips``) ОДИН раз на прогон — не клип-контейнерами: у
+    всех клипов прогона один владелец и один момент выпечки ⇒ одна политика, и джоб-уровневая
+    запись не устраивает гонок read-modify-write между параллельными контейнерами фан-аута.
+
+    Best-effort (правило №8: логируем, не глотаем): не записалось → политика «неизвестна» →
+    302-гейт clean.mp4 ЗАКРЫТ → честный полный рендер. Fail-safe, а не тихая подмена файла.
+    Локально (SQLite) ``db.put_job_artifact`` — no-op: облачного 302 там всё равно нет.
+    """
+    try:
+        db.put_job_artifact(
+            job_id, "baked_policy", render_policy_fingerprint(resolve_clip_render_policy(user_id))
+        )
+    except Exception as e:  # noqa: BLE001 — персист политики не критичен; рендер важнее
+        print(f"[render] WARN baked-policy persist failed job={job_id}: {e}")
+
+
 def render_one_clip(
     out: Path,
     source_name: str,
@@ -480,6 +514,11 @@ def _render_all_clips(
     кидает — иначе starmap ре-рейзит в координаторе). ЕСЛИ ВСЕ клипы упали → JobError (тотальный
     провал НЕ прячем: джоб честно failed, правило №8).
     """
+    # Денежный инвариант (миграция 0019): ФИКСИРУЕМ политику, под которой сейчас испечём клипы
+    # (вотермарка/crf/preset тарифа владельца). /export/clean.mp4 сверит её с тарифом НА МОМЕНТ
+    # СКАЧИВАНИЯ и при расхождении пойдёт полным рендером вместо 302 на запечённый объект — иначе
+    # Free→Pro скачал бы клип С ВОТЕРМАРКОЙ, а Pro→Free — БЕЗ неё (обход монетизации).
+    persist_baked_policy(job_id, user_id)
     if dispatch.modal_spawn_enabled():
         results = dispatch.map_render_clips(clip_spawn_args(job_id, segments, meta, user_id))
     elif dispatch.cloudrun_fanout_enabled():

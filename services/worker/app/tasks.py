@@ -401,6 +401,34 @@ def render_clip_edit_job(job_id: str, clip_id: str) -> None:
         db.set_render_status(job_id, clip_id, "failed", None, f"unexpected: {e}")
 
 
+def _mark_rebake_failed(job_id: str, clip_ids: list[str], lock_per_shot: bool, reason: str) -> None:
+    """Записать МАРКЕР ПРОВАЛА под ключом ВАРИАНТА каждого клипа (``db.reframe_failure_marker``).
+
+    Маркер — это «мы попробовали и не смогли», в отличие от отсутствия записи («ещё печём»):
+    ``/reframe`` отвечает на него 503 с причиной вместо ВЕЧНОГО 202 + ре-спавна 32-GiB Job'а каждые
+    5 минут. Сам персист best-effort (мы уже в обработке ошибки — второй сбой не должен подменить
+    причину), но НЕ молча: провал записи логируется (правило №8).
+
+    ⚠️ НЕ ЗАТИРАЕМ РАБОЧИЙ ПЛАН. Ремедиационный прогон (``clip_id=None`` — «перепечь ВСЕ клипы»)
+    идёт и по клипам, у которых план УЖЕ ЕСТЬ; слепая запись маркера подменила бы исправный план
+    ошибкой → редактор отдавал бы 503 там, где всё работало. Провал перепечки = «оставь как было».
+    """
+    for cid in clip_ids:
+        try:
+            existing = db.get_reframe_regions(job_id, cid, lock_per_shot=lock_per_shot)
+            if existing and not db.is_reframe_failure(existing):
+                _rlog.warning(
+                    "rebake: FAILED but a good plan exists → keeping it job=%s clip=%s (%s)",
+                    job_id, cid, reason,
+                )  # fmt: skip
+                continue
+            db.put_reframe_regions(
+                job_id, cid, db.reframe_failure_marker(reason), lock_per_shot=lock_per_shot
+            )
+        except Exception as e:  # noqa: BLE001 — маркер best-effort; исходную ошибку не теряем
+            _rlog.warning("rebake: marker persist failed job=%s clip=%s: %s", job_id, cid, e)
+
+
 def rebake_reframe_regions_job(
     job_id: str, clip_id: str | None = None, lock_per_shot: bool = True
 ) -> None:
@@ -428,6 +456,12 @@ def rebake_reframe_regions_job(
     ``clip_id=None`` → печём ВСЕ клипы джоба (это же и инструмент ремедиации для юзеров, у кого
     ``job_artifacts.reframe_regions`` вычищен/пуст). Ошибка любого клипа НЕ глотается: логируем и
     поднимаем ``JobError`` в конце (остальные клипы всё же испеклись) → execution падает видимо.
+
+    ⚠️ ПРОВАЛ ПЕРСИСТИТСЯ (``db.reframe_failure_marker``, ревью 2026-07-14). Раньше упавший Job не
+    писал НИЧЕГО → план оставался None → ``/reframe`` вечно отвечал 202 «печётся», клиент поллил
+    без лимита, а 300-секундный TTL заявки на спавн позволял КАЖДОЙ вкладке КАЖДЫЕ 5 МИНУТ поднимать
+    новый Job (8 vCPU / 32 GiB), который снова качал source, жёг 80–195с CV и падал. Маркер
+    превращает это в честный 503 + Retry (правило №8 — состояние ВИДНО, а не «крутится вечно»).
     """
     from app import artifacts
     from app.config import get_settings
@@ -435,19 +469,27 @@ def rebake_reframe_regions_job(
     from app.models import SourceInterval
 
     s = get_settings()
-    meta = artifacts.load_meta(job_id)
-    if clip_id is not None:
-        clip_ids = [clip_id]
-    else:
-        clip_ids = [f"clip_{i + 1:02d}" for i in range(len(artifacts.load_segments(job_id)))]
-    if not clip_ids:
-        raise JobError("reframe", f"rebake: no clips for job {job_id}")
-    # source.mp4 качаем ОДИН раз на весь прогон (в job-контейнере это дёшево: реальный диск).
-    out = artifacts.ensure_source(job_id).parent
+    # Что помечать маркером, если упадём ДО цикла (нет meta / нет segments / source не скачался):
+    # знаем только запрошенный клип; при clip_id=None список уточнится ниже.
+    clip_ids: list[str] = [clip_id] if clip_id is not None else []
+    try:
+        meta = artifacts.load_meta(job_id)
+        if clip_id is None:
+            clip_ids = [f"clip_{i + 1:02d}" for i in range(len(artifacts.load_segments(job_id)))]
+        if not clip_ids:
+            raise JobError("reframe", f"rebake: no clips for job {job_id}")
+        # source.mp4 качаем ОДИН раз на весь прогон (в job-контейнере это дёшево: реальный диск).
+        out = artifacts.ensure_source(job_id).parent
+    except Exception as e:
+        # Провал ПОДГОТОВКИ (общий для всех запрошенных клипов) — тоже маркер: иначе фронт снова
+        # получал бы вечный 202 и ре-спавнил Job каждые 5 минут.
+        _mark_rebake_failed(job_id, clip_ids, lock_per_shot, str(e))
+        raise
     failed: list[str] = []
     for cid in clip_ids:
         bounds = segment_bounds(job_id, cid)
         if bounds is None:
+            _mark_rebake_failed(job_id, [cid], lock_per_shot, f"no segment for {cid}")
             raise JobError("reframe", f"rebake: no segment for {job_id}/{cid}")
         iv = SourceInterval(source_start=bounds[0], source_end=bounds[1])
         t0 = time.perf_counter()
@@ -485,7 +527,8 @@ def rebake_reframe_regions_job(
         except Exception as e:  # noqa: BLE001 — падение ОДНОГО клипа не должно съесть остальные…
             failed.append(cid)
             _rlog.exception("rebake: FAILED job=%s clip=%s: %s", job_id, cid, e)
-            continue  # …но и не глотается: JobError ниже (правило №8)
+            _mark_rebake_failed(job_id, [cid], lock_per_shot, str(e))
+            continue  # …но и не глотается: JobError ниже (правило №8) + маркер видит /reframe
         _rlog.info(
             "rebake: baked job=%s clip=%s [%.2f..%.2f] %s in %.1fs",
             job_id, cid, iv.source_start, iv.source_end,

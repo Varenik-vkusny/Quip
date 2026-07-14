@@ -467,6 +467,7 @@
       "detecting": "Detecting the shots in this clip…",
       "shotPlanUnavailable": "Shot plan unavailable for this clip — framing follows the AI default.",
       "shotPlanFailed": "We couldn’t detect the shots in this clip. Rather than invent shot boundaries, we’d rather tell you straight.",
+      "shotPlanTimeout": "Detecting the shots is taking longer than it should — we stopped waiting rather than leave you staring at a spinner. Try again?",
       "retryShotPlan": "Try again",
       "shotsCount": "{count, plural, one {# shot} other {# shots}}",
       "partsCount": "{count, plural, one {# part} other {# parts}}",

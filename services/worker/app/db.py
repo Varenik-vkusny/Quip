@@ -651,6 +651,56 @@ def get_reframe_regions(
     return None
 
 
+def clear_reframe_regions(job_id: str, clip_id: str, *, lock_per_shot: bool = True) -> None:
+    """Снять запись ВАРИАНТА (пишет jsonb null) → следующий читатель видит «плана нет».
+
+    Нужен ровно одному сценарию: пользовательский Retry стирает МАРКЕР ПРОВАЛА
+    (``reframe_failure_marker``), чтобы клип можно было испечь заново. Без этого один transient-сбой
+    (спот-эвикшн / сетевой блип) делал бы клип НАВСЕГДА непересчитываемым. Локально — no-op."""
+    if cs.cloud_enabled():
+        cs.merge_reframe_regions(job_id, clip_id, None, lock_per_shot=lock_per_shot)
+
+
+def reframe_failure_marker(reason: str) -> dict[str, Any]:
+    """PURE. Запись «rebake этого варианта ПРОВАЛИЛСЯ» — кладётся под ТОТ ЖЕ ключ, что и план.
+
+    ЗАЧЕМ (ревью 2026-07-14): упавший ``rebake_reframe_regions_job`` не писал НИЧЕГО → план
+    оставался None → ``/reframe`` считал клип «печётся» и отвечал 202 на КАЖДЫЙ поллинг ВЕЧНО, а
+    TTL заявки на спавн (300с) позволял КАЖДОЙ открытой вкладке КАЖДЫЕ 5 МИНУТ спавнить новый Job
+    (8 vCPU / 32 GiB): скачать source, сжечь 80–195с CV, упасть, повторить. Неограниченные деньги
+    на одном плохом клипе. Маркер превращает это в честный 503 + Retry (правило №8)."""
+    return {"error": reason, "failed_at": time.time()}
+
+
+def is_reframe_failure(payload: dict[str, Any] | None) -> bool:
+    """PURE. True ⇔ под ключом варианта лежит МАРКЕР ПРОВАЛА, а не план (у плана есть ``regions``).
+
+    Отличает «попробовали и не смогли» (503 + Retry) от «записи нет» (202 «печётся»)."""
+    if not payload:
+        return False
+    return "error" in payload and "regions" not in payload
+
+
+def clip_has_baked_video(job_id: str, clip_id: str) -> bool:
+    """True ⇔ у клипа НЕПУСТОЙ ``video_url`` в строке джоба ⇒ ``clips/<id>.mp4`` РЕАЛЬНО залит в R2.
+
+    Дешёвый (одна уже существующая строка, БЕЗ HEAD-запроса в R2 на горячем пути скачивания)
+    резолв для 302-гейта ``/export/clean.mp4``: у клипа с УПАВШИМ рендером (``failed_clip_result``
+    → пустой ``video_url``) или у extracted-клипа, который ещё рендерится, объекта в бакете НЕТ, а
+    ``storage.clip_read_url`` просто СКЛЕИВАЕТ строку — редирект туда дал бы 404 в браузере и НИ
+    ОДНОЙ ошибки на нашей стороне. Строки/клипа нет → False (fail-safe → полный рендер)."""
+    row = get_job_row(job_id)
+    if not row:
+        return False
+    raw = row.get("clips")
+    if raw is None:
+        raw = json.loads(row["clips_json"]) if row.get("clips_json") else []
+    for c in raw or []:
+        if c.get("id") == clip_id:
+            return bool(str(c.get("video_url") or "").strip())
+    return False
+
+
 # ── content-addressed transcript-кэш (бережёт Deepgram между контейнерами) ──
 
 

@@ -332,6 +332,14 @@ def set_cancelled(job_id: str) -> None:
     перетираем завершённый джоб (гонка отмены с финишем пайплайна)."""
     # Дублирующийся ключ ``status`` (neq.done И neq.failed) — httpx сериализует список
     # значений в повторённые query-параметры, что PostgREST трактует как AND по колонке.
+    #
+    # УСЛОВНЫЙ PATCH, но ретрай тут БЕЗОПАСЕН (проверено, НЕ путать с CAS-ами, помеченными
+    # idempotent=False — см. шапку http_client): (1) фильтр не self-invalidating — записанный
+    # 'cancelled' по-прежнему УДОВЛЕТВОРЯЕТ guard'у (neq.done И neq.failed), т.е. повтор матчит
+    # ту же строку и переписывает ТЕ ЖЕ абсолютные значения; (2) число затронутых строк НИКУДА
+    # не возвращается (return=minimal, функция -> None), так что «0 строк» на повторе не может
+    # превратиться в ложный ответ юзеру. ⚠️ Поменяете guard на eq-фильтр (напр. status=eq.running)
+    # или начнёте возвращать факт применения — СРАЗУ ставьте idempotent=False.
     r = http.patch(
         f"{_base()}/jobs",
         params={"id": f"eq.{job_id}", "status": ["neq.done", "neq.failed"]},
@@ -466,9 +474,13 @@ def get_job_artifact(job_id: str, key: str) -> Any:
 
 
 def merge_reframe_regions(
-    job_id: str, clip_id: str, value: dict[str, Any], *, lock_per_shot: bool = True
+    job_id: str, clip_id: str, value: dict[str, Any] | None, *, lock_per_shot: bool = True
 ) -> int:
     """Атомарно вписать reframe-регионы ОДНОГО клипа в job_artifacts.reframe_regions (домен 1).
+
+    ``value=None`` → в ключ варианта пишется jsonb ``null`` (``jsonb_build_object`` превращает SQL
+    NULL в JSON null) → ``get_reframe_regions`` вернёт None = «записи нет». Так СНИМАЕТСЯ маркер
+    провала по Retry (RPC умеет только merge; отдельного delete-пути не заводим — DRY).
 
     RPC ``merge_reframe_regions`` (migrations/0013): server-side ``||``-merge внутри одного UPDATE
     сериализуется блокировкой строки → параллельные фан-аут-контейнеры, пишущие РАЗНЫЕ clip_id,
@@ -582,7 +594,14 @@ def insert_clip_edit(job_id: str, clip_id: str, edit: dict[str, Any], version: i
 def update_clip_edit_if_version(
     job_id: str, clip_id: str, edit: dict[str, Any], *, expected_version: int, new_version: int
 ) -> bool:
-    """Атомарный optimistic-lock: PATCH ...&version=eq.expected. True если строка обновилась."""
+    """Атомарный optimistic-lock: PATCH ...&version=eq.expected. True если строка обновилась.
+
+    ``idempotent=False`` — CAS: ФИЛЬТР (``version=eq.expected``) читает ту самую колонку, которую
+    этот PATCH пишет (``version=new_version``), т.е. успешная попытка САМА его обесценивает.
+    Повтор после ПОТЕРЯННОГО ответа (ReadTimeout/5xx) матчил бы 0 строк → ``lock_applied([])`` =
+    False → ``store.save_edit`` отдал бы 409 «данные изменились, перезагрузите» на правку,
+    которая НА САМОМ ДЕЛЕ сохранилась. Не ретраим — ошибка транспорта всплывает честно.
+    """
     r = http.patch(
         f"{_base()}/clip_edits",
         params={
@@ -593,6 +612,7 @@ def update_clip_edit_if_version(
         headers=_headers({"Prefer": "return=representation"}),
         json={"edit": edit, "version": new_version},
         timeout=_TIMEOUT,
+        idempotent=False,
     )
     r.raise_for_status()
     return lock_applied(r.json())

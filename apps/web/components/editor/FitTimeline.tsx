@@ -6,6 +6,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { mmss } from "@/lib/format";
 import { shotIsManual } from "@/lib/reframeFrame";
+import type { ReframeFailure } from "@/lib/reframePoll";
 import type { CropOverride, SourceInterval } from "@/lib/types";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -62,8 +63,11 @@ export interface FitTimelineProps {
   busy?: boolean;
   /** План шотов ещё грузится (или сервер считает — 202-поллинг) → скелетон вместо полосы. */
   loading?: boolean;
-  /** Расчёт плана упал → честная ошибка + «Повторить» (НЕ выдуманные равные куски). */
-  failed?: boolean;
+  /** Расчёт плана кончился ничем → честная ошибка + «Повторить» (НЕ выдуманные равные куски).
+   *  "error" — сервер сказал «упало» (503/битый контракт); "timeout" — сервер бесконечно отвечал
+   *  202 «считаю» и бюджет поллинга исчерпан (см. lib/reframePoll). Оба ведут в одно состояние,
+   *  но текст разный: юзеру важно знать, «сломалось» или «слишком долго». */
+  failed?: ReframeFailure | null;
   /** Повторить расчёт плана шотов (кнопка в failed-состоянии). */
   onRetry?: () => void;
   /** Применить режим к source-диапазону выделенных регионов. mode:"auto" чистит override. */
@@ -143,7 +147,7 @@ export function FitTimeline({
   nowSec,
   busy = false,
   loading = false,
-  failed = false,
+  failed = null,
   onRetry,
   onApplyRange,
   selectedShot,
@@ -344,13 +348,16 @@ export function FitTimeline({
     );
   }
 
-  // ── расчёт упал → ЧЕСТНАЯ ошибка + «Повторить» ──
+  // ── расчёт упал / не сошёлся за отведённое время → ЧЕСТНАЯ ошибка + «Повторить» ──
   // Раньше здесь молча рисовались равные временны́е куски под видом шотов ИИ. Не показываем
-  // выдуманные границы: говорим правду и даём перезапустить расчёт.
+  // выдуманные границы: говорим правду и даём перезапустить расчёт. "timeout" — отдельный текст:
+  // сервер всё ещё отвечал «считаю», просто мы перестали ждать (иначе полоса висела бы вечно).
   if (failed) {
     return (
       <div className="mt-2 flex flex-col items-center gap-2 rounded-lg border border-dashed border-line bg-surface-2 px-3 py-3 text-center">
-        <p className="text-[11px] text-muted">{t("shotPlanFailed")}</p>
+        <p className="text-[11px] text-muted">
+          {failed === "timeout" ? t("shotPlanTimeout") : t("shotPlanFailed")}
+        </p>
         {onRetry && (
           <Button type="button" variant="secondary" size="sm" onClick={onRetry} className="text-xs">
             {t("retryShotPlan")}
