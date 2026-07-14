@@ -20,6 +20,7 @@ import {
   getMediaToken,
   withToken,
 } from "@/lib/api";
+import { DownloadHttpError } from "@/lib/bulkDownload";
 import { ConfirmRenderModal } from "@/components/editor/ConfirmRenderModal";
 
 // Меню «Скачать» — экспорт-свобода: юзер уносит клип в любой редактор.
@@ -37,14 +38,24 @@ const WORKER_BASE = process.env.NEXT_PUBLIC_WORKER_URL ?? "";
 
 /** Fetch a (possibly on-demand-rendered) export as a blob and save it to disk. Filename comes
  *  from Content-Disposition when present, else `fallbackName`. Exported so the grid's "Download
- *  all" reuses the exact same blob-download path (no duplicated logic). Throws on a non-OK
- *  response so callers can fall back to a direct link / surface the failure (no silent swallow). */
-export async function downloadFile(url: string, fallbackName: string): Promise<void> {
+ *  all" reuses the exact same blob-download path (no duplicated logic). Throws `DownloadHttpError`
+ *  on a non-OK response — carrying the STATUS and `Retry-After`, so the caller can tell "the server
+ *  is busy, wait 5s" (503) apart from a real failure. It used to throw a bare `Error("HTTP 503")`,
+ *  which made a retryable "busy" look identical to a hard error, and callers gave up (no silent
+ *  swallow, but no useful signal either).
+ *
+ *  `auth: false` sends NO Authorization header — required for PUBLIC CDN objects: an Authorization
+ *  header turns a simple cross-origin GET into a PREFLIGHTED one, and R2 need not answer OPTIONS. */
+export async function downloadFile(
+  url: string,
+  fallbackName: string,
+  opts: { auth?: boolean } = {},
+): Promise<void> {
   // On-demand export endpoints live on the worker and are ownership-gated → send the bearer token
-  // (fetched fresh so it's always current). CDN/baked URLs ignore the header harmlessly.
-  const token = await getAccessToken();
+  // (fetched fresh so it's always current).
+  const token = opts.auth === false ? null : await getAccessToken();
   const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new DownloadHttpError(res.status, res.headers.get("retry-after"));
   const blob = await res.blob();
   const cd = res.headers.get("content-disposition");
   const name = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd ?? "")?.[1] ?? fallbackName;

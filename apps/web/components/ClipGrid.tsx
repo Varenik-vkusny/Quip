@@ -8,7 +8,14 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Eyebrow } from "@/components/ui/Eyebrow";
 import { Numeral } from "@/components/ui/Numeral";
 import { Spinner } from "@/components/ui/Spinner";
-import { clipCaptionedExportUrl, clipSrtUrl } from "@/lib/api";
+import { clipCaptionedExportUrl, clipSrtUrl, getMediaToken, withToken } from "@/lib/api";
+import {
+  BUSY_MAX_ATTEMPTS,
+  busyRetryDelayMs,
+  captionedCdnUrl,
+  DownloadHttpError,
+  isBusyStatus,
+} from "@/lib/bulkDownload";
 import { elapsed, mmss } from "@/lib/format";
 import type { ClipOut, Job } from "@/lib/types";
 import { ClipCard, resolveUrl } from "./ClipCard";
@@ -30,37 +37,97 @@ function downloadClips(urls: { href: string; name: string }[]) {
   });
 }
 
-/** Download N exports as blobs with a concurrency cap, reporting progress as each finishes.
- *  Heavier than the native-link path (it fetches every file), but it lets us (a) cap how many
- *  on-the-fly renders hit the worker at once and (b) show "Preparing X of Y…". A per-item failure
- *  falls back to a native anchor (the worker sends Content-Disposition: attachment, so the browser
- *  saves rather than navigates) — never a silent drop. Shares ExportMenu's `downloadFile`. */
+type BatchItem = {
+  /** The BAKED object on the CDN, when we can address it. Preferred: no API, no render, no redirect. */
+  cdnUrl: string | null;
+  /** The worker endpoint. Renders on the fly → slow, ownership-gated, and rate-limited. */
+  apiUrl: string;
+  name: string;
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Save `item` via the worker, RESPECTING its "busy" back-pressure.
+ *
+ *  `/export/*.mp4` renders on the API box, which permits only a couple of heavy jobs at once and
+ *  answers **503 + Retry-After** when full. That is the server asking us to WAIT — the old code
+ *  treated it as a failure and fell back to a bare <a download>, which can send neither a header nor
+ *  a ticket, so the API returned `401 {"detail":"missing media ticket"}` and the browser SAVED THAT
+ *  JSON as the user's clip. Two bugs stacked: we gave up on a retryable answer, then "recovered"
+ *  into an unauthenticated request.
+ */
+async function downloadViaWorker(item: BatchItem, jobId: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await downloadFile(item.apiUrl, item.name);
+      return;
+    } catch (e) {
+      const busy = e instanceof DownloadHttpError && isBusyStatus(e.status);
+      if (busy && attempt < BUSY_MAX_ATTEMPTS) {
+        const wait = busyRetryDelayMs(attempt, (e as DownloadHttpError).retryAfter);
+        console.info(`[download-all] worker busy on ${item.name}; retrying in ${wait}ms`);
+        await sleep(wait);
+        continue;
+      }
+      if (e instanceof DownloadHttpError) throw e; // a real HTTP failure — surface it, don't "save" it
+      // Network/CORS (fetch rejects with a bare TypeError). A top-level navigation is NOT subject to
+      // CORS and the worker sends Content-Disposition: attachment → the browser saves without leaving
+      // the page. It cannot carry a header, so attach a SCOPED media ticket. NEVER navigate without
+      // one: that is exactly how the user ended up downloading a 401 JSON.
+      const token = await getMediaToken(jobId);
+      if (!token) throw e;
+      const a = document.createElement("a");
+      a.href = withToken(item.apiUrl, token, "mt");
+      a.download = item.name;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return;
+    }
+  }
+}
+
+/** "Download all", in two phases, reporting progress as each clip lands.
+ *
+ *  PHASE 1 — clips whose captioned object is already BAKED go STRAIGHT to the CDN. No worker, no
+ *  render, and (crucially) no 302 to follow: a direct fetch sends `Origin: https://quip.ink`, which
+ *  the bucket allows, whereas the redirected one sends `Origin: null`, which it does not — that CORS
+ *  failure is what broke this button. These are free, so run them wide.
+ *
+ *  PHASE 2 — everything else must be rendered on demand by the worker, which does them a couple at a
+ *  time. Run them STRICTLY ONE AT A TIME and wait out its 503s. Slower, but it finishes: the user
+ *  asked, rightly, that if they cannot all come at once they should at least come one by one.
+ */
 async function runBatchDownload(
-  items: { url: string; name: string }[],
-  concurrency: number,
+  items: BatchItem[],
+  jobId: string,
   onDone: (completed: number) => void,
 ): Promise<void> {
   let completed = 0;
+  const needsRender: BatchItem[] = [];
+
+  const baked = items.filter((i) => i.cdnUrl);
   let next = 0;
-  const worker = async () => {
-    for (let i = next++; i < items.length; i = next++) {
-      const { url, name } = items[i];
+  const cdnWorker = async () => {
+    for (let i = next++; i < baked.length; i = next++) {
+      const item = baked[i];
       try {
-        await downloadFile(url, name);
-      } catch (e) {
-        console.warn("[download-all] blob fetch failed, native fallback:", e);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name;
-        a.rel = "noopener";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        // auth:false — the object is public; an Authorization header would force a CORS PREFLIGHT
+        // that R2 need not answer.
+        await downloadFile(item.cdnUrl as string, item.name, { auth: false });
+        onDone(++completed);
+      } catch {
+        needsRender.push(item); // never baked (404) → only the worker can produce it
       }
-      onDone(++completed);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(4, baked.length) }, cdnWorker));
+
+  for (const item of [...items.filter((i) => !i.cdnUrl), ...needsRender]) {
+    await downloadViaWorker(item, jobId);
+    onDone(++completed);
+  }
 }
 
 type ChosenClip = { id: string; cleanHref: string };
@@ -113,18 +180,21 @@ function DownloadAllMenu({
 
   const runBatch = async (kind: "captioned" | "srt") => {
     if (busy || count === 0) return;
-    const items = chosen.map((c) =>
+    const items: BatchItem[] = chosen.map((c) =>
       kind === "captioned"
-        ? { url: clipCaptionedExportUrl(WORKER_BASE, jobId, c.id), name: `${c.id}-captioned.mp4` }
-        : { url: clipSrtUrl(WORKER_BASE, jobId, c.id), name: `${c.id}.srt` },
+        ? {
+            // Already baked? Take it from the CDN and never touch the worker. `cleanHref` is the
+            // clip's public clean URL; the burned-in twin sits next to it as `<clip>_captioned.mp4`.
+            cdnUrl: captionedCdnUrl(c.cleanHref, c.id),
+            apiUrl: clipCaptionedExportUrl(WORKER_BASE, jobId, c.id),
+            name: `${c.id}-captioned.mp4`,
+          }
+        : { cdnUrl: null, apiUrl: clipSrtUrl(WORKER_BASE, jobId, c.id), name: `${c.id}.srt` },
     );
     setOpen(false);
     setBatch({ kind, done: 0, total: items.length });
     try {
-      // Captioned renders on the fly (heavy) → 2 at a time; SRT is cheap text → 3.
-      await runBatchDownload(items, kind === "captioned" ? 2 : 3, (done) =>
-        setBatch({ kind, done, total: items.length }),
-      );
+      await runBatchDownload(items, jobId, (done) => setBatch({ kind, done, total: items.length }));
     } finally {
       setBatch(null);
     }
