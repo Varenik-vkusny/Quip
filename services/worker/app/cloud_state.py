@@ -292,6 +292,44 @@ def set_clip_ready(job_id: str, idx: int, url: str) -> None:
         print(f"[set_clip_ready] WARN: no row updated for job={job_id} idx={idx}")
 
 
+def render_slot_acquire(
+    max_slots: int, job_id: str | None = None, ttl_sec: int = 2400
+) -> str | None:
+    """Занять ГЛОБАЛЬНЫЙ рендер-слот (Фаза 1c, migrations/0020). RPC ``render_slot_acquire`` под
+    advisory-lock атомарно: (1) реклеймит слоты старше ``ttl_sec`` (страховка от смерти
+    контейнера без release), (2) если занятых < ``max_slots`` — вставляет строку и отдаёт uuid,
+    иначе NULL (бюджет полон). Возвращает slot_id или None.
+
+    ☠️ ``idempotent=False``: acquire ВСТАВЛЯЕТ строку → повтор после потерянного ответа = ВТОРОЙ
+    слот (over-admission). Цена потери ответа тут — редкий недо-спавн (клип уйдёт в ретрай), НЕ
+    деньги (в отличие от ``consume_clip_credit``) → просто не ретраим. ``ttl_sec`` (деф.2400с =
+    40мин) > макс. времени рендера клипа (job-timeout 1200с ×2) — иначе реклейм отнял бы слот у
+    живого рендера."""
+    r = http.post(
+        f"{_base()}/rpc/render_slot_acquire",
+        headers=_headers(),
+        json={"p_max": int(max_slots), "p_ttl_sec": int(ttl_sec), "p_job_id": job_id},
+        timeout=_TIMEOUT,
+        idempotent=False,
+    )
+    r.raise_for_status()
+    val = r.json()
+    return str(val) if val else None
+
+
+def render_slot_release(slot_id: str) -> None:
+    """Освободить глобальный рендер-слот по id (Фаза 1c). RPC ``render_slot_release`` = DELETE
+    по uuid → идемпотентен (повтор матчит 0 строк) → ``idempotent=True`` (ретрай на потерю ок)."""
+    r = http.post(
+        f"{_base()}/rpc/render_slot_release",
+        headers=_headers(),
+        json={"p_slot_id": slot_id},
+        timeout=_TIMEOUT,
+        idempotent=True,
+    )
+    r.raise_for_status()
+
+
 def append_pending_clip(job_id: str, clip: dict[str, Any]) -> int:
     """Append ONE pending clip (empty ``video_url`` + metadata) to ``jobs.clips`` (on-demand
     extraction). Returns the NEW clip's 1-based index — the same addressing ``set_clip_ready``

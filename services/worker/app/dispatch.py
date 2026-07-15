@@ -218,7 +218,45 @@ def _cancel_execution(client: Any, name: str) -> None:
     client.cancel_execution(request=run_v2.CancelExecutionRequest(name=name))
 
 
-def _rolling_fanout(render_job: str, args: list[tuple[Any, ...]]) -> None:
+def _render_global_budget() -> int | None:
+    """ГЛОБАЛЬНЫЙ потолок рендер-контейнеров ПО ВСЕМ джобам (общий Supabase-счётчик слотов,
+    Фаза 1c). Окно ``RENDER_FANOUT_MAX`` — пер-видео; при N джобах суммарно до N×окна
+    контейнеров → большой аплоад забивает пул. ``RENDER_GLOBAL_BUDGET``: unset/пусто/≤0 → None
+    (ВЫКЛ, прежнее поведение); число N → суммарно одновременно ≤ N. Kill-switch = убрать env."""
+    raw = os.environ.get("RENDER_GLOBAL_BUDGET", "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def _global_slot_acquire(budget: int, job_id: str | None = None) -> str | None:
+    """Занять глобальный рендер-слот (CAS ``count<max`` + TTL-reclaim, migrations/0020).
+    Возвращает slot_id (uuid) или None (бюджет полон → координатор ждёт цикл). Seam-функция →
+    мокается в тестах. Реальный вызов — NON-retriable CAS (``cloud_state.render_slot_acquire``)."""
+    from app import cloud_state
+
+    return cloud_state.render_slot_acquire(budget, job_id=job_id)
+
+
+def _global_slot_release(slot_id: str) -> None:
+    """Освободить глобальный рендер-слот. Best-effort: сбой ЛОГИРУЕМ и продолжаем — TTL-reclaim
+    в БД подстрахует зависший слот. (Уронить весь фан-аут из-за осечки счётчика хуже временной
+    утечки; и это НЕ тихий фолбэк — лог + TTL явные, правило №8.)"""
+    from app import cloud_state
+
+    try:
+        cloud_state.render_slot_release(slot_id)
+    except Exception as e:  # noqa: BLE001 — release best-effort; TTL в БД реклеймит зависшие слоты
+        print(f"[fanout] global slot release failed (TTL will reclaim): {e}")
+
+
+def _rolling_fanout(
+    render_job: str, args: list[tuple[Any, ...]], job_id: str | None = None
+) -> None:
     """СКОЛЬЗЯЩЕЕ ОКНО спавна клип-executions: ≤ ``RENDER_FANOUT_MAX`` в полёте одновременно;
     как только ЛЮБОЙ дошёл до терминала (succeeded ИЛИ failed) — сразу стартует следующий клип
     из очереди (в порядке входа). Заменяет фикс-батчи: там весь следующий батч ждал ХУДШЕГО
@@ -237,29 +275,58 @@ def _rolling_fanout(render_job: str, args: list[tuple[Any, ...]]) -> None:
     poll = float(os.environ.get("RENDER_FANOUT_POLL", "8"))
     timeout = float(os.environ.get("RENDER_FANOUT_TIMEOUT", "1800"))
     window = _fanout_max_in_flight()
+    budget = _render_global_budget()  # None = глобальный бюджет ВЫКЛ (окно только пер-видео)
     client = _executions_client()
     queue = list(args)
-    in_flight: list[str] = []
+    # (execution_name, slot_id): slot_id == "" когда бюджет выключен (release тогда no-op)
+    in_flight: list[tuple[str, str]] = []
     start = time.monotonic()
     while queue or in_flight:
         if time.monotonic() - start > timeout:
-            for name in in_flight:
+            for name, slot in in_flight:
                 try:
                     _cancel_execution(client, name)
                 except Exception as e:  # noqa: BLE001 — отмена best-effort, таймаут уже решён
                     print(f"[fanout] cancel of timed-out execution failed: {e}")
+                if slot:
+                    _global_slot_release(slot)  # ОБЯЗАТЕЛЬНО вернуть слот при отмене — иначе утечёт
             if queue:
                 print(
                     f"[fanout] timeout: {len(queue)} clip(s) never spawned "
                     "(no R2 result -> failed_clip_result)"
                 )
             return
+        budget_blocked = False
         while queue and len(in_flight) < window:
-            in_flight.append(_run_job_on(render_job, "fanout_render_clip", queue.pop(0)))
-        in_flight = [n for n in in_flight if not _execution_finished(client, n)]
-        # слот освободился и очередь не пуста → НЕ спим, сразу пополняем окно
-        if in_flight and (not queue or len(in_flight) >= window):
-            time.sleep(poll)
+            slot = ""  # "" = бюджет выключен → БД не трогаем, release будет no-op
+            if budget is not None:
+                acquired = _global_slot_acquire(budget, job_id)
+                if acquired is None:  # глоб. бюджет полон (слоты у ДРУГИХ джоб) → ждём цикл
+                    budget_blocked = True
+                    break
+                slot = acquired
+            try:
+                name = _run_job_on(render_job, "fanout_render_clip", queue[0])
+            except BaseException:
+                if slot:
+                    _global_slot_release(slot)  # спавн упал → вернуть только что занятый слот
+                raise
+            queue.pop(0)
+            in_flight.append((name, slot))
+        still: list[tuple[str, str]] = []
+        for name, slot in in_flight:
+            if _execution_finished(client, name):
+                if slot:
+                    _global_slot_release(slot)  # терминал (succeeded/failed) → слот свободен
+            else:
+                still.append((name, slot))
+        in_flight = still
+        # Спим, только если пополнить окно сейчас нельзя (пусто / окно полно / бюджет занят).
+        # budget_blocked обязателен в условии — иначе busy-loop дёргает acquire-RPC без пауз.
+        if queue or in_flight:
+            can_spawn_now = bool(queue) and len(in_flight) < window and not budget_blocked
+            if not can_spawn_now:
+                time.sleep(poll)
 
 
 def map_render_clips_cloudrun(job_id: str, args: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
@@ -276,7 +343,7 @@ def map_render_clips_cloudrun(job_id: str, args: list[tuple[Any, ...]]) -> list[
     from app import storage
     from app.run import failed_clip_result
 
-    _rolling_fanout(_cloudrun_render_job_path(), args)
+    _rolling_fanout(_cloudrun_render_job_path(), args, job_id=job_id)
     results: dict[int, dict[str, Any]] = {}
     for a in args:
         clip_index = int(a[1])
