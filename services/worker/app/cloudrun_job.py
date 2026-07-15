@@ -26,6 +26,7 @@ def main() -> int:
         print(f"[cloudrun_job] bad JOB_ARGS: {e}", file=sys.stderr)
         return 2
 
+    from app.run import rebake_captioned_job
     from app.tasks import (
         agent_edit_job,
         fanout_render_clip_job,
@@ -57,6 +58,7 @@ def main() -> int:
         "fanout_render_clip": fanout_render_clip_job,
         "render_extracted_clip_job": render_extracted_clip_job,
         "rebake_regions": rebake_reframe_regions_job,
+        "rebake_captioned_job": rebake_captioned_job,
     }
     fn = handlers.get(kind)
     if fn is None:

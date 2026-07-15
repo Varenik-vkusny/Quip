@@ -110,6 +110,30 @@ def test_disabled_budget_never_touches_db(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(spawned) == 6  # все клипы заспавнены, окно = RENDER_FANOUT_MAX
 
 
+def test_rolling_fanout_passes_custom_fn_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``fn_name`` = JOB_KIND спавна: дефолт ``fanout_render_clip`` (обратная совместимость), но
+    ре-бейк captioned (Фаза 1b: apply-silence-all/бэкфилл) фанаутит ``render_job`` под тем же
+    глобальным бюджетом."""
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.delenv("RENDER_GLOBAL_BUDGET", raising=False)
+    kinds: list[str] = []
+
+    def run_job_on(_job_path: str, fn_name: str, arg: tuple) -> str:
+        kinds.append(fn_name)
+        return f"exec-{arg[1]}"
+
+    monkeypatch.setattr(dispatch, "_run_job_on", run_job_on)
+    monkeypatch.setattr(dispatch, "_executions_client", lambda: None)
+    monkeypatch.setattr(dispatch, "_execution_finished", _make_finished(1))
+
+    dispatch._rolling_fanout("render/job", _args(3), job_id="j", fn_name="render_job")
+    assert kinds == ["render_job", "render_job", "render_job"]
+
+    kinds.clear()
+    dispatch._rolling_fanout("render/job", _args(2), job_id="j")  # дефолт
+    assert kinds == ["fanout_render_clip", "fanout_render_clip"]
+
+
 def test_timeout_releases_held_slots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(time, "sleep", lambda _s: None)
     monkeypatch.setenv("RENDER_GLOBAL_BUDGET", "2")

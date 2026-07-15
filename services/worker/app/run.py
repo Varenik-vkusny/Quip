@@ -551,6 +551,42 @@ def _render_all_clips(
     return results
 
 
+def rebake_captioned_job(job_id: str, clip_ids_json: str | None = None) -> None:
+    """Пере-запечь captioned затронутых клипов ПОСЛЕ render-required правки (удаление пауз через
+    ``apply-silence-all``) ИЛИ для бэкфилла легаси-клипов. БЕЗ этого скачивание запечённого клипа
+    отдаёт СТАРЫЙ baked без пауз (``should_serve_cached_captioned`` не гейтит silence/version), а
+    незапечённого — штормит on-demand рендером в веб-тире (``fast_export.py:140-152``, разбор
+    2026-07-15). Пере-запекаем ЗАРАНЕЕ на рендер-ферме: каждый клип ``render_status='rendering'`` →
+    ``render_clip_edit_job`` (captioned с ТЕКУЩИМ edit — паузы применяются) → ``'done'`` + URL.
+
+    ``clip_ids_json`` = JSON-список clip_id, или None → ВСЕ клипы. Фанаут per-clip ``render_job``
+    под ГЛОБАЛЬНЫМ бюджетом (Фаза 1c) — пачка ре-бейков не забьёт пул и не обгонит чужие джобы.
+    Фан-аут недоступен (локал/dev) → последовательный in-process ре-бейк (не тихо: честный
+    render_status на каждом клипе, правило №8)."""
+    import json as _json
+
+    from app import db, dispatch
+    from app.tasks import render_clip_edit_job
+
+    if clip_ids_json:
+        clip_ids = [str(c) for c in _json.loads(clip_ids_json)]
+    else:
+        job = db.get_job(job_id) or {}
+        clip_ids = [c["id"] for c in (job.get("clips") or []) if c.get("id")]
+    if not clip_ids:
+        return
+    for cid in clip_ids:
+        db.set_render_status(job_id, cid, "rendering", None, None)
+    if dispatch.cloudrun_fanout_enabled():
+        args: list[tuple[str, str]] = [(job_id, cid) for cid in clip_ids]
+        dispatch._rolling_fanout(
+            dispatch._cloudrun_render_job_path(), args, job_id=job_id, fn_name="render_job"
+        )
+    else:  # локал/dev: последовательный ре-бейк (каждый пишет свой render_status)
+        for cid in clip_ids:
+            render_clip_edit_job(job_id, cid)
+
+
 def _preview_and_video_map(
     job_id: str, out: Path, preview_height: int, preview_crf: int, stages: dict[str, float]
 ) -> None:

@@ -125,3 +125,67 @@ def test_owner_only(monkeypatch, tmp_path):
         headers=_bearer("userB"),
     )
     assert r.status_code == 403
+
+
+def test_spawns_rebake_of_applied_clips(monkeypatch, tmp_path):
+    """RENDER-REQUIRED фикс (2026-07-15): паузы меняют пиксели, но captioned сам НЕ пере-запекается
+    (``should_serve_cached_captioned`` не гейтит silence) → без ре-бейка скачивание отдаёт СТАРЫЙ
+    baked без пауз / штормит. После применения офлоадим ``rebake_captioned_job`` с id клипов."""
+    client, job = _seed(monkeypatch, tmp_path)
+    from app import dispatch
+
+    spawned: list[tuple] = []
+    monkeypatch.setattr(dispatch, "spawn_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "spawn", lambda kind, *a: (spawned.append((kind, a)), "exec")[1])
+    r = client.post(f"/jobs/{job}/apply-silence-all", json={"silence_config": {"enabled": True}})
+    assert r.status_code == 200
+    assert len(spawned) == 1
+    kind, a = spawned[0]
+    assert kind == "rebake_captioned_job"
+    assert a[0] == job
+    assert json.loads(a[1]) == ["clip_01", "clip_02"]  # РОВНО затронутые клипы
+
+
+def test_rebake_captioned_job_local_serial(monkeypatch, tmp_path):
+    """Координатор ``rebake_captioned_job``: резолвит клипы, ставит render_status='rendering', и БЕЗ
+    облачного фанаута пере-запекает каждый последовательно (render_clip_edit_job)."""
+    _client, job = _seed(monkeypatch, tmp_path)
+    import app.tasks as tasks
+    from app import db, dispatch, run
+
+    monkeypatch.setattr(dispatch, "cloudrun_fanout_enabled", lambda: False)
+    statuses: list[tuple] = []
+    rebaked: list[str] = []
+    monkeypatch.setattr(db, "set_render_status", lambda j, c, s, u, e: statuses.append((c, s)))
+    monkeypatch.setattr(tasks, "render_clip_edit_job", lambda j, c: rebaked.append(c))
+
+    run.rebake_captioned_job(job)  # clip_ids_json=None → ВСЕ клипы джобы
+
+    assert rebaked == ["clip_01", "clip_02"]
+    assert ("clip_01", "rendering") in statuses and ("clip_02", "rendering") in statuses
+
+
+def test_rebake_captioned_job_cloud_fanout(monkeypatch, tmp_path):
+    """Облачный путь: фанаут per-clip ``render_job`` (НЕ ``fanout_render_clip``) под глоб. бюджетом,
+    args = (job, clip)."""
+    _client, job = _seed(monkeypatch, tmp_path)
+    from app import db, dispatch, run
+
+    monkeypatch.setattr(dispatch, "cloudrun_fanout_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "_cloudrun_render_job_path", lambda: "render/path")
+    monkeypatch.setattr(db, "set_render_status", lambda *a: None)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        dispatch,
+        "_rolling_fanout",
+        lambda path, args, job_id=None, fn_name="": calls.append(
+            {"path": path, "args": args, "job_id": job_id, "fn": fn_name}
+        ),
+    )
+
+    run.rebake_captioned_job(job, json.dumps(["clip_02"]))  # только один клип
+
+    assert len(calls) == 1
+    c = calls[0]
+    assert c["fn"] == "render_job" and c["path"] == "render/path" and c["job_id"] == job
+    assert c["args"] == [(job, "clip_02")]

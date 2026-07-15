@@ -255,7 +255,10 @@ def _global_slot_release(slot_id: str) -> None:
 
 
 def _rolling_fanout(
-    render_job: str, args: list[tuple[Any, ...]], job_id: str | None = None
+    render_job: str,
+    args: list[tuple[Any, ...]],
+    job_id: str | None = None,
+    fn_name: str = "fanout_render_clip",
 ) -> None:
     """СКОЛЬЗЯЩЕЕ ОКНО спавна клип-executions: ≤ ``RENDER_FANOUT_MAX`` в полёте одновременно;
     как только ЛЮБОЙ дошёл до терминала (succeeded ИЛИ failed) — сразу стартует следующий клип
@@ -306,7 +309,7 @@ def _rolling_fanout(
                     break
                 slot = acquired
             try:
-                name = _run_job_on(render_job, "fanout_render_clip", queue[0])
+                name = _run_job_on(render_job, fn_name, queue[0])
             except BaseException:
                 if slot:
                     _global_slot_release(slot)  # спавн упал → вернуть только что занятый слот

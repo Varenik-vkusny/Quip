@@ -3058,7 +3058,7 @@ def apply_silence_all(
     job = db.get_job(job_id) or {}
     clip_ids = [c["id"] for c in (job.get("clips") or []) if c.get("id")]
     cfg = body.silence_config
-    applied = 0
+    applied_ids: list[str] = []
     for clip_id in clip_ids:
         try:
             edit = store.ensure_edit(job_id, clip_id)  # клип без открытого редактора → дефолт-edit
@@ -3082,8 +3082,19 @@ def apply_silence_all(
                 fresh.model_copy(update={"silence_config": cfg}),
                 expected_version=fresh.version,
             )
-        applied += 1
-    return {"applied": applied, "total": len(clip_ids)}
+        applied_ids.append(clip_id)
+    # RENDER-REQUIRED: паузы меняют пиксели, но captioned сам НЕ пере-запекается
+    # (``should_serve_cached_captioned`` не гейтит silence/version) → без ре-бейка скачивание
+    # запечённого клипа отдаст СТАРЫЙ baked БЕЗ пауз, а незапечённого — уйдёт в on-demand шторм
+    # веб-тира (разбор 2026-07-15). Офлоадим пере-запекание captioned затронутых клипов на
+    # рендер-ферму под ГЛОБАЛЬНЫМ бюджетом (Фаза 1c). Сбой спавна НЕ валит уже сохранённые паузы —
+    # логируем (не тихо, правило №8).
+    if applied_ids and dispatch.spawn_enabled():
+        try:
+            dispatch.spawn("rebake_captioned_job", job_id, json.dumps(applied_ids))
+        except Exception as e:  # noqa: BLE001 — ре-бейк best-effort; паузы уже сохранены
+            print(f"[apply-silence-all] rebake spawn failed for {job_id}: {e}")
+    return {"applied": len(applied_ids), "total": len(clip_ids)}
 
 
 class TemplateBody(StylePrefBody):
