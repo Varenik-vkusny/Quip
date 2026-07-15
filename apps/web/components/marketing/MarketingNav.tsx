@@ -33,9 +33,13 @@ export function MarketingNav() {
         </nav>
 
         <div className="flex items-center gap-2">
-          {/* theme switch lives beside the CTAs (mirrors the landing Nav); on mobile it
-              moves into the MobileMenu dropdown so the bar stays uncluttered */}
-          <ThemeToggle className="hidden sm:inline-flex" />
+          {/* theme switch lives beside the CTAs (mirrors the landing Nav); on mobile it moves into
+              the MobileMenu dropdown so the bar stays uncluttered. Hidden via a WRAPPER — a per-item
+              `hidden sm:inline-flex` is a no-op (ThemeToggle hardcodes `inline-flex` + cn() is a plain
+              joiner, no tailwind-merge → `hidden` lost the CSS-source-order fight, it showed anyway). */}
+          <div className="hidden sm:flex">
+            <ThemeToggle />
+          </div>
           <MarketingNavAuth links={links} />
         </div>
       </Container>

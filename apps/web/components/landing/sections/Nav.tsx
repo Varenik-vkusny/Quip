@@ -79,8 +79,14 @@ export function Nav({ authed = false }: { authed?: boolean }) {
           </div>
 
           <div className="flex items-center gap-2.5">
-            <LocaleSwitcher className="hidden sm:inline-flex" />
-            <ThemeToggle className="hidden sm:inline-flex" />
+            {/* Switchers live in the mobile disclosure menu below; hide the bar copies via a WRAPPER.
+                A per-item `hidden sm:inline-flex` is a NO-OP here — these components hardcode their
+                own `inline-flex` and cn() is a plain joiner (no tailwind-merge), so `hidden` lost the
+                CSS-source-order fight and they showed on mobile (duplicated with the menu). */}
+            <div className="hidden items-center gap-2.5 sm:flex">
+              <LocaleSwitcher />
+              <ThemeToggle />
+            </div>
             {!authed && (
               <a
                 href={ROUTES.login}

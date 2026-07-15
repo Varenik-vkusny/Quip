@@ -54,10 +54,17 @@ export function AppHeader() {
       <div className="mx-auto flex h-16 max-w-[1200px] items-center justify-between px-5 sm:px-8">
         <Logo href="/dashboard" />
         <div className="flex items-center gap-2.5">
-          {/* always-visible balance: videos + minutes left this month */}
-          <UsagePill className="hidden sm:inline-flex" />
-          <LocaleSwitcher className="hidden sm:inline-flex" />
-          <ThemeToggle className="hidden sm:inline-flex" />
+          {/* Balance + switchers — on mobile they live in the avatar menu (see the `sm:hidden`
+              section below), so hide them here. Hidden via a WRAPPER, not a per-item
+              `hidden sm:inline-flex` prop: each of these components hardcodes its own `inline-flex`,
+              and cn() is a plain joiner (no tailwind-merge), so a `hidden` prop LOST the CSS-source-
+              order fight and the chip showed anyway — wrapping to 3 lines at 390px. A parent with
+              `display:none` hides them unconditionally, regardless of their own display class. */}
+          <div className="hidden items-center gap-2.5 sm:flex">
+            <UsagePill />
+            <LocaleSwitcher />
+            <ThemeToggle />
+          </div>
           <div className="relative" ref={menuRef}>
             <button
               type="button"
