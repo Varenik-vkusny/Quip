@@ -121,16 +121,18 @@ gcloud beta run jobs create quip-render `
 #     сервиса — НЕТ (это и был корень).
 #   • concurrency=80 (ДЕФОЛТ Cloud Run, никто не выставлял) = до 80 тяжёлых запросов в ОДНОМ
 #     контейнере; один OOM убивал контейнер ВМЕСТЕ со всеми запросами внутри → «massive 503».
-#   • Значения ниже = ЖИВОЙ прод (8Gi/2CPU выставлены руками 2026-07-10; в скрипте оставались
-#     4Gi/1CPU → перезапуск §7 МОЛЧА откатывал прод вдвое. Это был DRIFT — исправлен 2026-07-14).
+#   • Значения ниже = ЖИВОЙ прод + Фаза 0 (spec 2026-07-15-multiuser-scaling): было 8Gi/2CPU (руками
+#     2026-07-10), ПОДНЯЛИ до 16Gi/4CPU + max-instances=20 + REFRAME_API_CV_CONCURRENCY=2 под
+#     многопользовательскую нагрузку. НЕ ПОНИЖАТЬ. Прежний DRIFT (4Gi/1CPU + том слетал при `--image`
+#     редеплое, т.к. deploy_prod.ps1 пушит только образ) — вот почему конфиг ЗАКРЕПЛЁН здесь.
 # Долгосрочный фикс (в работе): вынести CV/рендер из API в Job + стримить zip (не io.BytesIO).
 gcloud run deploy quip-api `
   --image=$IMAGE --region=$REGION --service-account=$SA `
   --command=uvicorn --args="app.main:app,--host,0.0.0.0,--port,8080" `
-  --cpu=2 --memory=8Gi --concurrency=8 --execution-environment=gen2 --allow-unauthenticated `
+  --cpu=4 --memory=16Gi --concurrency=8 --max-instances=20 --execution-environment=gen2 --allow-unauthenticated `
   --add-volume=name=data,type=ephemeral-disk,size=32Gi `
   --add-volume-mount=volume=data,mount-path=/root/data `
-  --set-env-vars="$ENVVARS,CLOUDRUN_JOB=quip-pipeline,CLOUDRUN_REGION=$REGION,TMPDIR=/root/data" `
+  --set-env-vars="$ENVVARS,CLOUDRUN_JOB=quip-pipeline,CLOUDRUN_REGION=$REGION,TMPDIR=/root/data,REFRAME_API_CV_CONCURRENCY=2" `
   --set-secrets="$SECRETS"
 
 # ─────────────────────────── 8. URL сервиса → репойнт фронта + Polar ───────────────────────────
