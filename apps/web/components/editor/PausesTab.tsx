@@ -6,7 +6,7 @@
 // like trim, you re-render to see it. Editor strings are English (editor i18n deferred, CLAUDE.md).
 
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Layers } from "lucide-react";
 import type { SilenceConfig, SourceInterval, Word } from "@/lib/types";
 
 // codegen'd SilenceConfig has all fields optional (pydantic defaults) → normalize with these (v3).
@@ -53,12 +53,17 @@ export function PausesTab({
   intervals,
   busy = false,
   onChange,
+  onApplyAll,
 }: {
   config: SilenceConfig | null;
   words: Word[];
   intervals: SourceInterval[];
   busy?: boolean;
   onChange: (next: SilenceConfig) => void;
+  // Push THIS clip's pause setting to EVERY clip of the video (per-video, separate from style
+  // templates). Passes the full config when on, or `null` to turn pauses off on all clips.
+  // Returns how many clips were updated. Absent → the button is hidden (e.g. single-clip contexts).
+  onApplyAll?: (config: SilenceConfig | null) => Promise<number>;
 }) {
   const enabled = config?.enabled ?? false;
   const minMs = config?.min_pause_ms ?? DEF_MIN;
@@ -67,6 +72,34 @@ export function PausesTab({
   const leadOut = config?.lead_out_ms ?? DEF_LEAD_OUT;
   const leadOutBnd = config?.lead_out_boundary_ms ?? DEF_LEAD_OUT_BND;
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [allBusy, setAllBusy] = useState(false);
+  const [allNote, setAllNote] = useState<string | null>(null);
+
+  // Apply the current clip's pause state to every clip of this video. On → the full config; off →
+  // null (turns pauses off everywhere too, so the button is meaningful in both states).
+  const applyAll = async () => {
+    if (!onApplyAll || allBusy) return;
+    setAllBusy(true);
+    setAllNote(null);
+    try {
+      const payload: SilenceConfig | null = enabled
+        ? {
+            enabled: true,
+            min_pause_ms: minMs,
+            max_pause_ms: maxMs,
+            lead_in_ms: leadIn,
+            lead_out_ms: leadOut,
+            lead_out_boundary_ms: leadOutBnd,
+          }
+        : null;
+      const n = await onApplyAll(payload);
+      setAllNote(enabled ? `Applied to ${n} clips — re-render to see it` : `Cleared on ${n} clips`);
+    } catch (e) {
+      setAllNote(e instanceof Error ? e.message : "Couldn’t apply to all clips");
+    } finally {
+      setAllBusy(false);
+    }
+  };
 
   const saved = useMemo(
     () => (enabled ? estimateSaved(words, intervals, minMs, maxMs, leadIn + leadOut) : 0),
@@ -177,6 +210,26 @@ export function PausesTab({
               </label>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Apply this clip's pause setting to EVERY clip of the video. Per-video, separate from style
+          templates (which never carry pauses). On → applies the tightness; off → clears everywhere. */}
+      {onApplyAll && (
+        <div className="border-t border-line pt-4">
+          <button
+            type="button"
+            onClick={() => void applyAll()}
+            disabled={busy || allBusy}
+            title="Set every clip of this video to this pause setting"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-line px-3 py-2.5 text-sm font-semibold text-ink transition duration-150 ease-snappy enabled:hover:border-line-strong enabled:hover:bg-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
+          >
+            <Layers className="size-4" aria-hidden />
+            {allBusy ? "Applying…" : enabled ? "Apply to all clips" : "Clear pauses on all clips"}
+          </button>
+          <p className="mt-2 text-xs text-muted">
+            {allNote ?? "Affects only this video — not a saved template."}
+          </p>
         </div>
       )}
     </div>

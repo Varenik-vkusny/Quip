@@ -1691,6 +1691,24 @@ export async function applyStyleToAll(
   return res.json();
 }
 
+/** Apply ONE pause setting (silence_config) to EVERY clip of the job. Twin of applyStyleToAll but
+ *  ORTHOGONAL: this touches ONLY pauses, never style; style-all never touches pauses; a saved
+ *  template carries neither. Per-video scope (this job's clips only). `null` = turn pauses OFF on
+ *  all clips. Render-required — every touched clip re-renders on next download. */
+export async function applySilenceToAll(
+  jobId: string,
+  silenceConfig: SilenceConfig | null,
+): Promise<{ applied: number; total: number }> {
+  const res = await fetch(`${BASE}/jobs/${jobId}/apply-silence-all`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ silence_config: silenceConfig }),
+  });
+  if (res.status === 403) throw new Error("This isn’t your project");
+  if (!res.ok) throw new Error(`applySilenceToAll failed: ${res.status}`);
+  return res.json();
+}
+
 // ── Named style templates: save a look once, reuse on any clip / whole video ──
 export type StyleTemplate = {
   id: string;

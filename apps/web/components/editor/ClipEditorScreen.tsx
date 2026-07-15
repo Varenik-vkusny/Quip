@@ -8,6 +8,7 @@ import {
   type Aspect,
   applyPreset,
   applyStyleToAll,
+  applySilenceToAll,
   listTemplates,
   saveTemplate,
   deleteTemplate,
@@ -1556,6 +1557,26 @@ export default function ClipEditorScreen({
     [edit, jobId, clipId, loadReframe, failOr409, flushPending, commitEdit, recordSnapshot],
   );
 
+  // Apply THIS clip's pause setting to EVERY clip of the video (per-video, NOT a style template).
+  // Server sets silence_config on all clips (incl. this one) → its version bumps, so we resync the
+  // current clip's edit afterwards to avoid a stale-version 409 on the next edit. Returns the count.
+  const handleSilenceApplyAll = useCallback(
+    async (cfg: SilenceConfig | null): Promise<number> => {
+      await flushPending(); // persist the current clip first (its own silence is authoritative)
+      const { applied } = await applySilenceToAll(jobId, cfg);
+      try {
+        const fresh = await getClipEdit(jobId, clipId); // resync version (server bumped this clip too)
+        commitEdit(fresh);
+        setPixelDirty(true); // pauses changed → this clip needs a re-render
+        void loadReframe(); // multi-interval plan may shift → refresh strip/preview
+      } catch {
+        // non-fatal: a later edit will 409 → reload; the apply itself succeeded on the server.
+      }
+      return applied;
+    },
+    [jobId, clipId, flushPending, commitEdit, loadReframe],
+  );
+
   // ── Undo / Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, header buttons) ──
   // OPTIMISTIC restore for perceived speed: the historical snapshot is applied to LOCAL state
   // IMMEDIATELY (instant UI revert), then persisted + reconciled in the BACKGROUND. Caption/style/
@@ -2120,6 +2141,7 @@ export default function ClipEditorScreen({
           intervals={edit.source_intervals}
           busy={busy}
           onChange={handleSilenceChange}
+          onApplyAll={handleSilenceApplyAll}
         />
       )}
     </>

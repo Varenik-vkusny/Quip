@@ -3022,6 +3022,70 @@ def apply_style_all(
     return {"applied": applied, "total": len(clip_ids)}
 
 
+class SilenceAllBody(BaseModel):
+    """Состояние удаления пауз, которое надо применить КО ВСЕМ клипам джобы. ``None`` (или
+    ``enabled=False``) = выключить паузы на всех. НАМЕРЕННО отдельно от стилевых шаблонов: паузы —
+    свойство ПЕР-ВИДЕО, их НЕ несёт сохранённый look (``CaptionPreset`` не содержит silence)."""
+
+    silence_config: SilenceConfig | None = None
+
+
+@app.post("/jobs/{job_id}/apply-silence-all")
+def apply_silence_all(
+    job_id: str,
+    body: SilenceAllBody,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Применить ОДНУ настройку пауз (``silence_config``) ко ВСЕМ клипам джобы. Всё остальное —
+    стиль субтитров, хук, интервалы, reframe — на каждом клипе СОХРАНЯЕТСЯ; ставится только
+    ``silence_config``. Это близнец ``apply-style-all``, и они ОРТОГОНАЛЬНЫ: style-all не трогает
+    паузы, silence-all не трогает стиль, а сохранённый шаблон не несёт ни того, ни другого.
+    Действует ТОЛЬКО на клипы ЭТОЙ джобы (не на глобальный дефолт юзера). Паузы RENDER-REQUIRED →
+    у затронутых клипов версия бампается и они ре-рендерятся при следующем скачивании.
+
+    Owner-only, тем же СТРОГИМ (fail-CLOSED на owner=None) гейтом, что и apply-style-all: массовая
+    мутация ничьей/legacy-джобы = IDOR. Возвращает, сколько клипов обновлено.
+    """
+    row, user_id = _require_owned_job(job_id, authorization, x_user_id)
+    if not row:  # auth off → гейт pass-through; грузим строку для списка клипов (+ 404 в dev)
+        fetched = db.get_job_row(job_id)
+        if fetched is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        row = fetched
+    if auth.supabase_auth_enabled() and (row.get("user_id") or None) != user_id:
+        raise HTTPException(status_code=403, detail="not your job")
+    job = db.get_job(job_id) or {}
+    clip_ids = [c["id"] for c in (job.get("clips") or []) if c.get("id")]
+    cfg = body.silence_config
+    applied = 0
+    for clip_id in clip_ids:
+        try:
+            edit = store.ensure_edit(job_id, clip_id)  # клип без открытого редактора → дефолт-edit
+        except (FileNotFoundError, KeyError, JobError):
+            continue  # клип без артефакта-сегмента → пропуск (явно, не тихий фолбэк)
+        try:
+            store.save_edit(
+                job_id,
+                clip_id,
+                edit.model_copy(update={"silence_config": cfg}),
+                expected_version=edit.version,
+            )
+        except EditConflict:
+            # Параллельная правка клипа → перечитать один раз и переприменить на свежей версии.
+            fresh = store.load_edit(job_id, clip_id)
+            if fresh is None:
+                continue
+            store.save_edit(
+                job_id,
+                clip_id,
+                fresh.model_copy(update={"silence_config": cfg}),
+                expected_version=fresh.version,
+            )
+        applied += 1
+    return {"applied": applied, "total": len(clip_ids)}
+
+
 class TemplateBody(StylePrefBody):
     """Save a NAMED style template = the look (caption style + highlight + hook style) + a name
     + an optional flag to make it the default that seeds new clips of future videos."""
