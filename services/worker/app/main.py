@@ -2971,6 +2971,29 @@ class StylePrefBody(BaseModel):
     hook_style: dict[str, Any] | None = None
 
 
+def _spawn_captioned_rebake(job_id: str, clip_ids: list[str], source: str) -> None:
+    """Офлоаднуть пере-запекание captioned после RENDER-REQUIRED правки (стиль/хук/паузы).
+
+    ☠️ ЗАЧЕМ (баг ловился ДВАЖДЫ: 2026-07-15 на паузах, 2026-07-16 на шаблоне стиля).
+    ``should_serve_cached_captioned`` (``fast_export.py:140-152``) НАМЕРЕННО не гейтит версию →
+    у клипа с ``render_status='done'`` скачивание отдаёт 302 на СТАРЫЙ baked. А стиль/хук и
+    удаление пауз ПРОЖЖЕНЫ внутрь ``_captioned.mp4`` → без пере-запекания юзер качает файл ДО
+    правок (тихий WYSIWYG-баг: превью новое, скачанное старое — «применил шаблон, скачал старое»).
+    Пере-запекаем ЗАРАНЕЕ на рендер-ферме под глобальным бюджетом (Фаза 1c), НЕ синхронно в веб-тире
+    (там это OOM/шторм).
+
+    ЕДИНАЯ точка для ВСЕХ mass-apply эндпоинтов — новый такой эндпоинт ОБЯЗАН звать её же, иначе
+    наступит на те же грабли третий раз. Best-effort: сбой спавна НЕ валит уже сохранённые правки —
+    логируем (правило №8, не тихо).
+    """
+    if not clip_ids or not dispatch.spawn_enabled():
+        return
+    try:
+        dispatch.spawn("rebake_captioned_job", job_id, json.dumps(clip_ids))
+    except Exception as e:  # noqa: BLE001 — ре-бейк best-effort; правки уже сохранены
+        print(f"[{source}] captioned rebake spawn failed for {job_id}: {e}")
+
+
 @app.post("/jobs/{job_id}/apply-style-all")
 def apply_style_all(
     job_id: str,
@@ -2997,7 +3020,7 @@ def apply_style_all(
         raise HTTPException(status_code=403, detail="not your job")
     job = db.get_job(job_id) or {}
     clip_ids = [c["id"] for c in (job.get("clips") or []) if c.get("id")]
-    applied = 0
+    applied_ids: list[str] = []
     for clip_id in clip_ids:
         # ensure_edit so a not-yet-opened clip also gets the look (lazy default created first).
         try:
@@ -3018,8 +3041,11 @@ def apply_style_all(
                 style_prefs.apply_style_to_edit(fresh, body.style, body.highlight, body.hook_style),
                 expected_version=fresh.version,
             )
-        applied += 1
-    return {"applied": applied, "total": len(clip_ids)}
+        applied_ids.append(clip_id)
+    # Стиль/хук ПРОЖЖЕНЫ в captioned → RENDER-REQUIRED: без пере-запекания скачивание отдаст 302 на
+    # старый baked (юзер получит клипы ДО применения шаблона). См. _spawn_captioned_rebake.
+    _spawn_captioned_rebake(job_id, applied_ids, "apply-style-all")
+    return {"applied": len(applied_ids), "total": len(clip_ids)}
 
 
 class SilenceAllBody(BaseModel):
@@ -3083,17 +3109,9 @@ def apply_silence_all(
                 expected_version=fresh.version,
             )
         applied_ids.append(clip_id)
-    # RENDER-REQUIRED: паузы меняют пиксели, но captioned сам НЕ пере-запекается
-    # (``should_serve_cached_captioned`` не гейтит silence/version) → без ре-бейка скачивание
-    # запечённого клипа отдаст СТАРЫЙ baked БЕЗ пауз, а незапечённого — уйдёт в on-demand шторм
-    # веб-тира (разбор 2026-07-15). Офлоадим пере-запекание captioned затронутых клипов на
-    # рендер-ферму под ГЛОБАЛЬНЫМ бюджетом (Фаза 1c). Сбой спавна НЕ валит уже сохранённые паузы —
-    # логируем (не тихо, правило №8).
-    if applied_ids and dispatch.spawn_enabled():
-        try:
-            dispatch.spawn("rebake_captioned_job", job_id, json.dumps(applied_ids))
-        except Exception as e:  # noqa: BLE001 — ре-бейк best-effort; паузы уже сохранены
-            print(f"[apply-silence-all] rebake spawn failed for {job_id}: {e}")
+    # Паузы ПРОЖЖЕНЫ в captioned → RENDER-REQUIRED (та же причина, что у стиля). См. общую
+    # _spawn_captioned_rebake — ЕДИНАЯ точка офлоада пере-запекания для всех mass-apply.
+    _spawn_captioned_rebake(job_id, applied_ids, "apply-silence-all")
     return {"applied": len(applied_ids), "total": len(clip_ids)}
 
 

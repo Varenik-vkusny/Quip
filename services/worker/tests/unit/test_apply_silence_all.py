@@ -146,6 +146,30 @@ def test_spawns_rebake_of_applied_clips(monkeypatch, tmp_path):
     assert json.loads(a[1]) == ["clip_01", "clip_02"]  # РОВНО затронутые клипы
 
 
+def test_apply_style_all_also_spawns_rebake(monkeypatch, tmp_path):
+    """ТОТ ЖЕ инвариант, что у silence, — общая ``_spawn_captioned_rebake``. Стиль/хук ПРОЖЖЕНЫ в
+    captioned → apply-style-all ОБЯЗАН офлоадить пере-запекание, иначе «применил шаблон ко всем →
+    скачал старые версии» (баг ловился ДВАЖДЫ: паузы 2026-07-15, стиль 2026-07-16)."""
+    client, job = _seed(monkeypatch, tmp_path)
+    from app import dispatch
+
+    spawned: list[tuple] = []
+    monkeypatch.setattr(dispatch, "spawn_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "spawn", lambda kind, *a: (spawned.append((kind, a)), "exec")[1])
+    before = _edit(client, job, "clip_01")
+    styled = {**before["captions"]["style"], "color": "#123456"}
+    r = client.post(
+        f"/jobs/{job}/apply-style-all",
+        json={"style": styled, "highlight": None, "hook_style": None},
+    )
+    assert r.status_code == 200
+    assert len(spawned) == 1
+    kind, a = spawned[0]
+    assert kind == "rebake_captioned_job"
+    assert a[0] == job
+    assert json.loads(a[1]) == ["clip_01", "clip_02"]  # РОВНО затронутые клипы
+
+
 def test_rebake_captioned_job_local_serial(monkeypatch, tmp_path):
     """Координатор ``rebake_captioned_job``: резолвит клипы, ставит render_status='rendering', и БЕЗ
     облачного фанаута пере-запекает каждый последовательно (render_clip_edit_job)."""
