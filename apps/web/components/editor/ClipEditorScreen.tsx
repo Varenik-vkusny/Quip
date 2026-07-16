@@ -1549,12 +1549,17 @@ export default function ClipEditorScreen({
         commitEdit(newEdit);
         setDirty(true);
         setPixelDirty(true); // pause removal changes timing + mp4 pixels → re-render required
-        void loadReframe(); // multi-interval changes the reframe plan → refresh strip + preview
+        // ⚠️ NO loadReframe() here. It used to run on every change and made the editor feel like it
+        // was reloading forever — on a cache miss /reframe dispatches a Cloud Run Job and polls for
+        // minutes. And it was pointless: get_clip_reframe never reads silence_config, and pauses are
+        // subtracted from source_intervals only at RENDER time (tasks.render_edit_to_file) — the
+        // SAVED edit's intervals are untouched, so the plan it returns is byte-identical. The strip
+        // and preview crop cannot change from a pause edit; only the rendered timing does.
       } catch (e) {
         failOr409(e);
       }
     },
-    [edit, jobId, clipId, loadReframe, failOr409, flushPending, commitEdit, recordSnapshot],
+    [edit, jobId, clipId, failOr409, flushPending, commitEdit, recordSnapshot],
   );
 
   // Apply THIS clip's pause setting to EVERY clip of the video (per-video, NOT a style template).
@@ -1568,13 +1573,13 @@ export default function ClipEditorScreen({
         const fresh = await getClipEdit(jobId, clipId); // resync version (server bumped this clip too)
         commitEdit(fresh);
         setPixelDirty(true); // pauses changed → this clip needs a re-render
-        void loadReframe(); // multi-interval plan may shift → refresh strip/preview
+        // No loadReframe: the reframe plan cannot change from a pause edit (see handleSilenceChange).
       } catch {
         // non-fatal: a later edit will 409 → reload; the apply itself succeeded on the server.
       }
       return applied;
     },
-    [jobId, clipId, flushPending, commitEdit, loadReframe],
+    [jobId, clipId, flushPending, commitEdit],
   );
 
   // ── Undo / Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, header buttons) ──

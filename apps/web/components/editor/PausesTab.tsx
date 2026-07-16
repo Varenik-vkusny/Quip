@@ -75,6 +75,16 @@ export function PausesTab({
   const [allBusy, setAllBusy] = useState(false);
   const [allNote, setAllNote] = useState<string | null>(null);
 
+  // ── Slider drafts: drag is LOCAL, commit on release ────────────────────────────────────────
+  // Was: every `onChange` tick of a range input (i.e. every pixel of the drag) fired a full
+  // save — a POST + an undo snapshot + a reframe refetch — hundreds of times per drag, which made
+  // the editor feel like it was reloading forever. Now the drag only moves local state (the
+  // "saves ~Xs" estimate still tracks it live) and we persist ONCE, on release.
+  const [draftMin, setDraftMin] = useState<number | null>(null);
+  const [draftMax, setDraftMax] = useState<number | null>(null);
+  const shownMin = draftMin ?? minMs;
+  const shownMax = draftMax ?? maxMs;
+
   // Apply the current clip's pause state to every clip of this video. On → the full config; off →
   // null (turns pauses off everywhere too, so the button is meaningful in both states).
   const applyAll = async () => {
@@ -82,11 +92,12 @@ export function PausesTab({
     setAllBusy(true);
     setAllNote(null);
     try {
+      // shown* → an un-committed slider draft still goes out with "apply to all" (no lost tweak).
       const payload: SilenceConfig | null = enabled
         ? {
             enabled: true,
-            min_pause_ms: minMs,
-            max_pause_ms: maxMs,
+            min_pause_ms: shownMin,
+            max_pause_ms: shownMax,
             lead_in_ms: leadIn,
             lead_out_ms: leadOut,
             lead_out_boundary_ms: leadOutBnd,
@@ -101,29 +112,45 @@ export function PausesTab({
     }
   };
 
+  // Tracks the DRAFT while dragging → the estimate stays live even though nothing is saved yet.
   const saved = useMemo(
-    () => (enabled ? estimateSaved(words, intervals, minMs, maxMs, leadIn + leadOut) : 0),
-    [enabled, minMs, maxMs, leadIn, leadOut, words, intervals],
+    () => (enabled ? estimateSaved(words, intervals, shownMin, shownMax, leadIn + leadOut) : 0),
+    [enabled, shownMin, shownMax, leadIn, leadOut, words, intervals],
   );
 
   // Always emit a full config (all fields present) so a toggle/slider never drops sibling fields.
   const emit = (partial: Partial<SilenceConfig>) =>
     onChange({
       enabled,
-      min_pause_ms: minMs,
-      max_pause_ms: maxMs,
+      min_pause_ms: shownMin,
+      max_pause_ms: shownMax,
       lead_in_ms: leadIn,
       lead_out_ms: leadOut,
       lead_out_boundary_ms: leadOutBnd,
       ...partial,
     });
 
+  // Release (mouse/touch/keyboard) → persist ONCE. Nothing hits the network mid-drag.
+  const commitMin = () => {
+    if (draftMin === null) return;
+    const v = draftMin;
+    setDraftMin(null);
+    emit({ min_pause_ms: v });
+  };
+  const commitMax = () => {
+    if (draftMax === null) return;
+    const v = draftMax;
+    setDraftMax(null);
+    emit({ max_pause_ms: v });
+  };
+
   return (
     <div className="space-y-5 p-4">
       <div>
         <p className="text-sm font-medium text-ink">Remove pauses</p>
         <p className="mt-0.5 text-xs text-muted">
-          Cut silent gaps between words for a tighter, denser clip. Re-render to apply.
+          Cut silent gaps between words for a tighter, denser clip. The preview can’t skip pauses —
+          press <span className="font-medium text-ink">Render</span> to see the result.
         </p>
       </div>
 
@@ -158,16 +185,21 @@ export function PausesTab({
         <div className="space-y-2">
           <div className="flex justify-between text-xs text-muted">
             <span>Natural</span>
-            <span className="font-medium text-ink">cut pauses &gt; {minMs}ms</span>
+            <span className="font-medium text-ink">cut pauses &gt; {shownMin}ms</span>
             <span>Tight</span>
           </div>
+          {/* Drag = local only; we persist on release (see commitMin). */}
           <input
             type="range"
             min={0}
             max={100}
-            value={msToSlider(minMs)}
+            value={msToSlider(shownMin)}
             disabled={busy}
-            onChange={(e) => emit({ min_pause_ms: sliderToMs(Number(e.target.value)) })}
+            onChange={(e) => setDraftMin(sliderToMs(Number(e.target.value)))}
+            onPointerUp={commitMin}
+            onTouchEnd={commitMin}
+            onKeyUp={commitMin}
+            onBlur={commitMin}
             aria-label="Pause tightness"
             className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-line accent-accent disabled:opacity-50"
           />
@@ -194,16 +226,20 @@ export function PausesTab({
               <label className="block space-y-1">
                 <div className="flex justify-between text-xs">
                   <span className="text-muted">Keep dramatic pauses longer than</span>
-                  <span className="font-mono text-ink">{maxMs}ms</span>
+                  <span className="font-mono text-ink">{shownMax}ms</span>
                 </div>
                 <input
                   type="range"
                   min={800}
                   max={5000}
                   step={100}
-                  value={maxMs}
+                  value={shownMax}
                   disabled={busy}
-                  onChange={(e) => emit({ max_pause_ms: Number(e.target.value) })}
+                  onChange={(e) => setDraftMax(Number(e.target.value))}
+                  onPointerUp={commitMax}
+                  onTouchEnd={commitMax}
+                  onKeyUp={commitMax}
+                  onBlur={commitMax}
                   aria-label="Max pause to cut"
                   className="h-1 w-full cursor-pointer appearance-none rounded-full bg-line accent-accent disabled:opacity-50"
                 />
