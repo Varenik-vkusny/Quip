@@ -2032,12 +2032,21 @@ def patch_clip_edit(
     authorization: str | None = Header(default=None),
     x_user_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Прямая правка субтитров (стиль/текст/highlight). Интервалы не трогает. Owner-only (IDOR)."""
+    """Прямая правка субтитров (стиль/текст/highlight). Интервалы не трогает. Owner-only (IDOR).
+
+    ЭТО САМЫЙ ЧАСТЫЙ вход правки стиля/хука в редакторе (дебаунс ~300мс на фронте — один PATCH на
+    пачку правок, не на нажатие клавиши). Стиль/хук ПРОЖЖЕНЫ в ``<clip>_captioned.mp4`` → тот же
+    класс бага, что у apply-style-all/apply-silence-all (см. ``_spawn_captioned_rebake``): без
+    офлоада пере-запекания скачивание «С субтитрами» отдаёт 302 на СТАРЫЙ baked (превью новое,
+    файл старый). Офлоадим ЗДЕСЬ же — единственная точка для этого клипа.
+    """
     _require_owned_job(job_id, authorization, x_user_id)
     edit = _load_or_404(job_id, clip_id)
-    return _save_or_409(
+    result = _save_or_409(
         job_id, clip_id, edit.model_copy(update={"captions": body.captions}), body.version
     )
+    _spawn_captioned_rebake(job_id, [clip_id], "patch_clip_edit")
+    return result
 
 
 @app.post("/jobs/{job_id}/clips/{clip_id}/edit/trim")
@@ -2373,7 +2382,10 @@ def op_regenerate_hook(
         # нет слов (400) / Gemini недоступен (502) — явная причина, не тихий фолбэк (правило №8).
         code = 400 if "no words" in str(e) else 502
         raise HTTPException(status_code=code, detail=f"hook regeneration failed: {e}") from e
-    return _save_or_409(job_id, clip_id, new_edit, body.version)
+    result = _save_or_409(job_id, clip_id, new_edit, body.version)
+    # hook.text ПРОЖЖЁН в captioned — тот же RENDER-REQUIRED класс. См. _spawn_captioned_rebake.
+    _spawn_captioned_rebake(job_id, [clip_id], "op_regenerate_hook")
+    return result
 
 
 # ─────────────────────────── W3: агентный чат-редактор клипа ───────────────────────────
@@ -2957,7 +2969,11 @@ def apply_preset_to_clip(
     if preset is None:
         raise HTTPException(status_code=404, detail="preset not found")
     edit = _load_or_404(job_id, clip_id)
-    return _save_or_409(job_id, clip_id, presets_mod.apply_preset(edit, preset), body.version)
+    result = _save_or_409(job_id, clip_id, presets_mod.apply_preset(edit, preset), body.version)
+    # Пресет пишет style+highlight — ПРОЖЖЕНЫ в captioned, тот же RENDER-REQUIRED класс, что и
+    # patch_clip_edit/apply-style-all. См. _spawn_captioned_rebake.
+    _spawn_captioned_rebake(job_id, [clip_id], "apply_preset_to_clip")
+    return result
 
 
 # ──────────────────────── Style memory (domain 5) ────────────────────────

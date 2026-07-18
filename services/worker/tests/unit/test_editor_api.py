@@ -54,6 +54,32 @@ def test_trim_makes_hole_and_optimistic_lock(monkeypatch, tmp_path):
     assert stale.status_code == 409  # stale version
 
 
+def test_patch_clip_edit_spawns_captioned_rebake(monkeypatch, tmp_path):
+    """PATCH /edit — прямая правка стиля субтитров/хука в редакторе (дебаунс ~300мс на фронте,
+    один PATCH на пачку правок). Стиль/хук ПРОЖЖЕНЫ в captioned → тот же RENDER-REQUIRED класс,
+    что apply-style-all/apply-silence-all (2026-07-15/16): без офлоада пере-запекания скачивание
+    «С субтитрами» после правки в редакторе отдаёт 302 на СТАРЫЙ baked (превью новое, файл старый —
+    ровно баг, который поймал фаундер на одиночной правке стиля)."""
+    client, job = _client(monkeypatch, tmp_path)
+    from app import dispatch
+
+    spawned: list[tuple] = []
+    monkeypatch.setattr(dispatch, "spawn_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "spawn", lambda kind, *a: (spawned.append((kind, a)), "exec")[1])
+    edit = client.get(f"/jobs/{job}/clips/clip_01/edit").json()
+    captions = {**edit["captions"], "style": {**edit["captions"]["style"], "color": "#ABCDEF"}}
+    r = client.patch(
+        f"/jobs/{job}/clips/clip_01/edit", json={"version": edit["version"], "captions": captions}
+    )
+    assert r.status_code == 200
+    assert r.json()["captions"]["style"]["color"] == "#ABCDEF"
+    assert len(spawned) == 1
+    kind, a = spawned[0]
+    assert kind == "rebake_captioned_job"
+    assert a[0] == job
+    assert json.loads(a[1]) == ["clip_01"]
+
+
 def test_regenerate_hook_updates_text_and_bumps_version(monkeypatch, tmp_path):
     # W4: ручка зовёт Gemini-реген (мокаем где он СВЯЗАН — hook_ops) и обновляет hook.text + версию.
     from app.editor import hook_ops
@@ -72,6 +98,28 @@ def test_regenerate_hook_updates_text_and_bumps_version(monkeypatch, tmp_path):
     # optimistic-lock: повтор со старой версией → 409
     stale = client.post(f"/jobs/{job}/clips/clip_01/hook/regenerate", json={"version": v})
     assert stale.status_code == 409
+
+
+def test_regenerate_hook_spawns_captioned_rebake(monkeypatch, tmp_path):
+    """hook.text ПРОЖЖЁН в captioned → без офлоада пере-запекания скачивание «С субтитрами»
+    отдаёт 302 на СТАРЫЙ baked (хук ДО реген). Тот же класс, что apply-style-all/silence-all."""
+    from app.editor import hook_ops
+
+    monkeypatch.setattr(hook_ops, "regenerate_hook", lambda *a, **k: ("Новый хук", "shock"))
+    client, job = _client(monkeypatch, tmp_path)
+    from app import dispatch
+
+    spawned: list[tuple] = []
+    monkeypatch.setattr(dispatch, "spawn_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "spawn", lambda kind, *a: (spawned.append((kind, a)), "exec")[1])
+    v = client.get(f"/jobs/{job}/clips/clip_01/edit").json()["version"]
+    r = client.post(f"/jobs/{job}/clips/clip_01/hook/regenerate", json={"version": v})
+    assert r.status_code == 200
+    assert len(spawned) == 1
+    kind, a = spawned[0]
+    assert kind == "rebake_captioned_job"
+    assert a[0] == job
+    assert json.loads(a[1]) == ["clip_01"]
 
 
 def test_get_edit_404_for_missing_clip(monkeypatch, tmp_path):
@@ -149,6 +197,36 @@ def test_preset_save_and_apply(monkeypatch, tmp_path):
     )
     assert r.status_code == 200
     assert r.json()["captions"]["style"]["color"] == "#00FF00"
+
+
+def test_apply_preset_spawns_captioned_rebake(monkeypatch, tmp_path):
+    """Пресет пишет style+highlight — ПРОЖЖЕНЫ в captioned. Тот же класс, что
+    apply-style-all/apply-silence-all/patch_clip_edit: без офлоада пере-запекания скачивание
+    «С субтитрами» отдаёт 302 на СТАРЫЙ (до-пресетный) baked."""
+    from app.editor import presets
+    from app.editor.presets import save_preset
+    from app.models import CaptionPreset, CaptionStyle
+
+    monkeypatch.setattr(presets, "DATA_ROOT", tmp_path / "data")
+    client, job = _client(monkeypatch, tmp_path)
+    from app import dispatch
+
+    spawned: list[tuple] = []
+    monkeypatch.setattr(dispatch, "spawn_enabled", lambda: True)
+    monkeypatch.setattr(dispatch, "spawn", lambda kind, *a: (spawned.append((kind, a)), "exec")[1])
+    pid = save_preset(
+        CaptionPreset(id="preset_bold", name="Bold", style=CaptionStyle(color="#00FF00"))
+    ).id
+    v = client.get(f"/jobs/{job}/clips/clip_01/edit").json()["version"]
+    r = client.post(
+        f"/jobs/{job}/clips/clip_01/apply-preset", json={"version": v, "preset_id": pid}
+    )
+    assert r.status_code == 200
+    assert len(spawned) == 1
+    kind, a = spawned[0]
+    assert kind == "rebake_captioned_job"
+    assert a[0] == job
+    assert json.loads(a[1]) == ["clip_01"]
 
 
 def test_get_ass_returns_valid_ass(monkeypatch, tmp_path):
