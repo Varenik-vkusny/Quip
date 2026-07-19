@@ -223,6 +223,7 @@ export interface LandingContent {
     tagline: string;
     cols: { title: string; links: { label: string; href: string }[] }[];
     support: string;
+    bookCall: string;
     stripe: string;
     honesty: string;
   };
@@ -613,6 +614,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
       ],
       support: "Support and refunds: ceo@quip.ink",
+      bookCall: "Book a 30-min call",
       stripe: "© Quip. All rights reserved.",
       honesty: "Honest pricing. No credit casino. No surprise paywalls.",
     },
@@ -995,6 +997,7 @@ const STRINGS: Record<Locale, LandingStrings> = {
         },
       ],
       support: "Поддержка и возвраты: ceo@quip.ink",
+      bookCall: "Записаться на 30-минутный звонок",
       stripe: "© Quip. Все права защищены.",
       honesty: "Честные цены. Без токенов-казино. Без скрытых пейволлов.",
     },

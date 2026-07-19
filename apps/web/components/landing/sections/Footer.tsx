@@ -14,12 +14,19 @@ export async function Footer() {
           <div className="max-w-[30ch]">
             <Logo />
             <p className="mt-5 text-[14px] leading-relaxed text-muted">{footer.tagline}</p>
-            <a
-              href="mailto:ceo@quip.ink"
-              className="mt-6 inline-block text-[13.5px] text-faint transition-colors hover:text-muted"
-            >
-              {footer.support}
-            </a>
+            <div className="mt-6 flex flex-col gap-1.5 text-[13.5px] text-faint">
+              <a href="mailto:ceo@quip.ink" className="inline-block w-fit transition-colors hover:text-muted">
+                {footer.support}
+              </a>
+              <a
+                href="https://calendly.com/akybaevtimur7/30min"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block w-fit transition-colors hover:text-muted"
+              >
+                {footer.bookCall}
+              </a>
+            </div>
             <div className="mt-6">
               <LocaleSwitcher />
             </div>
